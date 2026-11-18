@@ -1,0 +1,26 @@
+Follow-up verification. Thank you — all five points (N1..N5) were correct and are now fixed in the working tree
+(commit dc14515). Please re-check by reading the code; do not modify files and do not write new programs. If your
+sandbox lets you run the existing suite, do so and say what happened; otherwise say that you could not.
+
+ N1 internal/repo/repo.go Open(): a directory name that the redactor would mask (raw or sanitised form) is replaced
+    by "repository" before Name/ID are derived → internal/tools/tools_test.go TestRepositoryNameIsNotASecretChannel.
+ N2 internal/repo/policy.go classLiteral(): inside a bracket expression, an escaped byte and the bytes \ ] [ ^ - are
+    written as class literals, so `[!a\-z]` means "not a, not -, not z" → TestGlobSemantics (three new rows).
+ N3 internal/repo/read.go readLongLine(): the 96-byte overlap is kept from the first chunk on, and keyEdge runs on
+    carry+chunk whenever the line is being cut → TestKeyMarkerAcrossTheLineCut (eight offsets around the boundary).
+ N4 internal/mcp/server.go enqueue()/writeValue()/writeAsync(): the reader loop waits at most QueueWait (5 s) for
+    queue room, then records "the client stopped reading responses" and ends the session; worker goroutines may
+    wait for the session's lifetime → TestSaturatedOutputQueueEndsTheSession.
+ N5 internal/repo/gitlog.go Log(): with masking on, the author filter is applied in-process to the masked
+    "name <email>" text and paging counts matched commits; author names are masked in the output
+    → TestLogAuthorFilterIsNotAnOracleForMaskedText.
+ Also changed: the first-run wizard no longer asks a visible "open the browser?" question before the hidden
+ credential prompt (internal/cli/setup.go); test/onboarding_pty.py asserts nothing is asked visibly before it.
+
+My evidence: `go vet ./...` clean; `go test -race -count=1 ./...` passes locally including the contract suite
+against the real tunnel-client v0.0.21; the first-run pty test passes 14/14; the previous CI run passed every Go
+test on both Linux and macOS (only the pty test failed on macOS, for the reason above).
+
+Answer per id N1..N5: verified / not_verified with file:line evidence and any remaining gap. List any further
+defect (id P1.., severity, evidence, plain description, fix). Set consensus_reached=true only if no critical or
+major defect remains open; minor remarks do not block consensus.

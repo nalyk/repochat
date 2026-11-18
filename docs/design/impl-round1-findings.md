@@ -39,3 +39,7 @@ Limită declarată (punctul 9): un filtru adăugat în `.git/config` chiar în t
 ## Ce a găsit CI-ul pe macOS
 
 Prima rulare pe macOS a trecut toate testele Go, dar a picat testul de primă pornire: pe un desktop, asistentul întreba vizibil „Open the tunnels page in your browser?” înaintea câmpului ascuns, iar ce se tasta acolo apărea pe ecran. Întrebarea a fost eliminată; testul verifică acum că nimic nu este întrebat la vedere înaintea câmpului ascuns.
+
+## Runda 3
+
+Codex a rulat de data aceasta suita (`go vet`, `go test -race`, inclusiv testele cu `tunnel-client` real) și a confirmat toate cele cinci reparații. A mai găsit o problemă (P1): un apel terminat își elibera locul în limita de admitere înainte ca răspunsul să intre în coada de ieșire, deci un client care nu citește putea acumula răspunsuri fără limită. Locul se eliberează acum abia după ce răspunsul a fost pus în coadă (`impl-round3-codex.json`).

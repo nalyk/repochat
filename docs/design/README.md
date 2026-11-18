@@ -9,7 +9,7 @@ RepoChat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (aut
 | `round2-prompt.txt`, `round2-codex.json` | runda 2: concesii C1–C16, dezacorduri X1–X8, cerința de onboarding (D17); 5 probleme noi (M8–M12) |
 | `round3-prompt.txt`, `round3-codex.json` | runda 3: textul final al contractului; consens de design |
 | `impl-round1-prompt.txt`, `impl-round1-findings.md` | revizia implementării: 13 probleme reproduse de Codex, toate reparate |
-| `impl-round2-*` | verificarea reparațiilor |
+| `impl-round2-*`, `impl-round3-*` | verificarea reparațiilor |
 
 ## Ce a schimbat dezbaterea
 

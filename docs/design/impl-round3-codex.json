@@ -1,0 +1,46 @@
+{
+    "fixes": [
+        {
+            "id": "N1",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:192-199 checks both raw and sanitized directory names, substitutes \"repository\" when masking matches, then derives ID. TestRepositoryNameIsNotASecretChannel at internal/tools/tools_test.go:374 passed.",
+            "gap": ""
+        },
+        {
+            "id": "N2",
+            "status": "verified",
+            "evidence": "internal/repo/policy.go:130-135 escapes character-class metacharacters, including hyphens; lines 173-177 use classLiteral. The three regression rows at internal/repo/policy_test.go:70-72 passed.",
+            "gap": ""
+        },
+        {
+            "id": "N3",
+            "status": "verified",
+            "evidence": "internal/repo/read.go:274-280 constructs carry+chunk and retains overlap from the first chunk onward. TestKeyMarkerAcrossTheLineCut at internal/repo/review_test.go:268 passed all eight offsets.",
+            "gap": ""
+        },
+        {
+            "id": "N4",
+            "status": "verified",
+            "evidence": "internal/mcp/server.go:186-187 defaults QueueWait to five seconds. Lines 722-726 distinguish reader and worker enqueue behavior; lines 735-755 enforce the reader deadline, record failure and cancel the session. TestSaturatedOutputQueueEndsTheSession at internal/mcp/server_test.go:577 passed.",
+            "gap": "The reader-blocking defect is fixed. Separate unbounded accumulation of asynchronous responses remains; see P1."
+        },
+        {
+            "id": "N5",
+            "status": "verified",
+            "evidence": "internal/repo/gitlog.go:118-129 avoids raw Git author filtering when masking is enabled; lines 207-211 filter masked name/email text; lines 228-239 paginate matched commits; lines 254-256 mask displayed authors. TestLogAuthorFilterIsNotAnOracleForMaskedText at internal/repo/review_test.go:288 passed.",
+            "gap": ""
+        }
+    ],
+    "new_defects": [
+        {
+            "id": "P1",
+            "severity": "major",
+            "evidence": "internal/mcp/server.go:618-624 limits admission using inflight; lines 627-634 release that admission before handleLine calls writeAsync at lines 375-376. writeAsync has no queue deadline at line 726.",
+            "description": "A stalled client can keep submitting successful tools/call requests. Completed calls leave inflight before waiting for output-queue room, so blocked response workers no longer count toward MaxPending or MaxPendingBytes. An asynchronous-only request stream never invokes the reader's queue deadline and can accumulate unbounded goroutines and response buffers, eventually exhausting memory. This finding is from source inspection; no new probe was written.",
+            "fix": "Keep each call's admission reservation until its response is enqueued or abandoned. Once pending output exhausts admission capacity, reject further calls through the bounded reader response path, or apply an equivalent bounded output budget and saturation timeout."
+        }
+    ],
+    "tests_run": "On commit dc14515: GOCACHE=/tmp/repochat-verify-cache go vet ./... passed. GOCACHE=/tmp/repochat-verify-cache go test -race -count=1 ./... passed all four tested packages. The existing RealTunnelClient tests also passed with -race -count=1, REPOCHAT_REQUIRE_TUNNEL_CLIENT=1 and the locally installed real v0.0.21 binary. The existing onboarding_pty.py passed 14/14 checks using binaries compiled into /tmp. No checks failed. The wizard change is confirmed at internal/cli/setup.go:78-88 and its assertion at test/onboarding_pty.py:75-79. Validation was on Linux; macOS was not rerun. No repository files were modified or new probe programs written.",
+    "consensus_reached": false,
+    "summary": "All five requested fixes are verified, and all executed checks passed. One further major output-resource defect remains open: asynchronous responses can accumulate beyond the server's admission limits."
+}

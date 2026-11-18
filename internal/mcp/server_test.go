@@ -601,6 +601,44 @@ func TestSaturatedOutputQueueEndsTheSession(t *testing.T) {
 	inW.Close()
 }
 
+// Results waiting for a client that is not reading keep their admission
+// slot, so a stalled client cannot pile up unbounded finished calls.
+func TestFinishedCallsWaitingForOutputStayAdmitted(t *testing.T) {
+	s := testServer()
+	s.MaxPending = 4
+	s.QueueWait = 200 * time.Millisecond
+	s.Tools = append(s.Tools, Tool{Name: "big", Description: "big output",
+		Handler: func(context.Context, Args) (Result, error) { return Result{Text: strings.Repeat("x", 256<<10)}, nil }})
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe() // never read
+	defer outR.Close()
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), inR, outW) }()
+	go func() {
+		io.WriteString(inW, legacyInit+"\n")
+		for i := 0; i < 2000; i++ {
+			if _, err := io.WriteString(inW, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"big"}}`+"\n", i+10)); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "stopped reading") {
+			t.Fatalf("expected an output-overload end, got %v", err)
+		}
+	case <-time.After(15 * time.Second):
+		t.Fatal("the server neither bounded nor ended a session whose client stopped reading")
+	}
+	s.mu.Lock()
+	admitted := len(s.inflight)
+	s.mu.Unlock()
+	if admitted > 4 {
+		t.Errorf("admission limit exceeded: %d calls held", admitted)
+	}
+	inW.Close()
+}
+
 func TestCallTimeout(t *testing.T) {
 	s := testServer()
 	s.CallTimeout = 80 * time.Millisecond

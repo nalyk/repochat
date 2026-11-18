@@ -158,6 +158,10 @@ var nullID = json.RawMessage("null")
 type outcome struct {
 	resp  *response
 	async func() *response
+	// release returns the call's admission reservation. It runs only after
+	// the response has been queued (or dropped), so results waiting for a
+	// client that is not reading still count against the admission limits.
+	release func()
 }
 
 func (s *Server) init(w io.Writer) {
@@ -375,6 +379,7 @@ func (s *Server) handleLine(ctx context.Context, raw []byte) {
 			if r := o.async(); r != nil {
 				s.writeAsync(r)
 			}
+			o.release()
 		}()
 	}
 }
@@ -407,6 +412,7 @@ func (s *Server) handleBatch(ctx context.Context, raw []byte) {
 			if r := o.async(); r != nil {
 				out = append(out, r)
 			}
+			o.release()
 		}
 	}
 	if len(out) > 0 {
@@ -624,14 +630,14 @@ func (s *Server) toolsCall(ctx context.Context, req request, params map[string]j
 	s.held += size
 	s.mu.Unlock()
 
-	return outcome{async: func() *response {
-		defer func() {
-			cancel()
-			s.mu.Lock()
-			delete(s.inflight, key)
-			s.held -= size
-			s.mu.Unlock()
-		}()
+	release := func() {
+		cancel()
+		s.mu.Lock()
+		delete(s.inflight, key)
+		s.held -= size
+		s.mu.Unlock()
+	}
+	return outcome{release: release, async: func() *response {
 		ev := Event{Kind: "call", Client: client, Protocol: protocol, Tool: name, Args: rawArgs}
 		start := time.Now()
 		text, isErr := s.runTool(callCtx, tool, rawArgs, &ev)
