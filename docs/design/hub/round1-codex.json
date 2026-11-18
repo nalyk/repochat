@@ -1,0 +1,256 @@
+{
+    "verdicts": [
+        {
+            "id": "P1",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "A router that never opens repositories preserves the architectural boundary. However, it sees capability codes and repository responses, so it remains trusted for confidentiality and response routing. Backend code verification protects against accidental misrouting; it does not make a compromised router harmless. Running under the same OS user also gives no filesystem sandbox.",
+            "proposed_change": "Specify 'no repository operations or exposure-policy evaluation.' Reuse one static catalogue, allowlist forwarded tools, authenticate every backend request, and preserve errors, cancellation, deadlines and response correlation. Describe the router as part of the trusted computing base."
+        },
+        {
+            "id": "P2",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "Keeping one immutable repository root and exposure configuration per serving process is the right foundation. The existing Repo abstraction supports concurrent operations. Unix sockets add a new admission boundary that the existing repository tests do not cover.",
+            "proposed_change": "Verify authorization before dispatch, then invoke the existing handlers. Enforce concurrency limits across the whole repository process, rather than separately for every accepted connection. Reject conflicting simultaneous attachments for the same worktree."
+        },
+        {
+            "id": "P3",
+            "verdict": "modify",
+            "severity": "critical",
+            "rationale": "Bearer capabilities solve authorization by possession, not authorization by user-provided conversation context. Codes can arrive through repository text, shared instructions or copied conversations. A chat with two valid codes can still select the wrong repository. Thirty bits is also an unnecessarily small space for persistent credentials.",
+            "proposed_change": "Use at least 128 random bits, scoped to a worktree and exposure profile, with explicit revocation. State the guarantee as 'each request requires a valid capability.' Remove the claims that this proves user intent or fully solves L2. Keep capabilities mandatory on every call, including overview calls."
+        },
+        {
+            "id": "P4",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "An automatic hub fits equal terminal attachments better than making the first terminal special. Its lifecycle becomes security-relevant: orphaned children, stale attachment records and restart races must never extend sharing or create overlapping tunnel clients.",
+            "proposed_change": "Define attachment leases, startup readiness, exclusive tunnel ownership, generation-specific runtime state, intentional-stop behavior and bounded recovery. Store restart-sensitive controls outside the disposable router. Never restore repository exposure from persisted attachment records alone."
+        },
+        {
+            "id": "P5",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "Separate plugins and tunnels remain useful audience boundaries. Capability possession within one plugin does not replace independent access administration or protect against a shared model context containing several credentials.",
+            "proposed_change": "Keep profiles, enforce their ChatGPT audience settings, and mint distinct capabilities for distinct profiles. Describe this as audience separation, not isolation against compromised processes running as the same local user."
+        },
+        {
+            "id": "A1",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Optional approval can provide explicit consent and expiring grants. Without verified conversation identity, the returned code is still transferable. A terminal prompt also needs protection against approval spam and confusion between concurrent chats.",
+            "proposed_change": "Leave it out of the first release. If added, use a short-lived pending request with a comparison phrase, repository and requested scope; deny by default. Return promptly and use bounded polling instead of holding a tool call indefinitely. Do not describe the grant as conversation-scoped without an enforced binding."
+        },
+        {
+            "id": "A2",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "OpenAI documents openai/session, so this deserves investigation. Documentation does not establish its presence, stability or unspoofable provenance on this specific tunnel connection. First-code binding reduces accidental switching but cannot validate the first repository or infer intent when several repositories are authorized.",
+            "proposed_change": "Preserve relevant request metadata in v1 and test it through the real connection. Offer binding only after those checks, as an additional guard with capabilities still required. Persist bindings across router restarts and fail closed on missing identity when binding is enabled. Make any multi-repository allowlist an explicit separate choice."
+        },
+        {
+            "id": "A3",
+            "verdict": "disagree",
+            "severity": "none",
+            "rationale": "Do not implement repository-prefixed tools; the owner's rejection is correct. They create changing discovery metadata and make repository availability depend on tool refresh.",
+            "proposed_change": "Keep repository-independent names and schemas, with a required capability argument."
+        },
+        {
+            "id": "A4",
+            "verdict": "disagree",
+            "severity": "major",
+            "rationale": "A process-global active repository introduces cross-conversation interference. Stateless protocol requests do not establish a conversation boundary.",
+            "proposed_change": "Require explicit repository authorization on every request. Consider scoped defaults only behind independently verified conversation binding."
+        },
+        {
+            "id": "A5",
+            "verdict": "disagree",
+            "severity": "major",
+            "rationale": "Single-repository open mode restores both ambient access and the stale-chat problem. Its meaning also changes when a second repository attaches.",
+            "proposed_change": "Require the capability even when exactly one repository is attached. Never fall back to that repository after missing or invalid authorization."
+        },
+        {
+            "id": "R1",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "An explicitly heuristic context pack is worth testing. It can combine discovery and relevant excerpts into one response, reducing dependent model/tool round trips. Lexical retrieval can also miss paraphrases or crowd out decisive evidence, so savings remain a hypothesis.",
+            "proposed_change": "Build a benchmarked prototype using existing search and outline facilities. Return cited excerpts, selection reasons, coverage limits and continuation guidance. Retain the existing search/read tools."
+        },
+        {
+            "id": "R2",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "A compact repository map is useful and can reuse outline extraction. It is not necessarily cheap across a large repository: the current outline implementation reads and parses individual files, and its rendered output is not a reusable symbol database.",
+            "proposed_change": "Extract reusable definition records, bound scanning and output, provide deterministic ranking with file diversity, and report incomplete coverage. Avoid making a persistent index a prerequisite."
+        },
+        {
+            "id": "R3",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Budgets and measurements should come early. Exact token budgets are not available from byte counts, and today's log measures returned text rather than the complete serialized transport envelope. Lower defaults can also increase pagination calls.",
+            "proposed_change": "Make max_bytes the enforceable limit; label any max_tokens conversion as an estimate. Cap the final encoded response, including metadata. Trial a 16\u201332 KiB default against the benchmark. Scope context_stats to the authorized repository and clearly identify whether statistics are per call, attachment or aggregate."
+        },
+        {
+            "id": "R4",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "The owner's implementation direction is mostly sound, but go/parser provides syntactic declarations, not resolved program semantics. Git blob IDs alone miss modified and untracked files. Names and positions remain sensitive, and indexing raw names before masking can create query or ranking oracles.",
+            "proposed_change": "Start with an in-memory index. Persist only after measuring startup cost. Key entries by actual safely read content plus repository, language, parser and policy/masking versions. Index the disclosed projection, reauthorize results, and invalidate stale entries. Keep language servers and additional parser dependencies out unless a concrete measured benefit justifies reconsideration."
+        },
+        {
+            "id": "R5",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "find_symbol and symbol_context are useful. Identifier occurrences are not proven references, and call-like syntax does not establish a call graph. Generic word boundaries also mishandle identifiers containing Unicode, dollar signs and language-specific qualification.",
+            "proposed_change": "Use language-aware identifier boundaries where feasible, retain path/package/receiver information, and label occurrence classifications explicitly. Defer a separate impact_analysis tool until composition demonstrates value beyond existing tools."
+        },
+        {
+            "id": "R6",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "A change-oriented evidence bundle is a strong application of existing diff, outline and search capabilities. Convention-based test candidates are useful if their limitations are explicit.",
+            "proposed_change": "Handle both diff sides, deletions and renames; identify which revision each occurrence belongs to. Apply exposure and history policy to every side. Describe tests as candidates, never as proven coverage, and execute none."
+        },
+        {
+            "id": "R7",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Multi-repository access belongs early, but Part A does not establish isolation stronger than every trust-zone rule. Capabilities reduce ambient access while remaining transferable and visible to the model. Two codes also reintroduce wrong-authorized-repository selection.",
+            "proposed_change": "Ship capability-based repository authorization with accurately bounded claims. Keep profiles for audience separation. Cross-repository comparison should require explicit capabilities and preserve repository identity on every excerpt."
+        },
+        {
+            "id": "R8",
+            "verdict": "disagree",
+            "severity": "none",
+            "rationale": "Do not build a separate Agent Context Bridge; the owner's rejection is correct. In-repository files are already available under policy. Automatic access to agent transcripts outside the repository would expand the boundary and expose unrelated material.",
+            "proposed_change": "Document ordinary reading of permitted AGENTS.md, CLAUDE.md and user-exported summaries. Treat their contents as repository data, not privileged server instructions."
+        },
+        {
+            "id": "R9",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "A later import/manifest map is feasible, but syntactically exact Go imports are not an exact dependency or runtime architecture graph. Build tags, generated code, replacements, reflection and dependency injection limit the interpretation.",
+            "proposed_change": "Expose an evidence-labelled import/manifest graph first. Separate observed edges from inferred components and entry points. Do not invoke go list, package managers or repository tooling."
+        },
+        {
+            "id": "R10",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The owner's measurable quantities are appropriate. Duplicate returned bytes are not necessarily wasted context: different chats may need the same content, and repeated reads may verify changes.",
+            "proposed_change": "Report transport bytes, calls, latency, repeated disclosed spans and benchmark evidence recall. Define the observation scope. Do not translate these automatically into billed-token savings, answer quality or user time saved."
+        },
+        {
+            "id": "R11",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The proposed positioning is premature; the owner's caution is correct. 'More code understood' is an answer-quality claim that a retrieval-only benchmark cannot establish. The assertion that today's product solves only connectivity also overlooks policy-aware search, outlines and Git history.",
+            "proposed_change": "Keep the read-only local repository positioning. After measurement, make narrow claims such as fewer retrieval calls or fewer transmitted bytes at comparable evidence recall."
+        },
+        {
+            "id": "R12",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "The owner's multi-repository-first order addresses demonstrated friction. Measurement should precede context-engine claims, and persistence should follow measured indexing cost rather than become an early dependency.",
+            "proposed_change": "Order work as: capability/router/hub release; measurement and benchmark; repo_map plus heuristic get_context; symbol navigation and analyze_changes; persistent indexing when justified; architecture mapping later. Drop the bridge."
+        }
+    ],
+    "answers": [
+        {
+            "id": "Q1",
+            "answer": "P1\u2013P4 do not solve all three losses as stated. They can preserve L3 and replace ambient access with capability authorization, but they cannot prove conversation intent.\n\nCounterexamples: repository A contains a copied prompt or document revealing B's code; a chat obtains B's code through shared Project instructions or other retained context; a leaked stable code is replayed elsewhere; a 30-bit code is guessed. None requires the user to paste B's code directly into that conversation. More fundamentally, a conversation legitimately holding A and B can ask about A while the model calls B. Both authorization checks pass.\n\nThe enforceable property is: every read requires a currently valid capability for that repository and exposure profile. The server cannot establish 'the USER supplied this code' from a model-controlled argument.\n\nThe router adds confidentiality, response-correlation and lifecycle obligations. It sees credentials and plaintext responses. A compromised router can replay codes it has observed or return B's authorized response to A's request. Backend verification prevents forwarding code A to backend B; it cannot prevent those attacks. Preserve the current one-repository implementation, but add end-to-end isolation tests around the new IPC boundary."
+        },
+        {
+            "id": "Q2",
+            "answer": "Use at least 128 bits from crypto/rand: 26 unpadded base32 characters can represent 128 bits. The repository-name prefix contributes no security. Generate capabilities with a dedicated fail-closed function; the existing newID helper falls back to a timestamp on randomness failure and must not be reused for authorization. See [newID](/home/ubuntu/gits/repochat/internal/cli/session.go:127).\n\nAt a sustained 10 guesses/minute, one continuously available 30-bit target has roughly a 0.49% guessing probability over a year. More eligible targets increase aggregate exposure. That is unnecessary risk for a pasted credential.\n\nStable capabilities are defensible for personal use if their meaning is explicit: old holders regain access whenever this repository is shared, including future content. Scope them by worktree and profile, never recycle them for another repository, support immediate rotation, and consider expiring guest capabilities later. Rotation cannot retract already disclosed content.\n\nLeaks include chat history, shared Projects, exports, screenshots, clipboard managers, terminal scrollback, copied repository documents, argument auditing, debug traces and support bundles. Exclude capabilities from all logging paths, including --audit-args; masking only the repo argument is insufficient if a code appears in another string.\n\nWithout verified caller identity, rate limiting cannot provide fair per-conversation enforcement. Use high entropy for security, bounded global admission for resource protection, per-valid-capability quotas and aggregated warnings. A global cooldown must not let one invalid caller lock out every valid repository. Keep limiter state outside the restartable router."
+        },
+        {
+            "id": "Q3",
+            "answer": "Choose the automatically started hub. A first-terminal host makes closing an apparently ordinary repository terminal disrupt every other repository.\n\nSpecify these failure behaviors before implementation:\n\n1. Repository terminal exits or is killed: its serving process or lease ends; the hub removes the attachment and rejects further reads. Socket existence is not proof of liveness.\n2. Router fails: in-flight calls fail explicitly; the replacement rediscovers live attachments. Bindings, revocations and limiter state must survive. v0.0.21 already defaults to restarting failed stdio children. [Pinned tunnel-client configuration](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/configuration.md#stdio-failure-policy).\n3. Hub fails: terminals show disconnected state. Recover only live attachments with their original policies. Establish that the old tunnel-client has stopped before starting another. Preserve the existing inherited-lock protection against surviving children; do not signal arbitrary saved PIDs.\n4. Stale sockets: remove them only with appropriate ownership/liveness checks. Use bounded socket paths, private directories, socket permissions and generation identifiers.\n5. Concurrent startup and last-detach shutdown: serialize them under the tunnel lock and cancel idle shutdown when a valid attachment arrives.\n6. Upgrade: negotiate IPC version and catalogue/schema compatibility. Reject incompatible attachments with an actionable message; never silently change their policy or replace an active hub.\n\nRun the hub and tunnel child from a neutral directory with controlled environment and descriptors. The hub needs the runtime credential; repository processes do not. 'stop --all' must be an intentional terminal state that attachments cannot immediately undo through automatic recovery."
+        },
+        {
+            "id": "Q4",
+            "answer": "The unknown is narrower than proposed. OpenAI's official reference explicitly documents params._meta openai/session as an anonymized conversation identifier, openai/subject for user identification/rate limiting, and openai/organization when available. The changelog dates session metadata to January 15, 2026. [Client metadata reference](https://developers.openai.com/plugins/reference#_meta-fields-the-client-provides), [changelog](https://developers.openai.com/plugins/changelog).\n\nThe pinned tunnel protocol describes forwarding raw JSON-RPC payloads. Therefore preservation of supplied metadata is expected, but that is an inference\u2014not a measurement of this owner's ChatGPT connection. [Tunnel protocol](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/protocol.md#jsonrpc-commands).\n\nThe current server parses selected protocol metadata but does not pass arbitrary request metadata to handlers or activity events. Existing logs cannot establish that openai/session was absent. See [request processing](/home/ubuntu/gits/repochat/internal/mcp/server.go:435).\n\nFor v1, preserve metadata and perform a privacy-preserving wire check: compare presence and salted digests across repeated calls in two simultaneous chats, retries, a router restart, Project chats and branched conversations. Record no raw codes or prompt bodies. Test missing and malformed metadata too. Establish which callers can supply or spoof these fields; documented correlation identifiers alone are not authenticated authorization.\n\nA2 should be an optional additional guard after verification, with capabilities still mandatory. A1 should wait. Neither, as written, establishes arbitrary user intent, and strict one-repository binding conflicts with unrestricted two-code comparison."
+        },
+        {
+            "id": "Q5",
+            "answer": "Keep setup unchanged, then print one copyable starter prompt containing the capability and an example question. The user selects the installed plugin with ChatGPT's @ menu and pastes the code with their question. Do not depend on pasted @ text automatically becoming a plugin mention.\n\nOffer an explicit copy action only where supported; never overwrite the clipboard automatically or put the capability in a URL. A long random code has little additional friction when copying the complete prompt.\n\nUse static instructions: copy the supplied code literally into every repo argument; if absent, ask the user; never discover or guess codes. State the repository name prominently in results without echoing the credential. This helps people notice mistakes but does not enforce intent.\n\nProject instructions can avoid repeated pasting, but deliberately give the credential to every conversation receiving those instructions. Explain that scope. Do not ship A5. Losing one paste is not worth restoring ambient access."
+        },
+        {
+            "id": "Q6",
+            "answer": "The underlying protocol supports this architecture: MCP 2026-07-28 carries version and capabilities per request, and its stdio framing can be reused over Unix sockets. Protocol statelessness does not prohibit application-maintained grants. [Versioning](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [stdio](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio).\n\nThe practical checks are:\n\n\u2022 Migration requires one metadata refresh because adding required repo arguments changes schemas. Existing cached callers must fail closed with instructions to refresh; never infer a repository for them. New attachments thereafter require no refresh. [Custom MCP refresh procedure](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata).\n\n\u2022 readOnlyHint influences host handling; it does not guarantee absence of confirmation prompts or authorize disclosure. Test the actual ChatGPT behavior. [Tool annotations](https://developers.openai.com/plugins/build/mcp-server#tool-annotations-and-elicitation).\n\n\u2022 One child can process multiple requests. Current repochat defaults are eight concurrent calls, 256 pending calls and a 60-second call timeout. The pinned tunnel client defaults to ten active MCP dispatches. Add repository-level fairness and bounded queues; prevent one slow repository from monopolizing the shared child. [Current server limits](/home/ubuntu/gits/repochat/internal/mcp/server.go:93), [tunnel configuration](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/configuration.md#mcp-server).\n\n\u2022 Correlate downstream requests by connection and generation, reject ambiguous duplicate upstream IDs, propagate cancellation and discard late responses. Preserve isError, protocol errors and resultType instead of flattening backend failures into successful text.\n\n\u2022 Current hosted tunnel limits include a 120-second absolute deadline, 10 MiB serialized envelopes and a shared 600 requests/minute allowance. Queue time consumes the deadline. These are ceilings, not suitable context budgets. [Hosted limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits).\n\n\u2022 Test code transcription, omitted arguments, context compaction, simultaneous chats, offline repositories and retries. Return generic authorization/offline errors without socket paths or credential hints.\n\nV2's one-instance rule is a documented deployment restriction, not proof that the service prevents a second machine from polling the same tunnel. The exact observed client string and takeover behavior remain owner-reported observations."
+        },
+        {
+            "id": "QB1",
+            "answer": "The valuable direction is better retrieval over the existing security boundary. A context pack can perform lexical query splitting, path/symbol ranking, excerpt selection, deduplication and test-file discovery locally, then return usable evidence in one call. This can eliminate dependent model decisions and tunnel round trips. It may also transmit less irrelevant text.\n\nThe existing baseline is already capable: search_code returns contextual hits, read_files batches reads, and file_outline helps select ranges. Compare against that baseline, not repeated full-file reads. A model-driven loop can adapt its search terms and investigate surprising results; a fixed heuristic pack cannot reliably replace that exploration.\n\nKeep both workflows. A pack should identify selected evidence, omitted material, parser confidence and budget exhaustion, with paths and line ranges allowing targeted follow-up. It should not imply that an unselected definition or test does not exist.\n\nThe owner's main corrections are right: no LLM requirement, no language servers in the planned implementation, lexical references labelled honestly, no external transcript ingestion, no premature marketing claims. The overstatements to fix are 'Go exact' beyond syntax, 'repo_map cheap' without scanning bounds, blob-only cache identity, capability isolation stronger than audience separation, and treating duplicate bytes as proven waste. No specific exception to the standard-library constraint is justified yet."
+        },
+        {
+            "id": "QB2",
+            "answer": "An on-disk index is compatible only as a private, disposable optimization\u2014not an authorization source. Required guarantees:\n\n1. Treat names, paths, positions and content hashes as sensitive derived data. Store them in an owner-only directory outside served repositories, using private files, safe creation and atomic replacement. Permissions are not encryption; backups may retain old entries. Provide a local cache-clear mechanism and retention limits.\n\n2. Namespace by repository/worktree identity. Validate cache format, parser version, language, masking configuration and content identity. Hash the actual safely read working-tree bytes for modified and untracked files; HEAD or index blob IDs are insufficient.\n\n3. Authorize paths before indexing and again before returning results. A policy change, deletion, symlink substitution, --tracked-only change or masking change must prevent old entries from being served. Policy-read failures must fail closed. State and respect the existing policy-refresh window.\n\n4. Matching, ranking and corpus statistics must use disclosed information. Masking only the final displayed snippet is insufficient: matches, ordering, counts and scores can reveal hidden tokens. Parse raw syntax if necessary, but derive searchable records from the permitted, masked projection.\n\n5. Re-read selected source through the existing safe-access layer. Cached positions are hints. Check content fingerprints and either rebuild or explicitly report change; do not silently cite old positions against new text. The existing file-set generation does not change for every content edit. See [snapshot generation](/home/ubuntu/gits/repochat/internal/repo/fileset.go:86).\n\n6. Treat hostile repository inputs and corrupt cache files as untrusted. Bound bytes, file counts, declarations, nesting, allocations and processing time. Never trust cached paths as arbitrary filesystem paths or execute cache-specified programs. Corruption means discard/rebuild, not relaxed validation.\n\n7. Keep raw source, credentials, prompts and transcripts out of the persistent index. Apply sanitization and masking to every derived output, including signatures, errors and statistics. Keep each repository process responsible for its own index.\n\nStart in memory: persistence adds risk and complexity before its performance benefit has been demonstrated."
+        },
+        {
+            "id": "QB3",
+            "answer": "A small falsifiable benchmark would use three frozen, locally available repository snapshots\u2014Go, TypeScript/JavaScript and PHP\u2014with eight tasks each. Use six tasks for tuning and seal the remaining eighteen for evaluation. Include exact-symbol lookup, paraphrased behavior, cross-file relationships, related tests, ambiguous names and unavailable/no-match cases.\n\nFor each task, humans record the query and minimal evidence requirements as path/line spans, allowing alternative sufficient spans. Gold evidence must be inside the disclosed view. Add withheld and masked canaries, duplicate symbols, a dirty-file change and a policy-change fixture.\n\nCompare get_context against a frozen deterministic retrieval policy built from today's find_files, search_code, file_outline, read_file and read_files. Give both the same query, exposure policy, total byte budget and stopping rules. The baseline must not consult gold locations or receive task-specific oracle hints. If using human-authored realistic call traces as another baseline, label them separately.\n\nEvaluate at several total response budgets, for example 4, 16 and 64 KiB. Measure required-evidence recall, complete-evidence task rate, irrelevant/duplicate returned bytes, total serialized bytes, call count and cold/warm latency. Report per-task and per-language results, not just an average. Modelled round-trip delays may illustrate transport effects but must be labelled assumptions.\n\nPredeclare a gate\u2014for example, at least 30% fewer returned bytes or fewer dependent calls at comparable recall, with no more than a five-percentage-point recall regression, no baseline-success task losing all useful evidence, and zero policy leaks. A failure means keep the existing tools and revise or drop the pack.\n\nFreeze snapshots, queries, policies, gold data, ranking parameters and runner version. This benchmark can falsify retrieval-efficiency claims. Without a model, it cannot establish ChatGPT answer quality, adaptive-client superiority or billed-token savings."
+        },
+        {
+            "id": "QB4",
+            "answer": "Recommended order:\n\n1. Ship one-plugin multi-repository access: static tools, strong capabilities, per-repository servers, hub lifecycle, rotation, status/stop and clear migration. Preserve metadata and run the real ChatGPT identity check during this phase. Add optional conversation binding only if verified.\n2. Establish byte accounting, explicit budgets and the reproducible retrieval benchmark. Add repo_map and a heuristic get_context prototype; ship the pack only if it passes the declared gate.\n3. Add reusable in-memory symbol records, find_symbol, symbol_context and honestly labelled occurrences. Build analyze_changes from these. Introduce persistent indexing only when measured startup or scan costs justify it.\n4. Add the labelled import/manifest map. Reconsider a separate impact tool only after observing actual demand.\n\nThe next release should stop after phase 1. Do not bundle a new index, context engine, approval workflow or repositioning into that release. Its acceptance gate should cover two concurrent real ChatGPT conversations, cross-repository sentinel isolation, wrong-code rejection, capability rotation, unchanged discovery across attachments, detach/crash/restart behavior and compatible upgrades.\n\nIf the owner requires literal proof that every call follows the user's intended repository, this release cannot claim that requirement fulfilled. A trusted user-approved association outside model-controlled arguments is needed, and multi-repository intent remains a separate problem."
+        }
+    ],
+    "missed_items": [
+        {
+            "id": "M1",
+            "severity": "major",
+            "detail": "The threat model conflates remote callers lacking capabilities, malicious repository content, a compromised router and malicious same-user local processes. These require different guarantees. Hash-derived socket names do not prevent the router from enumerating directory entries.",
+            "proposed_change": "State the adversary boundaries explicitly. Treat capability hashes as routing identifiers, not an additional authorization layer. Retain the existing 'not a sandbox' limitation and acknowledge that the router handles confidential data."
+        },
+        {
+            "id": "M2",
+            "severity": "major",
+            "detail": "Capability identity is underspecified across worktrees, clones replacing the same path, profiles and different exposure flags. A stable per-path code could accidentally authorize a replacement repository or a broader view.",
+            "proposed_change": "Define an owner-managed worktree identity and profile scope. Never silently reuse a capability for a replacement repository. Reject conflicting live configurations and make exposure expansion visible to the owner."
+        },
+        {
+            "id": "M3",
+            "severity": "major",
+            "detail": "Detaching and rotating need precise revocation semantics for already admitted calls, queued responses and established socket connections. Unlinking a socket does not revoke existing connections.",
+            "proposed_change": "Invalidate the authorization generation, close affected connections, cancel work and suppress unsent results before acknowledging revocation. Explain that responses already delivered to OpenAI cannot be recalled."
+        },
+        {
+            "id": "M4",
+            "severity": "major",
+            "detail": "The current argument validator rejects unknown properties, while current handlers accept repository-local arguments. Simply forwarding the additional repo argument will fail. Removing it without a separate backend authorization envelope would bypass the proposed second check.",
+            "proposed_change": "Define a small versioned IPC request carrying authorization separately from validated tool arguments. Verify the capability first, then strip routing fields before invoking existing schemas. Preserve request metadata without treating model arguments as trusted identity."
+        },
+        {
+            "id": "M5",
+            "severity": "major",
+            "detail": "Current event handling can retain every raw argument under --audit-args, and ordinary secret-pattern masking will not necessarily recognize the new capability format. Debug logging and error paths can bypass activity-line masking.",
+            "proposed_change": "Introduce mandatory capability removal before all event, diagnostic, trace and support-export sinks. Never permit an audit option to override it. Test embedded credentials in queries and malformed requests. See [activity handling](/home/ubuntu/gits/repochat/internal/cli/session.go:184)."
+        },
+        {
+            "id": "M6",
+            "severity": "major",
+            "detail": "Existing repository tests do not prove composition safety through the shared router. Response mix-ups can disclose an authorized repository's output to another request even when every backend authorization check succeeds.",
+            "proposed_change": "Add sentinel-based end-to-end tests covering concurrent repositories, duplicate and reused IDs, cancellation, late responses, socket replacement, router restart, revocation and mixed IPC versions. Preserve backend errors and repository identity without allowing metadata to be replaced by repository text."
+        },
+        {
+            "id": "M7",
+            "severity": "major",
+            "detail": "A1 would add an authorization-changing operation to a catalogue currently described as entirely read-only. Human approval can also outlast hosted request deadlines and create duplicate pending requests after retries.",
+            "proposed_change": "If approval is later introduced, describe and annotate it according to its actual state-changing authorization behavior. Use expiring, idempotent pending requests with bounded polling and explicit denial rather than a blocked read tool."
+        },
+        {
+            "id": "M8",
+            "severity": "minor",
+            "detail": "'Any number of repositories' is a product aspiration, not an unlimited throughput guarantee. One child, one output stream and hosted tunnel quotas remain shared bottlenecks.",
+            "proposed_change": "Document practical attachment/resource limits, reserve capacity for fast calls, bound per-repository work and expose queue/health information locally. Repository additions must not change tool discovery."
+        }
+    ],
+    "losses_solved": {
+        "L1": "Conditionally solved as capability-based authorization after strengthening entropy, scope and lifecycle. Not solved as the literal claim that only repositories explicitly supplied by the user to that conversation can be read: bearer credentials have no such provenance.",
+        "L2": "Not solved. A valid capability proves permission, not which repository the user intended. Verified conversation binding can reduce accidental switching in a restricted mode, but first-use mistakes and choices among multiple authorized repositories remain.",
+        "L3": "Solved architecturally if each serving process retains one immutable repository and the router performs no repository operations. Existing backend guarantees can be preserved, but IPC composition requires new validation. This is not OS-level process isolation."
+    },
+    "overall": "Approve the architectural direction with changes; reject the claim that P1\u2013P4 solve all three losses. Build multi-repository access first, with strong mandatory capabilities and accurate security claims. OpenAI documents conversation metadata, but this connection still needs a wire-level check before relying on it. Follow with measured heuristic retrieval, then deeper navigation. I inspected the requested files and supporting security, policy and test code, checked official documentation and pinned tunnel-client v0.0.21 docs, and made no file changes. Tests were not executed; this is a design and source review."
+}

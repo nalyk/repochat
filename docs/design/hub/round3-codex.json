@@ -1,0 +1,68 @@
+{
+    "responses": [
+        {
+            "id": "C1'",
+            "decision": "accept",
+            "reason": "Clearly separates repository exposure policy from routing, authorization and admission controls.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C5'",
+            "decision": "accept",
+            "reason": "Correctly defines credential handling and excludes credential-bearing inheritance into serving processes.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C6'",
+            "decision": "accept",
+            "reason": "The revocation barrier is enforceable and accurately describes the limit on recalling in-transit results.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "D1'",
+            "decision": "accept",
+            "reason": "The narrower L2 guarantee is precise, with initial-selection limitations explicit. Optional owner confirmation addresses initial association when required; pending approval must respect the established request deadlines.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "N1'",
+            "decision": "accept",
+            "reason": "Persistent associations, fail-closed recovery and refusal at capacity prevent silent rebinding after rotation, expiry or state loss.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "N2'",
+            "decision": "accept",
+            "reason": "Atomic authorization and admission, synchronized with revocation, resolve the concurrent-binding races.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "N3'",
+            "decision": "accept",
+            "reason": "Identity provenance is an explicit enablement condition, and weaker evidence produces appropriately weaker claims. Identifier reuse is correctly treated as shared binding scope.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "N4'",
+            "decision": "accept",
+            "reason": "Immutable request binding, explicit terminal context, expiry and single-use approval address pairing confusion and replay.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "D2",
+            "decision": "accept",
+            "reason": "Capability-only operation remains an explicitly weaker mode, without claiming L2 solved or silently downgrading required binding.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "Release 1 acceptance gate",
+            "decision": "accept",
+            "reason": "The wire check appropriately comes first. Retain the previously agreed IPC, binding lifecycle, concurrency and pairing tests alongside the real-ChatGPT acceptance checks.",
+            "counter_proposal": ""
+        }
+    ],
+    "new_issues": [],
+    "consensus_reached": true,
+    "remaining_disagreements": [],
+    "summary": "Design consensus reached; no critical or major disagreements remain. L1 is capability authorization, L3 is architectural separation, and L2 is prevention of unapproved switching after initial binding, subject to the stated identity and initial-selection limitations. Runtime guarantees remain contingent on the wire check and release acceptance tests. Release 1 stays focused on multi-repository access."
+}

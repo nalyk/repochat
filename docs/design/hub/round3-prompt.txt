@@ -1,0 +1,38 @@
+Round 3. I accept every counter and every new issue. Final wording; reply per id and declare consensus if nothing
+critical or major remains.
+
+C1' "The router performs no repository operation and evaluates no repository exposure policy." Routing, authorization
+    and admission controls are separate from exposure policy and live in the hub/router.
+C5' "Among repochat processes, only the hub handles the runtime credential; it supplies it securely to tunnel-client.
+    Router and repository processes receive neither the credential nor credential-bearing inherited descriptors."
+C6' Revocation barrier: after acknowledgment no old-generation result is handed from repochat to the tunnel transport;
+    work is cancelled and queued results discarded before the barrier; results already handed to the transport may
+    still arrive and cannot be recalled (documented).
+D1' L2 is defined as: "After the initial binding, a conversation cannot access another repository without an explicit
+    local owner grant." Initial binding = the first successfully presented capability, whatever its provenance;
+    initial repository selection remains model-controlled (N5) and this residual is stated in the documentation.
+    Optional stricter mode for owners who need first-selection correctness too: `--confirm-new-chats` — the first call
+    of an unbound conversation is held as a pending request that the owner approves in that repository's terminal
+    (same pending-request mechanism as N4); off by default because it costs one keypress per new chat.
+N1' Repository association is separate from credential validity. Rotation revokes credentials and explicit grants but
+    keeps the conversation → repository association. Associations persist in the hub's private state across router and
+    hub restarts. Expired or lost associations are never treated as "new conversation": an identity that was
+    previously bound, or any identity when association state was lost (the store carries an epoch marker), needs an
+    explicit owner re-authorization. When the table is full, new enrollment is refused; nothing is evicted.
+N2' One authoritative atomic bind/check/admit operation in the hub precedes every dispatch; exactly one initial
+    association wins; decisions and local grants are bound to the conversation, repository and credential
+    generations, and revocation is synchronised with admission.
+N3' Before D1 is enabled the wire check also covers identifier separation and provenance (deliberately conflicting
+    metadata from another permitted client). Bindings are namespaced by tunnel/profile and by trusted caller identity
+    where one exists; a claimed subject is not treated as authenticated. Any identifier reuse (e.g. a branched chat
+    keeping the id) is documented as shared binding scope. If provenance cannot be established, D1 ships described
+    as an accidental-switch guard, not as adversarial conversation isolation.
+N4' Pairing: random phrase, collision-checked against active requests, bounded attempts, single use, short expiry;
+    each pending request is immutably bound to the conversation, requesting identity scope, target repository and
+    current generations; the target terminal shows the existing association and the requested addition before
+    approval; approval grants exactly that pending request, never "the latest".
+D2 unchanged (capabilities only, L2 documented as reduced, if the wire check fails).
+
+Release 1 acceptance gate (from your QB4), unchanged: two concurrent real ChatGPT conversations, cross-repository
+sentinel isolation, wrong-code rejection, rotation, unchanged discovery across attachments, detach/crash/restart
+behaviour, compatible upgrades. Step 0: the wire check.

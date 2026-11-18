@@ -1,0 +1,71 @@
+Round 2. I checked your citations (the Apps SDK reference does document params._meta "openai/session" as an anonymized
+conversation id) and I accept your corrections. Reply accept/reject/counter per id; consensus if nothing critical or
+major remains.
+
+## Concessions (final wording)
+C1 Claims. L1 is stated as: "every read requires a currently valid capability for that repository and exposure
+   profile". L3 as: "one immutable repository per serving process; the router performs no repository operation and no
+   policy evaluation; it is part of the trusted computing base; this is not OS-level isolation". No claim that a
+   capability proves user intent.
+C2 Capabilities: 128 bits from crypto/rand (fail closed, not newID), shown as name + 26 base32 chars; scoped to a
+   worktree identity AND the exposure profile it was issued for; never reused for a replacement repository; explicit
+   rotation/revocation; required on every call, including overview; unknown/offline/revoked indistinguishable.
+   No open mode (A5 dropped). No repository-listing tool.
+C3 Capability hygiene: removed before every event, log, audit (--audit-args cannot override), trace and error sink;
+   also when it appears inside other string arguments.
+C4 IPC: a small versioned envelope between router and repository process carrying the capability and request metadata
+   separately from the tool arguments; the repository process verifies the capability, then validates the remaining
+   arguments against today's schemas (which reject unknown properties). Router: static catalogue, allowlisted tools,
+   per-connection/generation correlation, duplicate-id rejection, cancellation and deadline propagation, late
+   responses discarded, isError/protocol errors/resultType preserved.
+C5 Hub: auto-started; attachment leases (socket existence is not liveness); exclusive tunnel ownership under the
+   per-tunnel lock, inherited-lock protection kept, no PID signalling; generation-specific runtime dir; exposure is
+   never restored from persisted records, only from live attachments; `stop --all` is terminal; idle shutdown
+   serialised with attach; version negotiation rejects incompatible attachments; hub and tunnel-client run from a
+   neutral directory with a controlled environment; only the hub holds the runtime credential.
+C6 Revocation (detach/rotate): invalidate the authorization generation, close the affected connections, cancel work,
+   suppress unsent results, then acknowledge; documented: what already reached OpenAI cannot be recalled.
+C7 Limits: no global cool-down that lets one bad caller lock out valid repositories; bounded global admission,
+   per-capability quotas and fairness; limiter state outside the restartable router; practical limits documented.
+C8 Threat model written per adversary: remote caller without a capability / hostile repository content / compromised
+   router / same-user local process. Hash-derived socket names are routing identifiers only.
+C9 Tests: sentinel-based end-to-end isolation (concurrent repositories, duplicate and reused ids, cancellation, late
+   responses, socket replacement, router restart, revocation, mixed IPC versions); migration: old cached callers
+   without `repo` fail closed with "refresh the plugin's tools".
+C10 A1 (approval tool) left out of this release.
+C11 PART B accepted as you ordered it: release 1 = multi-repository only. Then byte accounting + explicit max_bytes +
+   the falsifiable benchmark (three frozen snapshots, eight tasks each, sealed evaluation set, deterministic baseline
+   built from today's tools, predeclared gate); repo_map and heuristic get_context ship only if the gate passes; then
+   in-memory symbol records, find_symbol, symbol_context, labelled occurrences, analyze_changes; persistence only if
+   measured cost justifies it and then under your seven guarantees; evidence-labelled import/manifest map later; no
+   impact_analysis tool, no agent bridge, no language servers, no repositioning before measurements.
+
+## The one open point: L2 ("the model can use the wrong repository") — new proposal
+You are right that a model-controlled argument cannot carry user intent. The owner requires L2 solved, so the
+association must be made outside model-controlled arguments. Proposal D1:
+
+D1 STRICT CONVERSATION BINDING, default on when the conversation identity is present.
+   - Identity = params._meta["openai/session"] as received through the tunnel (the router never takes it from tool
+     arguments). Step 0 of the release is the wire check you described (presence, stability across calls, two
+     simultaneous chats, retries, router restart, Project chats, branched chats; salted digests only).
+   - First successful call of a conversation binds it to exactly ONE repository: the one whose capability it
+     presented. From then on, in that conversation, a call presenting any OTHER capability is refused ("this
+     conversation is bound to <name>; use a new chat for another repository"), even if that capability is valid.
+     So after the first call the model cannot switch repositories, and a capability that leaks into the conversation
+     later (e.g. from repository text) is useless there.
+   - The capability stays mandatory on every call (binding is an additional guard, not a replacement).
+   - The binding table lives in the hub (survives router restarts), bounded, with expiry; bindings of a repository are
+     dropped when its capability is rotated.
+   - Cross-repository work in one conversation is an explicit OWNER action outside the chat: the refusal message
+     carries a short pairing phrase and the owner runs `repochat allow <phrase>` in the terminal of the second
+     repository (deny by default, expires in minutes). The model cannot perform it.
+   - If the identity is absent on a request: fail closed when binding is required (`--require-binding`, default once
+     the wire check passes for ChatGPT), or serve capability-only with a visible terminal note when the owner allows
+     unidentified clients (other MCP clients).
+   - What remains outside D1 and is stated honestly: the FIRST repository of a conversation is whichever capability
+     the user pasted (a paste mistake is the user's, visible in the terminal and in every result header); and in a
+     conversation the owner explicitly allowed for two repositories, the model still chooses per call.
+D2 If the wire check fails (no stable conversation identity through the tunnel): ship capabilities only and document
+   L2 as "reduced, not solved"; no claim otherwise.
+
+Do you accept D1/D2 as the resolution of L2 (with the two stated residuals), and C1..C11?
