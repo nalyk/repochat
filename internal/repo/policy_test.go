@@ -67,6 +67,9 @@ func TestGlobSemantics(t *testing.T) {
 		{"[]]x", []string{"]x"}, []string{"ax"}},
 		{"[a-c]1", []string{"b1"}, []string{"d1"}},
 		{`[\]a]z`, []string{"]z", "az"}, []string{"bz"}},
+		{`data[!a\-z].txt`, []string{"datac.txt", "data1.txt"}, []string{"dataa.txt", "data-.txt", "dataz.txt"}},
+		{`[a\-c]x`, []string{"ax", "-x", "cx"}, []string{"bx"}},
+		{`[\^a]x`, []string{"^x", "ax"}, []string{"bx"}},
 		{`weird\*name`, []string{"weird*name"}, []string{"weirdXname"}},
 		{"a.b", []string{"a.b"}, []string{"aXb"}},
 	}

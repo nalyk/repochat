@@ -73,6 +73,9 @@ def run(repochat, testbin, work):
 
     checks = {}
     checks["asks once for both values"] = until(r"Paste the tunnel ID and the API key")
+    # Nothing may be asked visibly before the hidden prompt: a user who pastes
+    # early must never see the secret echoed.
+    checks["asks nothing before the hidden prompt"] = "[Y/n]" not in buf.decode("utf-8", "replace") and "[y/N]" not in buf.decode("utf-8", "replace")
     os.write(fd, (KEY + "  " + TUNNEL + "\n").encode())  # any order
     checks["verifies and saves"] = until(r"saved to .*config\.json")
     checks["shows the one-time ChatGPT steps"] = until(r"add the plugin in ChatGPT")

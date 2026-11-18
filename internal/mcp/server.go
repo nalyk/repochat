@@ -95,6 +95,7 @@ type Server struct {
 	CallTimeout     time.Duration // per tool call (default 60s)
 	MaxMessageBytes int           // per inbound message (default 4 MiB)
 	DrainTimeout    time.Duration // wait for admitted calls after EOF (default 5s)
+	QueueWait       time.Duration // how long the reader waits for output-queue room (default 5s)
 
 	OnEvent func(Event)
 	Logf    func(format string, args ...any)
@@ -181,6 +182,9 @@ func (s *Server) init(w io.Writer) {
 	}
 	if s.DrainTimeout <= 0 {
 		s.DrainTimeout = 5 * time.Second
+	}
+	if s.QueueWait <= 0 {
+		s.QueueWait = 5 * time.Second
 	}
 	s.sem = make(chan struct{}, s.MaxConcurrent)
 	s.inflight = map[string]*call{}
@@ -369,7 +373,7 @@ func (s *Server) handleLine(ctx context.Context, raw []byte) {
 		go func() {
 			defer s.wg.Done()
 			if r := o.async(); r != nil {
-				s.write(r)
+				s.writeAsync(r)
 			}
 		}()
 	}
@@ -712,20 +716,43 @@ func errResp(id json.RawMessage, code int, msg string, data any) *response {
 
 func (s *Server) write(r *response) { s.writeValue(r) }
 
-func (s *Server) writeValue(v any) {
+// writeValue queues output from the reader loop. The reader must stay
+// responsive, so it waits only briefly for room: a client that has let the
+// whole queue fill up is not reading, and the session is ended.
+func (s *Server) writeValue(v any) { s.enqueue(v, s.QueueWait) }
+
+// writeAsync queues the result of a tool call from its worker goroutine,
+// which may wait for the client as long as the session lives.
+func (s *Server) writeAsync(v any) { s.enqueue(v, 0) }
+
+func (s *Server) enqueue(v any, wait time.Duration) {
 	raw, err := encode(v)
 	if err != nil {
 		s.logf("cannot encode response: %v", err)
 		return
 	}
 	s.pending.Add(1)
+	var expired <-chan time.Time
+	if wait > 0 {
+		timer := time.NewTimer(wait)
+		defer timer.Stop()
+		expired = timer.C
+	}
 	select {
 	case s.outq <- raw:
+		return
 	case <-s.stop:
-		s.pending.Done()
 	case <-s.done: // shutting down: a full queue must not hold anyone up
-		s.pending.Done()
+	case <-expired:
+		s.emu.Lock()
+		if s.werr == nil {
+			s.werr = errors.New("the client stopped reading responses (output queue full)")
+		}
+		s.emu.Unlock()
+		s.logf("ending the session: the client stopped reading responses")
+		s.onFail()
 	}
+	s.pending.Done()
 }
 
 func (s *Server) writeError() error {

@@ -124,6 +124,17 @@ func (g *Glob) Match(p string) bool {
 
 func (g *Glob) String() string { return g.src }
 
+// classLiteral writes one byte as a literal member of a regular-expression
+// character class. Inside a class the characters \ ] [ ^ and - are special
+// (a hyphen would otherwise form a range), so they are escaped.
+func classLiteral(c byte) string {
+	switch c {
+	case '\\', ']', '[', '^', '-':
+		return `\` + string(c)
+	}
+	return string(c)
+}
+
 var posixClasses = set("alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space", "upper", "xdigit")
 
 // parseClass translates a bracket expression starting at s[0] == '[' into a
@@ -160,10 +171,10 @@ func parseClass(s string) (string, int, error) {
 			b.WriteString("[:" + s[i+2:i+2+end] + ":]")
 			i += end + 4
 		case c == '\\' && i+1 < len(s):
-			b.WriteString(regexp.QuoteMeta(string(s[i+1])))
+			b.WriteString(classLiteral(s[i+1]))
 			i += 2
 		case c == '[' || c == ']' || c == '^' || c == '\\':
-			b.WriteString(`\` + string(c))
+			b.WriteString(classLiteral(c))
 			i++
 		default:
 			b.WriteByte(c)

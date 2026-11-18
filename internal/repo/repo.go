@@ -187,7 +187,14 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 	if resolved, err := filepath.EvalSymlinks(top); err != nil || resolved != root {
 		return fail(fmt.Errorf("git reports working tree %q but repochat located %q; refusing to continue", top, root))
 	}
+	// The name appears in every result footer, so a directory whose name
+	// looks like a secret is given a neutral one.
 	r.Name = safeName(filepath.Base(root))
+	if _, n := r.red.Line(filepath.Base(root)); n > 0 {
+		r.Name = "repository"
+	} else if _, n := r.red.Line(r.Name); n > 0 {
+		r.Name = "repository"
+	}
 	sum := sha256.Sum256([]byte(root))
 	r.ID = r.Name + "-" + hex.EncodeToString(sum[:])[:8]
 	return r, nil

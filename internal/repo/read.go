@@ -269,13 +269,15 @@ func readLongLine(br *bufio.Reader) (line []byte, n int, long bool, key int, err
 		} else if len(chunk) > 0 {
 			long = true
 		}
+		// The overlap is kept from the very first chunk, so a marker that
+		// straddles the point where the line is cut is still seen whole.
+		window := append(append([]byte(nil), carry...), chunk...)
 		if long {
-			window := append(append([]byte(nil), carry...), chunk...)
 			if k := keyEdge(window); k != 0 {
 				key = k
 			}
-			carry = append(carry[:0], window[max(0, len(window)-96):]...)
 		}
+		carry = append(carry[:0], window[max(0, len(window)-96):]...)
 		if errors.Is(e, bufio.ErrBufferFull) {
 			continue
 		}

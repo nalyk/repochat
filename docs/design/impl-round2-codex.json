@@ -1,0 +1,128 @@
+{
+    "fixes": [
+        {
+            "id": "F1",
+            "status": "not_verified",
+            "evidence": "internal/tools/tools.go:220-244 recursively masks supplied metadata, but line 215 inserts c.r.ID directly. internal/repo/repo.go:190-192 derives that ID from the repository directory name.",
+            "gap": "The footer's repo field bypasses masking and can disclose a token embedded in the repository name. See N1."
+        },
+        {
+            "id": "F2",
+            "status": "not_verified",
+            "evidence": "internal/repo/policy.go:155-161 translates POSIX classes; lines 241-243 reject compilation failures. internal/repo/fileset.go:143-144 propagates policy errors. However, policy.go:162-164 mishandles escaped hyphens.",
+            "gap": "Some understood bracket expressions silently receive different semantics, potentially exposing ignored files. See N2."
+        },
+        {
+            "id": "F3",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:284-286 sets mailmap.file=/dev/null, mailmap.blob= and log.mailmap=false; lines 334-336 apply them to Git commands. Regression fixture: internal/repo/review_test.go:41.",
+            "gap": ""
+        },
+        {
+            "id": "F4",
+            "status": "verified",
+            "evidence": "internal/repo/redact.go:58 accepts short PEM body lines. internal/repo/gitdiff.go:475-490 checks patch lines and hunk context; lines 507-524 locate complete-file key spans; lines 528-537 remove hunk context when spans exist. Fixtures: internal/repo/review_test.go:92 and internal/repo/git_test.go:314.",
+            "gap": ""
+        },
+        {
+            "id": "F5",
+            "status": "not_verified",
+            "evidence": "internal/repo/read.go:186-187 applies Force after processing retained text. However, lines 272-277 only maintain marker carry after long becomes true.",
+            "gap": "A marker split across the first 64 KiB boundary is missed, allowing subsequent key-body lines through. See N3."
+        },
+        {
+            "id": "F6",
+            "status": "verified",
+            "evidence": "internal/repo/redact.go:74 invokes containsFold(data, \"secret\"); lines 79-89 perform case-insensitive matching before the case-insensitive AWS rule at line 27. Mixed-case fixture: internal/repo/review_test.go:99.",
+            "gap": ""
+        },
+        {
+            "id": "F7",
+            "status": "verified",
+            "evidence": "internal/repo/gitlog.go:117-122 fetches full messages for masked grep; lines 140-143 avoid Git's raw-message grep; lines 197-207 cap scanning and match masked messages; lines 219-230 count matched commits for pagination. Fixture: internal/repo/review_test.go:188.",
+            "gap": ""
+        },
+        {
+            "id": "F8",
+            "status": "verified",
+            "evidence": "internal/repo/gitrev.go:14 defines a three-second TTL; lines 77-80 require an unexpired entry; lines 82-110 recheck reachability and line 116 timestamps successful checks. Fixture: internal/repo/review_test.go:229.",
+            "gap": ""
+        },
+        {
+            "id": "F9",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:453-487 rereads and overrides filter drivers. Refresh calls precede status at internal/repo/gitrev.go:177, working-tree diff at internal/repo/gitdiff.go:93-96, and working-file blame at internal/repo/gitlog.go:408. README.md:139 documents the concurrent-config-change limit.",
+            "gap": ""
+        },
+        {
+            "id": "F10",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:475 preserves an empty driver name; lines 483-487 generate filter..clean/smudge/process/required overrides. Fixture: internal/repo/review_test.go:140-160.",
+            "gap": ""
+        },
+        {
+            "id": "F11",
+            "status": "not_verified",
+            "evidence": "internal/mcp/server.go:164 creates a 256-entry queue and lines 293-307 centralize writing, but lines 721-728 block when the queue is full. Immediate reader-loop replies call this path at lines 364-365.",
+            "gap": "Once the queue fills, the reader cannot process later cancellations or EOF. The regression fixture sends only 20 large calls and never fills the queue. See N4."
+        },
+        {
+            "id": "F12",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:108-127 requires a directory containing HEAD or a regular file beginning with \"gitdir: \". FindRoot uses this check at line 94. Fixture: internal/repo/review_test.go:252.",
+            "gap": ""
+        },
+        {
+            "id": "F13",
+            "status": "verified",
+            "evidence": "internal/mcp/server.go:462-469 requires capabilities and checks that its validated JSON value begins with an object delimiter. Fixture: internal/mcp/server_test.go:243.",
+            "gap": ""
+        },
+        {
+            "id": "F14",
+            "status": "verified",
+            "evidence": "internal/repo/repo.go:435-439 logs Git diagnostics locally and returns a fixed message. Error paths use it at repo.go:423, gitdiff.go:422, gitlog.go:184 and gitlog.go:461. Fixture: internal/repo/review_test.go:64-81.",
+            "gap": ""
+        }
+    ],
+    "new_defects": [
+        {
+            "id": "N1",
+            "severity": "major",
+            "evidence": "internal/tools/tools.go:215-223; internal/repo/repo.go:190-192.",
+            "description": "The repository ID bypasses footer masking. A directory named ghp_ followed by 36 token characters puts that token into every result's @meta.repo field, although body masking removes it.",
+            "fix": "Apply maskValue to the assembled footer's repository field, preserving only the explicitly exempt cursor."
+        },
+        {
+            "id": "N2",
+            "severity": "major",
+            "evidence": "internal/repo/policy.go:162-164.",
+            "description": "regexp.QuoteMeta does not escape hyphens because they are special only inside character classes. Consequently, data[!a\\-z].txt becomes a negated a-z range. datac.txt should be withheld by this rule but is served instead.",
+            "fix": "Use character-class-specific escaping that preserves escaped hyphens as literals, or reject expressions whose semantics cannot be preserved."
+        },
+        {
+            "id": "N3",
+            "severity": "major",
+            "evidence": "internal/repo/read.go:145, 262-277; internal/repo/redact.go:177-180.",
+            "description": "Carry is empty until a line exceeds 64 KiB. A BEGIN marker starting after 65,530 spaces straddles the first buffer boundary: retained text has an incomplete marker, and tail scanning lacks its beginning. Following key-body lines are disclosed.",
+            "fix": "Maintain marker overlap across every chunk, including the initial retained chunk, and use the resulting marker state when the line is cut."
+        },
+        {
+            "id": "N4",
+            "severity": "major",
+            "evidence": "internal/mcp/server.go:164, 364-365, 721-728; internal/mcp/server_test.go:561-565.",
+            "description": "The bounded output queue still applies blocking backpressure to the reader. With output stalled, enough immediate replies fill all 256 slots and block writeValue, preventing subsequent cancellation handling and EOF shutdown.",
+            "fix": "Make queue saturation terminate or cancel the session without blocking the reader, recording the output-overload error locally."
+        },
+        {
+            "id": "N5",
+            "severity": "major",
+            "evidence": "internal/repo/gitlog.go:126-128, 245; internal/tools/tools.go:198-199.",
+            "description": "The author filter remains an oracle for masked metadata. Git filters raw author text before final output masking, so guesses about a token embedded in an author name change returned commits and counts even though that token is hidden in results.",
+            "fix": "When masking is enabled, apply author filtering in-process to the masked author representation and paginate matched commits, or disable this filter."
+        }
+    ],
+    "tests_run": "Attempted both requested commands: GOCACHE=/tmp/repochat-verify-cache go vet ./... and GOCACHE=/tmp/repochat-verify-cache go test -count=1 ./.... Both exited 1 before analysis or test execution: \"failed to initialize build cache at /tmp/repochat-verify-cache: mkdir /tmp/repochat-verify-cache: read-only file system\". No vet or test pass/fail results were produced. Existing regression fixtures were read. The supplied real tunnel-client contract results were not independently rerun. No files were modified and no probe programs or scripts were written.",
+    "consensus_reached": false,
+    "summary": "Source inspection supports 10 fixes; F1, F2, F5 and F11 remain incomplete. Five major findings remain open. Verified statuses describe source inspection only; runtime verification was blocked by the session's read-only filesystem."
+}

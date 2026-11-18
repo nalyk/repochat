@@ -9,7 +9,6 @@ import (
 	"os"
 	"os/exec"
 	"os/signal"
-	"runtime"
 	"strings"
 	"syscall"
 	"time"
@@ -59,28 +58,6 @@ func parseCredentialPaste(text string) (id, key string, err error) {
 	return id, key, nil
 }
 
-func desktopSession() bool {
-	if runtime.GOOS == "darwin" {
-		return os.Getenv("SSH_CONNECTION") == ""
-	}
-	return (os.Getenv("DISPLAY") != "" || os.Getenv("WAYLAND_DISPLAY") != "") && os.Getenv("SSH_CONNECTION") == ""
-}
-
-func openBrowser(url string) {
-	opener := "xdg-open"
-	if runtime.GOOS == "darwin" {
-		opener = "open"
-	}
-	if path, err := exec.LookPath(opener); err == nil {
-		cmd := exec.Command(path, url)
-		cmd.Env = helperEnv("DISPLAY="+os.Getenv("DISPLAY"), "WAYLAND_DISPLAY="+os.Getenv("WAYLAND_DISPLAY"),
-			"DBUS_SESSION_BUS_ADDRESS="+os.Getenv("DBUS_SESSION_BUS_ADDRESS"))
-		if cmd.Start() == nil {
-			go cmd.Wait()
-		}
-	}
-}
-
 // credentialWizard collects the tunnel ID and API key, verifies them live
 // and saves them. It is the only place credentials are ever typed.
 func credentialWizard(ctx context.Context, c *console, cfg *Config, profile, helper string, o wizardOptions) (*Profile, error) {
@@ -98,9 +75,8 @@ func credentialWizard(ctx context.Context, c *console, cfg *Config, profile, hel
 		c.say("  b) Create an API key — Restricted, with Tunnels: Read + Use:")
 		c.say("       %s", c.cyan(apiKeysURL))
 		c.say("")
-		if desktopSession() && c.confirm("Open the tunnels page in your browser?", true) {
-			openBrowser(tunnelsURL)
-		}
+		// No other question is asked before the hidden prompt: anything typed
+		// from here on must not be echoed.
 		for attempt := 0; attempt < 5 && (id == "" || key == ""); attempt++ {
 			prompt := "Paste the tunnel ID and the API key (any order), then press Enter: "
 			switch {

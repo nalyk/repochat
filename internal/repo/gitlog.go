@@ -115,16 +115,19 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 	// (results, counts, next_skip) therefore depends on disclosed text alone
 	// and cannot be used to test guesses about masked content.
 	maskedGrep := o.Grep != "" && r.red.Enabled()
+	maskedAuthor := o.Author != "" && r.red.Enabled()
 	format := "--format=%H%x00%P%x00%ad%x00%an%x00%D%x00%s"
 	fields := 6
-	if maskedGrep {
-		format += "%x00%B"
-		fields = 7
+	if maskedGrep || maskedAuthor {
+		format += "%x00%ae%x00%B"
+		fields = 8
 	}
 	args := []string{"log", "-z", "--no-color", "--date=short", format}
 	var filters []string
 	if o.Author != "" {
-		args = append(args, "-i", "--author="+o.Author)
+		if !maskedAuthor {
+			args = append(args, "-i", "--author="+o.Author)
+		}
 		filters = append(filters, "author~"+strconv.Quote(o.Author))
 	}
 	for _, d := range []struct{ flag, v string }{{"since", o.Since}, {"until", o.Until}} {
@@ -164,7 +167,7 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 	}
 	// Filters applied here rather than by git need a wider look: scan a
 	// bounded number of commits and count matches ourselves.
-	local := maskedGrep || o.Pickaxe != ""
+	local := maskedGrep || maskedAuthor || o.Pickaxe != ""
 	fetch := o.Limit + 1
 	if local {
 		fetch = maxLogScan + 1
@@ -193,7 +196,7 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 	var commits []logCommit
 	scanned, matched := 0, 0
 	scanCapped := truncated
-	needle := strings.ToLower(o.Grep)
+	needle, authorNeedle := strings.ToLower(o.Grep), strings.ToLower(o.Author)
 	for i := 0; i+fields <= len(toks); i += fields {
 		c := logCommit{toks[i], toks[i+1], toks[i+2], toks[i+3], toks[i+4], toks[i+5]}
 		scanned++
@@ -201,8 +204,14 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 			scanCapped = true
 			break
 		}
+		if maskedAuthor {
+			masked, _ := r.red.Line(c.author + " <" + toks[i+6] + ">")
+			if !strings.Contains(strings.ToLower(masked), authorNeedle) {
+				continue
+			}
+		}
 		if maskedGrep {
-			masked, _ := r.red.Text(toks[i+6], false)
+			masked, _ := r.red.Text(toks[i+7], false)
 			if !strings.Contains(strings.ToLower(masked), needle) {
 				continue
 			}
@@ -242,7 +251,9 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 	for _, c := range commits {
 		subject, n := r.red.Line(c.subject)
 		res.Redactions += n
-		line := fmt.Sprintf("%s  %s  %s", short(c.oid), c.date, SanitizeLine(c.author))
+		author, n := r.red.Line(c.author)
+		res.Redactions += n
+		line := fmt.Sprintf("%s  %s  %s", short(c.oid), c.date, SanitizeLine(author))
 		if c.refs != "" {
 			line += "  (" + SanitizeLine(c.refs) + ")"
 		}

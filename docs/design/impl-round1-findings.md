@@ -23,3 +23,19 @@ Toate au fost reproduse, reparate și acoperite cu teste de regresie (`internal/
 În timpul reparațiilor a apărut o problemă din aceeași familie, negăsită de Codex: `blame.ignoreRevsFile` din configurația repository-ului face ca git să citeze prima linie a unui fișier extern în mesajul de eroare. Pe git 2.34 setarea nu poate fi anulată din linia de comandă, așa că textul de eroare al lui git nu mai ajunge niciodată într-un rezultat: rămâne în jurnalul local.
 
 Limită declarată (punctul 9): un filtru adăugat în `.git/config` chiar în timpul unei comenzi nu poate fi oprit. Fereastra a scăzut de la câteva secunde la durata unei singure operații.
+
+## Runda 2: verificarea reparațiilor
+
+Într-o sesiune nouă, Codex a verificat reparațiile prin citirea codului (sandbox-ul lui nu a mai permis rularea testelor). A confirmat 10 din 14 și a arătat, cu linii exacte, de ce patru erau incomplete, plus o problemă nouă. Toate cinci au fost reparate și acoperite cu teste (`impl-round2-codex.json`):
+
+| # | Problema | Reparația |
+|---|---|---|
+| N1 | identificatorul repository-ului din `@meta` venea din numele directorului și ocolea mascarea | un nume de director care arată a secret este înlocuit cu „repository” |
+| N2 | `[!a\-z]` era tradus ca interval `a-z`, deci un tipar valid primea alt sens | caracterele escapate dintr-o clasă sunt scrise ca literali |
+| N3 | un marcaj `BEGIN` tăiat exact la limita de 64 KiB era ratat | suprapunerea dintre bucăți se păstrează de la prima bucată |
+| N4 | cu coada de ieșire plină, bucla de citire rămânea blocată | bucla așteaptă cel mult 5 secunde, apoi încheie sesiunea |
+| N5 | filtrul pe autor din `git_log` era un oracol pentru text mascat din numele autorului | filtrul rulează local, pe forma mascată |
+
+## Ce a găsit CI-ul pe macOS
+
+Prima rulare pe macOS a trecut toate testele Go, dar a picat testul de primă pornire: pe un desktop, asistentul întreba vizibil „Open the tunnels page in your browser?” înaintea câmpului ascuns, iar ce se tasta acolo apărea pe ecran. Întrebarea a fost eliminată; testul verifică acum că nimic nu este întrebat la vedere înaintea câmpului ascuns.

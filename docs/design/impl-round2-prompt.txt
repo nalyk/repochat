@@ -1,0 +1,51 @@
+You are an independent senior Go reviewer. This is a verification pass on a local, read-only developer tool
+(`repochat`: an MCP server that lets a model read one Git repository, with a launcher for OpenAI's tunnel-client).
+An earlier review of this code base reported 13 defects. They have been fixed. Please verify the fixes by READING
+the code and by running the project's existing test suite — do not write new probe programs or scripts; the
+regression fixtures already exist in the test files named below. Do not modify files.
+
+Run (they only write to temp dirs):  GOCACHE=/tmp/repochat-verify-cache go vet ./...  and
+GOCACHE=/tmp/repochat-verify-cache go test -count=1 ./...   — report what passed and what did not.
+
+Fixes to verify (file → what changed → regression test):
+ F1  internal/tools/tools.go finish()/maskValue: the trailing "@meta" JSON line is masked and escaped like the body
+     (cursor excepted) → TestMetaFooterIsMasked.
+ F2  internal/repo/policy.go parseClass/NewPolicy: bracket expressions incl. POSIX classes are translated; a
+     .repochatignore line that cannot be understood is an ERROR (snapshot fails closed) instead of being skipped
+     → TestIgnoreFileUnderstandsPosixClassesAndFailsClosed, TestGlobSemantics, TestPolicyPrecedence.
+ F3  internal/repo/repo.go gitBaseConfig: mailmap.file=/dev/null, mailmap.blob=, log.mailmap=false
+     → TestFilesNamedByRepositoryConfigAreNotRead.
+ F4  internal/repo/redact.go pemBodyLine (body lines of any length), internal/repo/gitdiff.go keyish()/maskPatch
+     (key spans are located whenever a patch line or hunk-header context is base64-only; header context dropped
+     when the file has key spans) → TestKeyMaterialEdgeCases, TestDiffMasksKeyMaterialOutsideTheHunk.
+ F5  internal/repo/read.go readLongLine + redact.go keyEdge/Force: key markers in the cut-off tail of a very long
+     line still open/close the masking state → TestKeyMaterialEdgeCases.
+ F6  internal/repo/redact.go containsFold: case-insensitive prefilter for the aws-secret rule → same test.
+ F7  internal/repo/gitlog.go Log(): with masking on, the commit-message filter is applied in-process to the MASKED
+     message over at most maxLogScan commits, and skip/next_skip count matched commits only
+     → TestLogGrepIsNotAnOracleForMaskedText.
+ F8  internal/repo/gitrev.go authorizeCommit: positive reachability answers are cached for 3 s only
+     → TestReachabilityIsRecheckedAfterAWhile.
+ F9  internal/repo/repo.go beforeWorktreeRead/refreshFilterArgs: the filter-driver list is re-read before status,
+     working-tree diff and working-file blame → TestFilterDriversWithOddNamesOrAddedLaterDoNotExecute.
+     Declared limit: a driver added while one command is running is out of scope (documented in README "not a sandbox").
+ F10 same function: an empty driver name (key "filter..clean") is neutralised too → same test.
+ F11 internal/mcp/server.go writeLoop/writeValue/drain: all output goes through one writer goroutine and a bounded
+     queue; the reader loop and shutdown never wait on a client that stopped reading
+     → TestStalledClientCannotBlockTheServer.
+ F12 internal/repo/repo.go looksLikeGitDir: a ".git" entry must hold HEAD or be a "gitdir:" file
+     → TestStrayDotGitEntriesAreSkipped.
+ F13 internal/mcp/server.go: 2026-07-28 clientCapabilities must be a JSON object → TestModernMetadataValidation.
+ F14 (found while fixing) internal/repo/repo.go gitFailure: git's stderr never reaches a tool result (it can quote
+     a file named by repository config, e.g. blame.ignoreRevsFile, which this git version cannot override); it goes
+     to the local log only → TestFilesNamedByRepositoryConfigAreNotRead.
+
+New evidence since the earlier review: the contract suite internal/cli/contract_test.go was run against the REAL
+tunnel-client v0.0.21 binary (installed by the product's own checksum-pinned installer) with a local mock control
+plane, and passes: argv accepted, MCP child started through the client's own argv parser, initialization gate
+passed, initialize/tools/list/tools/call relayed end to end, tunnel lookup and `doctor` working.
+
+For each of F1..F14 answer: verified / not_verified, with file:line evidence and, if not verified, the remaining
+gap described in plain words. Then list any NEW defect you see while reading (id N1.., severity, file:line, plain
+description, proposed fix) — especially regressions introduced by these fixes. Give `consensus_reached` = true only
+if no critical or major defect remains open.

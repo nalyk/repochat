@@ -368,3 +368,47 @@ func TestErrorsAreMaskedAndSanitized(t *testing.T) {
 		t.Errorf("error text must be masked and sanitised: %q", err)
 	}
 }
+
+// A repository directory whose name looks like a secret must not put that
+// value into every result through the repository id.
+func TestRepositoryNameIsNotASecretChannel(t *testing.T) {
+	base, _ := filepath.EvalSymlinks(t.TempDir())
+	token := "ghp_" + strings.Repeat("A", 36)
+	dir := filepath.Join(base, token)
+	os.MkdirAll(dir, 0o755)
+	t.Setenv("HOME", t.TempDir())
+	git(t, dir, "init", "-q", "-b", "main")
+	write(t, dir, "a.txt", "hello\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "first")
+	r, err := repo.Open(bg, dir, repo.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	if strings.Contains(r.ID, "ghp_") || strings.Contains(r.Name, "ghp_") {
+		t.Fatalf("repository id carries the token: %s", r.ID)
+	}
+	for _, tool := range New(r) {
+		var raw map[string]any
+		switch tool.Name {
+		case "repo_overview":
+			raw = map[string]any{}
+		case "read_file":
+			raw = map[string]any{"path": "a.txt"}
+		default:
+			continue
+		}
+		args, err := tool.Schema.Validate(raw)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := tool.Handler(bg, args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(res.Text, token) {
+			t.Errorf("%s: the directory name leaked:\n%s", tool.Name, res.Text)
+		}
+	}
+}

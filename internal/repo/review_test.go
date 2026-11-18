@@ -262,3 +262,56 @@ func TestStrayDotGitEntriesAreSkipped(t *testing.T) {
 		t.Fatalf("a stray .git file was taken for a repository: %s", root)
 	}
 }
+
+// A key marker that straddles the point where a very long line is cut must
+// still be recognised, whatever its exact offset.
+func TestKeyMarkerAcrossTheLineCut(t *testing.T) {
+	dir := newDir(t)
+	pads := []int{maxLineBytes - 40, maxLineBytes - 27, maxLineBytes - 10, maxLineBytes - 1, maxLineBytes, maxLineBytes + 1, maxLineBytes + 5000, 3 * maxLineBytes}
+	for _, pad := range pads {
+		write(t, dir, fmt.Sprintf("long%d.txt", pad), strings.Repeat(" ", pad)+"-----BEGIN PRIVATE KEY-----\n"+strings.Repeat("B", 64)+"\nQkJC\n-----END PRIVATE KEY-----\nafter the key\n")
+	}
+	r := open(t, dir, Options{})
+	for _, pad := range pads {
+		res, err := r.ReadFile(bg, fmt.Sprintf("long%d.txt", pad), 2, 10, "", r.Budget())
+		if err != nil {
+			t.Fatal(err)
+		}
+		if strings.Contains(res.Text, "BBBBBBBB") || strings.Contains(res.Text, "QkJC") {
+			t.Errorf("marker at offset %d was missed; key material shown", pad)
+		}
+		mustContain(t, res.Text, "after the key")
+	}
+}
+
+// The author filter, like the message filter, must work on what is shown.
+func TestLogAuthorFilterIsNotAnOracleForMaskedText(t *testing.T) {
+	dir := newDir(t)
+	token := "ghp_" + strings.Repeat("A", 36)
+	write(t, dir, "f.txt", "1")
+	gitCmd(t, dir, "add", "-A")
+	gitCmd(t, dir, "commit", "-q", "--author=bot "+token+" <bot@example.com>", "-m", "automated")
+	write(t, dir, "f.txt", "2")
+	commit(t, dir, "by ada")
+	r := open(t, dir, Options{})
+
+	hit, err := r.Log(bg, LogOptions{Author: "ghp_AAAA"})
+	if err != nil {
+		t.Fatal(err)
+	}
+	miss, _ := r.Log(bg, LogOptions{Author: "ghp_ZZZZ"})
+	if hit.Count != 0 || hit.More || hit.NextSkip != 0 {
+		t.Errorf("a guess matching a masked author must look like no match: %+v\n%s", hit, hit.Text)
+	}
+	if strings.ReplaceAll(hit.Text, "ghp_AAAA", "<Q>") != strings.ReplaceAll(miss.Text, "ghp_ZZZZ", "<Q>") {
+		t.Errorf("the two guesses are distinguishable:\n%s\n---\n%s", hit.Text, miss.Text)
+	}
+	bot, _ := r.Log(bg, LogOptions{Author: "BOT@example"})
+	if bot.Count != 1 {
+		t.Fatalf("disclosed author text stays filterable: %s", bot.Text)
+	}
+	mustContain(t, bot.Text, "[REDACTED:github-token]")
+	mustNotContain(t, bot.Text, token)
+	all, _ := r.Log(bg, LogOptions{})
+	mustNotContain(t, all.Text, token)
+}

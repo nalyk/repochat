@@ -571,6 +571,36 @@ func TestStalledClientCannotBlockTheServer(t *testing.T) {
 	}
 }
 
+// When the client has let the whole output queue fill up, the reader waits
+// only briefly and then ends the session by itself: it must not hang until
+// someone kills the process.
+func TestSaturatedOutputQueueEndsTheSession(t *testing.T) {
+	s := testServer()
+	s.QueueWait = 150 * time.Millisecond
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe() // never read
+	defer outR.Close()
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(context.Background(), inR, outW) }()
+	go func() {
+		io.WriteString(inW, legacyInit+"\n")
+		for i := 0; i < 600; i++ { // more immediate replies than the queue holds
+			if _, err := io.WriteString(inW, fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"ping"}`+"\n", i+10)); err != nil {
+				return
+			}
+		}
+	}()
+	select {
+	case err := <-done:
+		if err == nil || !strings.Contains(err.Error(), "stopped reading") {
+			t.Fatalf("expected the session to end with an output-overload error, got %v", err)
+		}
+	case <-time.After(10 * time.Second):
+		t.Fatal("a saturated output queue blocked the server")
+	}
+	inW.Close()
+}
+
 func TestCallTimeout(t *testing.T) {
 	s := testServer()
 	s.CallTimeout = 80 * time.Millisecond
