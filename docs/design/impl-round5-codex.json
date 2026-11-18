@@ -1,0 +1,14 @@
+{
+    "fixes": [
+        {
+            "id": "P1",
+            "status": "verified",
+            "evidence": "At commit 7c8f3d9: internal/mcp/server.go:48 sets maxBatch=32; lines 406-409 reject oversized batches with -32600. Lines 424-431 retain admission reservations until writeValue(out) returns. Individual requests likewise release after writeAsync at lines 380-383. Regression cases at internal/mcp/server_test.go:356-372 verify oversized-batch rejection and two busy replies with MaxPending=2.",
+            "gap": ""
+        }
+    ],
+    "new_defects": [],
+    "tests_run": "GOCACHE=/tmp/repochat-verify-cache go vet ./... passed. GOCACHE=/tmp/repochat-verify-cache go test -race -count=1 ./... passed all four tested packages, including the batch and stalled-output regressions. Opt-in real-client contract tests were not rerun. No files were modified or programs written.",
+    "consensus_reached": true,
+    "summary": "P1 is verified for individual requests and batches. No further critical or major defect was found in the reviewed changes."
+}

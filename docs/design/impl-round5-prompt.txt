@@ -1,0 +1,5 @@
+Final check. Your batch observation was correct; fixed in the latest commit: internal/mcp/server.go handleBatch —
+a batch holds at most maxBatch (32) messages (-32600 otherwise) and every call's `release` is deferred until the
+batch's response array has been queued → TestBatchingOnlyIn2025_03_26 (oversized batch; four calls with MaxPending=2).
+Please re-check by reading (run the suite if you can; do not modify files or write programs). Report P1 in `fixes`,
+anything further in `new_defects`, and consensus_reached=true if no critical or major defect remains open.
