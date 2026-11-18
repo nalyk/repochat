@@ -247,6 +247,8 @@ func TestModernMetadataValidation(t *testing.T) {
 	}{
 		{"missing capabilities", `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28"}`, -32602},
 		{"version not a string", `"_meta":{"io.modelcontextprotocol/protocolVersion":7}`, -32602},
+		{"capabilities not an object", `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":"yes"}`, -32602},
+		{"capabilities null", `"_meta":{"io.modelcontextprotocol/protocolVersion":"2026-07-28","io.modelcontextprotocol/clientCapabilities":null}`, -32602},
 		{"unsupported version", `"_meta":{"io.modelcontextprotocol/protocolVersion":"1900-01-01","io.modelcontextprotocol/clientCapabilities":{}}`, -32022},
 	}
 	for _, tc := range cases {
@@ -531,6 +533,42 @@ func TestPendingByteBudget(t *testing.T) {
 	p.send(t, `{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":1}}`)
 	p.in.Close()
 	<-p.done
+}
+
+// A client that stops reading must not be able to wedge the server: the
+// reader loop keeps processing cancellations and the session can be ended.
+func TestStalledClientCannotBlockTheServer(t *testing.T) {
+	s := testServer()
+	s.Tools = append(s.Tools, Tool{Name: "big", Description: "big output",
+		Handler: func(context.Context, Args) (Result, error) { return Result{Text: strings.Repeat("x", 1<<20)}, nil }})
+	inR, inW := io.Pipe()
+	outR, outW := io.Pipe() // nobody reads outR: every write blocks
+	defer outR.Close()
+	ctx, cancel := context.WithCancel(context.Background())
+	done := make(chan error, 1)
+	go func() { done <- s.Serve(ctx, inR, outW) }()
+	send := func(line string) {
+		t.Helper()
+		sent := make(chan struct{})
+		go func() { io.WriteString(inW, line+"\n"); close(sent) }()
+		select {
+		case <-sent:
+		case <-time.After(5 * time.Second):
+			t.Fatalf("the reader loop is blocked; could not deliver %q", line)
+		}
+	}
+	send(legacyInit)
+	for i := 0; i < 20; i++ {
+		send(fmt.Sprintf(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"big"}}`, i+10))
+	}
+	send(`{"jsonrpc":"2.0","id":99,"method":"tools/list"}`)
+	send(`{"jsonrpc":"2.0","method":"notifications/cancelled","params":{"requestId":10}}`)
+	cancel()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("the server did not stop while its client was not reading")
+	}
 }
 
 func TestCallTimeout(t *testing.T) {

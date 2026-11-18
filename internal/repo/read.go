@@ -171,7 +171,7 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 	width := len(strconv.Itoa(start + maxLines))
 
 	for {
-		line, n, long, err := readLongLine(br)
+		line, n, long, key, err := readLongLine(br)
 		if n == 0 && err != nil {
 			break
 		}
@@ -184,6 +184,7 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 			invalidUTF8 = true
 		}
 		text = st.Line(text)
+		st.Force(key)
 
 		if lineNo >= start && lineNo < start+maxLines && !budgetHit {
 			if long || len(text) > maxLineDisplay {
@@ -250,24 +251,36 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 
 // readLongLine reads one line of any length, keeping at most maxLineBytes of
 // it. n is the number of bytes consumed; long reports that the line was cut.
-func readLongLine(br *bufio.Reader) (line []byte, n int, long bool, err error) {
+// key reports private-key markers found anywhere in a cut line, including
+// the part that is not returned (see keyEdge), so masking cannot be defeated
+// by pushing a marker past the cut.
+func readLongLine(br *bufio.Reader) (line []byte, n int, long bool, key int, err error) {
+	var carry []byte // tail of the previous chunk, for markers split across chunks
 	for {
 		chunk, e := br.ReadSlice('\n')
 		n += len(chunk)
 		if room := maxLineBytes - len(line); room > 0 {
 			if len(chunk) > room {
 				long = true
-				chunk = chunk[:room]
+				line = append(line, chunk[:room]...)
+			} else {
+				line = append(line, chunk...)
 			}
-			line = append(line, chunk...)
 		} else if len(chunk) > 0 {
 			long = true
+		}
+		if long {
+			window := append(append([]byte(nil), carry...), chunk...)
+			if k := keyEdge(window); k != 0 {
+				key = k
+			}
+			carry = append(carry[:0], window[max(0, len(window)-96):]...)
 		}
 		if errors.Is(e, bufio.ErrBufferFull) {
 			continue
 		}
 		line = bytes.TrimSuffix(line, []byte("\n"))
-		return line, n, long, e
+		return line, n, long, key, e
 	}
 }
 

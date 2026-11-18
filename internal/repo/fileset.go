@@ -140,9 +140,9 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	default:
 		return nil, fmt.Errorf("cannot read .repochatignore (%v); refusing to run without the policy it defines", describeErr(ignoreFileName, err))
 	}
-	var warnings []string
-	s.Policy, warnings = NewPolicy(ignoreText, r.deny, r.allow)
-	s.Warnings = warnings
+	if s.Policy, err = NewPolicy(ignoreText, r.deny, r.allow); err != nil {
+		return nil, err
+	}
 
 	const listLimit = 256 << 20
 	cached, err := r.git(ctx, listLimit, "ls-files", "-z", "--stage")

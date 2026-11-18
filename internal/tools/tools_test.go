@@ -317,6 +317,47 @@ func TestReadFilesReportsPerFileErrors(t *testing.T) {
 	}
 }
 
+// The @meta footer carries repository-derived strings and must be masked
+// like the body.
+func TestMetaFooterIsMasked(t *testing.T) {
+	dir, _, tools := fixture(t, repo.Options{})
+	token := "ghp_" + strings.Repeat("A", 36)
+	write(t, dir, token+".go", "package main\n")
+	git(t, dir, "add", "-A")
+	git(t, dir, "commit", "-q", "-m", "token-named file")
+	git(t, dir, "checkout", "-q", "-b", "feature/"+token)
+	fresh, err := repo.Open(bg, dir, repo.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer fresh.Close()
+	byName := map[string]mcp.Tool{}
+	for _, tool := range New(fresh) {
+		byName[tool.Name] = tool
+	}
+	_ = tools
+	for name, args := range map[string]map[string]any{
+		"read_file":     {"path": token + ".go"},
+		"read_files":    {"paths": []any{token + ".go", "missing-" + token}},
+		"repo_overview": {},
+		"git_status":    {},
+		"file_outline":  {"path": token + ".go"},
+	} {
+		tool := byName[name]
+		a, err := tool.Schema.Validate(args)
+		if err != nil {
+			t.Fatal(err)
+		}
+		res, err := tool.Handler(bg, a)
+		if err != nil {
+			t.Fatalf("%s: %v", name, err)
+		}
+		if strings.Contains(res.Text, token) {
+			t.Errorf("%s: a secret-looking value survived in the result or its @meta footer:\n%s", name, res.Text[max(0, len(res.Text)-400):])
+		}
+	}
+}
+
 func TestErrorsAreMaskedAndSanitized(t *testing.T) {
 	_, _, tools := fixture(t, repo.Options{})
 	_, _, err := call(t, tools, "read_file", map[string]any{"path": "ghp_0123456789abcdefghijklmnopqrstuvwxyzAB/x\x1b.go"})

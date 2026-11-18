@@ -209,11 +209,18 @@ func (c *catalog) finish(tool, text string, redactions int, m meta) mcp.Result {
 		text = text[:cut] + "\n[result cut at the size budget; narrow the request]"
 		truncated = true
 	}
+	// The footer carries repository-derived strings too (paths, branch
+	// names), so it gets the same masking and escaping as the body. The
+	// cursor is generated here and must stay byte-exact.
 	out := meta{"tool": tool, "repo": c.r.ID}
 	for k, v := range m {
-		if v != nil && v != "" {
-			out[k] = v
+		if v == nil || v == "" {
+			continue
 		}
+		if k != "cursor" {
+			v = c.maskValue(v)
+		}
+		out[k] = v
 	}
 	if truncated {
 		out["truncated"] = true
@@ -227,6 +234,35 @@ func (c *catalog) finish(tool, text string, redactions int, m meta) mcp.Result {
 		text += "\n"
 	}
 	return mcp.Result{Text: text + "@meta " + string(raw), Redactions: redactions}
+}
+
+// maskValue masks and escapes every string inside a footer value.
+func (c *catalog) maskValue(v any) any {
+	switch t := v.(type) {
+	case string:
+		masked, _ := c.r.Redactor().Line(t)
+		return repo.SanitizeLine(masked)
+	case []string:
+		out := make([]string, len(t))
+		for i, s := range t {
+			out[i] = c.maskValue(s).(string)
+		}
+		return out
+	case []meta:
+		out := make([]meta, len(t))
+		for i, m := range t {
+			out[i] = c.maskValue(m).(meta)
+		}
+		return out
+	case meta:
+		out := meta{}
+		for k, x := range t {
+			out[k] = c.maskValue(x)
+		}
+		return out
+	default:
+		return v
+	}
 }
 
 // fail masks and sanitises an error message before it is shown to the model.

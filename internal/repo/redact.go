@@ -44,7 +44,7 @@ var redactRules = []redactRule{
 // Every rule above needs at least one of these literals to match, so text
 // without any of them can skip the regular expressions entirely.
 var redactTriggers = []string{
-	"PRIVATE KEY", "AKIA", "ASIA", "ecret", "ECRET", "gh", "glpat-", "xox", "hooks.slack.com",
+	"PRIVATE KEY", "AKIA", "ASIA", "gh", "glpat-", "xox", "hooks.slack.com",
 	"sk-", "AIza", "_live_", "SG.", "npm_", "pypi-", "hf_", "dop_v1_", "eyJ", "://",
 }
 
@@ -55,7 +55,7 @@ var (
 	// punctuation follows it on the line (so code that merely mentions the
 	// marker, e.g. strings.HasPrefix(s, "-----BEGIN …-----"), is left alone).
 	pemBeginTail = regexp.MustCompile(`^(?:\\n|\\r|["'` + "`" + `\s,+])*$`)
-	pemBodyLine  = regexp.MustCompile(`^[+\- ]?\s*["'` + "`" + `]?(?:[A-Za-z0-9+/=]{16,}|Proc-Type:.*|DEK-Info:.*|Version:.*|Comment:.*)?(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?\s*$`)
+	pemBodyLine  = regexp.MustCompile(`^[+\- ]?\s*["'` + "`" + `]?(?:[A-Za-z0-9+/=]+|Proc-Type:.*|DEK-Info:.*|Version:.*|Comment:.*)?(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?\s*$`)
 	base64Line   = regexp.MustCompile(`^[+\- ]?\s*[A-Za-z0-9+/]{40,}={0,2}\s*$`)
 )
 
@@ -68,6 +68,21 @@ func (r *Redactor) MayContain(data string) bool {
 	}
 	for _, t := range redactTriggers {
 		if strings.Contains(data, t) {
+			return true
+		}
+	}
+	return containsFold(data, "secret") // the one case-insensitive rule
+}
+
+// containsFold reports whether s contains the lower-case ASCII word,
+// ignoring case, without allocating.
+func containsFold(s, word string) bool {
+	lo, up := word[0], word[0]-'a'+'A'
+	for i := 0; i+len(word) <= len(s); i++ {
+		if s[i] != lo && s[i] != up {
+			continue
+		}
+		if strings.EqualFold(s[i:i+len(word)], word) {
 			return true
 		}
 	}
@@ -109,6 +124,39 @@ func (r *Redactor) NewState() *RedactState { return &RedactState{r: r} }
 
 // Count is the number of values masked so far.
 func (st *RedactState) Count() int { return st.count }
+
+// Force sets the key-block state from evidence the caller found in text it
+// did not pass to Line (the cut-off tail of a very long line): open > 0 means
+// a key block begins there, open < 0 that one ends there.
+func (st *RedactState) Force(open int) {
+	if !st.r.Enabled() || open == 0 {
+		return
+	}
+	if open > 0 && !st.inPEM {
+		st.count++
+	}
+	st.inPEM = open > 0
+}
+
+// keyEdge looks for private-key markers in b: +1 when the last marker opens a
+// block, -1 when it closes one, 0 when there is none.
+func keyEdge(b []byte) int {
+	begin, end := -1, -1
+	if locs := pemBegin.FindAllIndex(b, -1); len(locs) > 0 {
+		begin = locs[len(locs)-1][0]
+	}
+	if locs := pemEnd.FindAllIndex(b, -1); len(locs) > 0 {
+		end = locs[len(locs)-1][0]
+	}
+	switch {
+	case begin < 0 && end < 0:
+		return 0
+	case begin > end:
+		return 1
+	default:
+		return -1
+	}
+}
 
 func (st *RedactState) Line(s string) string {
 	if !st.r.Enabled() {

@@ -90,6 +90,11 @@ func (r *Repo) Diff(ctx context.Context, o DiffOptions, budget int) (*DiffResult
 	if err != nil {
 		return nil, err
 	}
+	if plan.new.kind == sideWorktree {
+		if err := r.beforeWorktreeRead(ctx); err != nil {
+			return nil, err
+		}
+	}
 	res := &DiffResult{}
 	if plan.old.kind == sideTree {
 		res.BaseOID = plan.old.oid
@@ -414,7 +419,7 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 			return "", err
 		}
 		if code != 0 {
-			return "", fmt.Errorf("git diff failed: %s", firstErr(nil, out))
+			return "", r.gitFailure("diff", out)
 		}
 		patch := string(out)
 		if truncated {
@@ -461,9 +466,29 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 func (o DiffOptions) hasContext() bool { return o.Context >= 0 }
 
 var (
-	hunkHeader   = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
-	keyCandidate = regexp.MustCompile(`^[+\- ]\s*["'` + "`" + `]?[A-Za-z0-9+/=]{16,}(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?\s*$`)
+	hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
+	base64Only = regexp.MustCompile(`^["'` + "`" + `]?[A-Za-z0-9+/=]{4,}(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?$`)
 )
+
+// keyish reports whether a patch line, or the context text git appends to a
+// hunk header, consists only of base64 characters.
+func keyish(l string) bool {
+	switch {
+	case l == "":
+		return false
+	case l[0] == '+' || l[0] == '-' || l[0] == ' ':
+		l = l[1:]
+	case strings.HasPrefix(l, "@@"):
+		m := hunkHeader.FindString(l)
+		if m == "" {
+			return false
+		}
+		l = l[len(m):]
+	default:
+		return false
+	}
+	return base64Only.MatchString(strings.TrimSpace(l))
+}
 
 // maskPatch masks secrets in one file's patch. Private-key blocks are located
 // in the complete old and new versions of the file — not in the excerpt — and
@@ -475,9 +500,12 @@ func (r *Repo) maskPatch(ctx context.Context, plan *diffPlan, e diffEntry, patch
 		return patch, 0, true
 	}
 	lines := strings.Split(patch, "\n")
+	// Locating key blocks needs both complete file versions, so it is only
+	// done when the patch shows something that could be key material: a
+	// marker, or a line (or hunk-header context) made only of base64 text.
 	needSpans := false
 	for _, l := range lines {
-		if strings.Contains(l, "PRIVATE KEY") || keyCandidate.MatchString(l) {
+		if strings.Contains(l, "PRIVATE KEY") || keyish(l) {
 			needSpans = true
 			break
 		}

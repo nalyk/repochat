@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -111,6 +112,33 @@ func TestRealTunnelClientContract(t *testing.T) {
 	defer srv.Close()
 	t.Setenv("REPOCHAT_CONTROL_PLANE_URL", srv.URL)
 
+	// The real client's own commands, as the wizard and doctor use them.
+	text, v, err := helperVersion(context.Background(), bin)
+	if err != nil || v == [3]int{} {
+		t.Fatalf("cannot read the real tunnel-client's version: %q %v", text, err)
+	}
+	if versionOlder(v, helperMin) {
+		t.Fatalf("tunnel-client %s is older than the supported minimum", text)
+	}
+	info, err := verifyTunnel(context.Background(), bin, testTunnel, testKey)
+	if err != nil {
+		t.Fatalf("tunnel lookup through the real client failed: %v", err)
+	}
+	if info.Name != "Contract tunnel" || !info.known || len(info.Workspaces) != 1 {
+		t.Errorf("tunnel metadata was not understood: %+v", info)
+	}
+	if _, err := verifyTunnel(context.Background(), bin, testTunnel, "sk-wrong-0123456789abcdefghij"); err == nil {
+		t.Error("a rejected key must fail the lookup")
+	} else if strings.Contains(err.Error(), "sk-wrong") {
+		t.Errorf("the key leaked into the error: %v", err)
+	}
+	problems = nil // the rejected lookup above is expected
+	_, doctorOut, code := runCLI("doctor", "--root", e.repo)
+	if code != 0 {
+		t.Errorf("doctor with the real client:\n%s", doctorOut)
+	}
+	wantIn(t, doctorOut, "✓ tunnel-client", "✓ OpenAI: tunnel lookup", "Contract tunnel")
+
 	_, errb, done := start("--root", e.repo)
 	defer func() {
 		runCLI("stop")
@@ -138,6 +166,7 @@ func TestRealTunnelClientContract(t *testing.T) {
 		t.Error("withheld content crossed the tunnel")
 	}
 	log := errb.String()
+	t.Logf("launcher output with the real tunnel-client:\n%s", log)
 	wantIn(t, log, "is running", "connected to OpenAI", "remote MCP activity detected", "contract-suite", "repo_overview")
 	if strings.Contains(log, testKey) {
 		t.Error("the API key was printed")

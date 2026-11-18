@@ -78,27 +78,12 @@ func CompileGlob(pattern string) (*Glob, error) {
 		case '?':
 			b.WriteString("[^/]")
 		case '[':
-			end := strings.IndexByte(p[i+1:], ']')
-			if end <= 0 {
-				b.WriteString(`\[`)
-				break
+			class, n, err := parseClass(p[i:])
+			if err != nil {
+				return nil, err
 			}
-			class := p[i+1 : i+1+end]
-			neg := false
-			if class[0] == '!' || class[0] == '^' {
-				neg, class = true, class[1:]
-			}
-			if class == "" {
-				b.WriteString(`\[`)
-				break
-			}
-			b.WriteString("[")
-			if neg {
-				b.WriteString("^")
-			}
-			b.WriteString(strings.NewReplacer(`\`, `\\`, `[`, `\[`).Replace(class))
-			b.WriteString("]")
-			i += end + 2
+			b.WriteString(class)
+			i += n
 			continue
 		case '\\':
 			if i+1 < len(p) {
@@ -138,6 +123,56 @@ func (g *Glob) Match(p string) bool {
 }
 
 func (g *Glob) String() string { return g.src }
+
+var posixClasses = set("alnum", "alpha", "blank", "cntrl", "digit", "graph", "lower", "print", "punct", "space", "upper", "xdigit")
+
+// parseClass translates a bracket expression starting at s[0] == '[' into a
+// regular-expression class and returns how many bytes of s it consumed.
+// Supported: negation (! or ^), ranges, a literal ] in first position,
+// backslash escapes and POSIX classes such as [:digit:]. As in .gitignore, a
+// class never matches a slash. Anything else is an error rather than a guess:
+// a pattern that silently matched nothing would expose what it meant to hide.
+func parseClass(s string) (string, int, error) {
+	var b strings.Builder
+	b.WriteString("[")
+	i := 1
+	negated := false
+	if i < len(s) && (s[i] == '!' || s[i] == '^') {
+		negated = true
+		b.WriteString("^")
+		i++
+	}
+	first := true
+	for i < len(s) {
+		c := s[i]
+		switch {
+		case c == ']' && !first:
+			if negated {
+				b.WriteString("/")
+			}
+			b.WriteString("]")
+			return b.String(), i + 1, nil
+		case c == '[' && i+1 < len(s) && s[i+1] == ':':
+			end := strings.Index(s[i+2:], ":]")
+			if end < 0 || !posixClasses[s[i+2:i+2+end]] {
+				return "", 0, fmt.Errorf("unsupported character class in pattern")
+			}
+			b.WriteString("[:" + s[i+2:i+2+end] + ":]")
+			i += end + 4
+		case c == '\\' && i+1 < len(s):
+			b.WriteString(regexp.QuoteMeta(string(s[i+1])))
+			i += 2
+		case c == '[' || c == ']' || c == '^' || c == '\\':
+			b.WriteString(`\` + string(c))
+			i++
+		default:
+			b.WriteByte(c)
+			i++
+		}
+		first = false
+	}
+	return "", 0, fmt.Errorf("unterminated character class in pattern")
+}
 
 // CompileGlobs compiles a list of patterns, naming the offending one on error.
 func CompileGlobs(patterns []string) ([]*Glob, error) {
@@ -187,10 +222,10 @@ type Policy struct {
 }
 
 // NewPolicy builds a policy. ignoreFile is the content of .repochatignore
-// ("" if absent); invalid lines in it are skipped and returned as warnings.
-func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, []string) {
+// ("" if absent). A line that cannot be understood is an error: skipping it
+// would serve the files it was meant to withhold.
+func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, error) {
 	p := &Policy{deny: deny, allow: allow}
-	var warnings []string
 	h := sha256.New()
 	for n, line := range strings.Split(ignoreFile, "\n") {
 		line = strings.TrimRight(line, "\r \t")
@@ -200,12 +235,12 @@ func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, []string) {
 		negate := false
 		if strings.HasPrefix(line, "!") {
 			negate, line = true, line[1:]
+		} else if strings.HasPrefix(line, `\#`) || strings.HasPrefix(line, `\!`) {
+			line = line[1:] // an escaped leading # or !
 		}
-		line = strings.TrimPrefix(line, `\`) // "\#name" / "\!name" escapes
 		g, err := CompileGlob(line)
 		if err != nil {
-			warnings = append(warnings, fmt.Sprintf(".repochatignore line %d ignored: %v", n+1, err))
-			continue
+			return nil, fmt.Errorf(".repochatignore line %d cannot be understood (%v). Fix or remove that line; repochat will not guess what it should withhold", n+1, err)
 		}
 		p.ignore = append(p.ignore, ignoreRule{glob: g, negate: negate})
 		fmt.Fprintf(h, "i:%v:%s\n", negate, line)
@@ -217,7 +252,7 @@ func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, []string) {
 		fmt.Fprintf(h, "a:%s\n", g.src)
 	}
 	p.hash = hex.EncodeToString(h.Sum(nil))[:16]
-	return p, warnings
+	return p, nil
 }
 
 // Check returns "" when the path may be served, otherwise the withholding reason.

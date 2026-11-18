@@ -8,7 +8,10 @@ import (
 	"regexp"
 	"strconv"
 	"strings"
+	"time"
 )
+
+const authCacheTTL = 3 * time.Second
 
 var (
 	revRe  = regexp.MustCompile(`^[A-Za-z0-9_@][A-Za-z0-9._/@^~{}+\-]*$`)
@@ -68,10 +71,12 @@ func (r *Repo) ResolveCommit(ctx context.Context, rev string) (string, error) {
 }
 
 func (r *Repo) authorizeCommit(ctx context.Context, oid string) error {
+	// Reachability can change (a branch is deleted or moved), so a positive
+	// answer is only reused for a few seconds.
 	r.mu.Lock()
-	known := r.authorized[oid]
+	checked, known := r.authorized[oid]
 	r.mu.Unlock()
-	if known {
+	if known && time.Since(checked) < authCacheTTL {
 		return nil
 	}
 	reachable := false
@@ -106,9 +111,9 @@ func (r *Repo) authorizeCommit(ctx context.Context, oid string) error {
 	}
 	r.mu.Lock()
 	if len(r.authorized) > 4096 {
-		r.authorized = map[string]bool{}
+		r.authorized = map[string]time.Time{}
 	}
-	r.authorized[oid] = true
+	r.authorized[oid] = time.Now()
 	r.mu.Unlock()
 	return nil
 }
@@ -169,6 +174,9 @@ type Status struct {
 }
 
 func (r *Repo) status(ctx context.Context) (*Status, error) {
+	if err := r.beforeWorktreeRead(ctx); err != nil {
+		return nil, err
+	}
 	untracked := "--untracked-files=all"
 	if r.Opts.TrackedOnly {
 		untracked = "--untracked-files=no"

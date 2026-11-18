@@ -102,13 +102,21 @@ type Server struct {
 	byName map[string]*Tool
 	listed []any
 
-	wmu  sync.Mutex
-	w    io.Writer
-	werr error
+	// Output goes through a queue drained by one writer goroutine, so neither
+	// the reader loop nor cancellation handling ever blocks on a client that
+	// has stopped reading.
+	w       io.Writer
+	outq    chan []byte
+	stop    chan struct{}
+	done    <-chan struct{} // the session context: closed on shutdown
+	pending sync.WaitGroup  // responses queued but not yet written
+	emu     sync.Mutex
+	werr    error
+	onFail  context.CancelFunc
 
 	mu       sync.Mutex
 	inflight map[string]*call
-	pending  int // request bytes held by admitted calls
+	held     int // request bytes held by admitted calls
 	client   string
 	legacy   string // negotiated legacy revision; "" until initialize is received
 	sem      chan struct{}
@@ -153,6 +161,9 @@ type outcome struct {
 
 func (s *Server) init(w io.Writer) {
 	s.w = w
+	s.outq = make(chan []byte, 256)
+	s.stop = make(chan struct{})
+	s.werr = nil
 	if s.MaxConcurrent <= 0 {
 		s.MaxConcurrent = 8
 	}
@@ -229,6 +240,10 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	s.init(out)
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
+	s.onFail = cancel
+	s.done = ctx.Done()
+	defer close(s.stop)
+	go s.writeLoop()
 
 	lines := make(chan inbound)
 	go func() {
@@ -249,12 +264,18 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 	for {
 		select {
 		case <-ctx.Done():
+			if err := s.writeError(); err != nil {
+				return err
+			}
 			return ctx.Err()
 		case msg := <-lines:
 			if msg.err != nil {
 				s.drain()
+				if err := s.writeError(); err != nil {
+					return err
+				}
 				if errors.Is(msg.err, io.EOF) {
-					return s.writeError()
+					return nil
 				}
 				return msg.err
 			}
@@ -264,20 +285,43 @@ func (s *Server) Serve(ctx context.Context, in io.Reader, out io.Writer) error {
 			} else {
 				s.handleLine(ctx, msg.line)
 			}
-			if err := s.writeError(); err != nil {
-				return err
-			}
 		}
 	}
 }
 
+// writeLoop is the only goroutine that writes to the client.
+func (s *Server) writeLoop() {
+	for {
+		select {
+		case <-s.stop:
+			return
+		case raw := <-s.outq:
+			if s.writeError() == nil {
+				if _, err := s.w.Write(raw); err != nil {
+					s.emu.Lock()
+					s.werr = err
+					s.emu.Unlock()
+					s.onFail() // a broken output ends the session
+				}
+			}
+			s.pending.Done()
+		}
+	}
+}
+
+// drain runs after the client closed its side: admitted calls may finish and
+// their responses are flushed, within DrainTimeout.
 func (s *Server) drain() {
 	done := make(chan struct{})
-	go func() { s.wg.Wait(); close(done) }()
+	go func() {
+		s.wg.Wait()
+		s.pending.Wait()
+		close(done)
+	}()
 	select {
 	case <-done:
 	case <-time.After(s.DrainTimeout):
-		s.logf("shutdown: gave up waiting for running tool calls")
+		s.logf("shutdown: gave up waiting for running tool calls or for the client to read their responses")
 	}
 }
 
@@ -415,9 +459,14 @@ func (s *Server) process(ctx context.Context, raw []byte) outcome {
 		switch {
 		case v == ModernVersion:
 			modern, protocol = true, v
-			if _, ok := meta[metaClientCaps]; !ok {
+			caps, ok := meta[metaClientCaps]
+			if !ok {
 				return outcome{resp: errResp(req.ID, codeInvalidParams,
 					"Invalid params: missing required _meta field "+metaClientCaps, nil)}
+			}
+			if trimmed := bytes.TrimSpace(caps); len(trimmed) == 0 || trimmed[0] != '{' {
+				return outcome{resp: errResp(req.ID, codeInvalidParams,
+					"Invalid params: _meta field "+metaClientCaps+" must be an object", nil)}
 			}
 		case protocol != "" || method == "initialize":
 			// Legacy session: the handshake result governs, not this key.
@@ -562,13 +611,13 @@ func (s *Server) toolsCall(ctx context.Context, req request, params map[string]j
 		cancel()
 		return outcome{resp: errResp(req.ID, codeInvalidRequest, "Invalid Request: a request with this id is still in progress", nil)}
 	}
-	if len(s.inflight) >= s.MaxPending || (len(s.inflight) > 0 && s.pending+size > s.MaxPendingBytes) {
+	if len(s.inflight) >= s.MaxPending || (len(s.inflight) > 0 && s.held+size > s.MaxPendingBytes) {
 		s.mu.Unlock()
 		cancel()
 		return outcome{resp: errResp(req.ID, codeInternal, "Server busy: too many tool calls in progress", nil)}
 	}
 	s.inflight[key] = c
-	s.pending += size
+	s.held += size
 	s.mu.Unlock()
 
 	return outcome{async: func() *response {
@@ -576,7 +625,7 @@ func (s *Server) toolsCall(ctx context.Context, req request, params map[string]j
 			cancel()
 			s.mu.Lock()
 			delete(s.inflight, key)
-			s.pending -= size
+			s.held -= size
 			s.mu.Unlock()
 		}()
 		ev := Event{Kind: "call", Client: client, Protocol: protocol, Tool: name, Args: rawArgs}
@@ -669,19 +718,19 @@ func (s *Server) writeValue(v any) {
 		s.logf("cannot encode response: %v", err)
 		return
 	}
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
-	if s.werr != nil {
-		return
-	}
-	if _, err := s.w.Write(raw); err != nil {
-		s.werr = err
+	s.pending.Add(1)
+	select {
+	case s.outq <- raw:
+	case <-s.stop:
+		s.pending.Done()
+	case <-s.done: // shutting down: a full queue must not hold anyone up
+		s.pending.Done()
 	}
 }
 
 func (s *Server) writeError() error {
-	s.wmu.Lock()
-	defer s.wmu.Unlock()
+	s.emu.Lock()
+	defer s.emu.Unlock()
 	return s.werr
 }
 

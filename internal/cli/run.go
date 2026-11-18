@@ -483,20 +483,30 @@ func (l *launcher) helperArgs(sess session, healthURLFile string) ([]string, err
 		"--health.listen-addr", "127.0.0.1:0",
 		"--health.url-file", healthURLFile,
 	}
-	// Test hook for the contract suite: point tunnel-client at a mock control
-	// plane. Only loopback addresses are accepted, so it cannot be used to
-	// send a repository anywhere else.
-	if raw := os.Getenv("REPOCHAT_CONTROL_PLANE_URL"); raw != "" {
-		u, err := url.Parse(raw)
-		if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
-			return nil, errors.New("REPOCHAT_CONTROL_PLANE_URL must be an http(s) URL")
-		}
-		if ip := net.ParseIP(u.Hostname()); ip == nil || !ip.IsLoopback() {
-			return nil, errors.New("REPOCHAT_CONTROL_PLANE_URL is a test hook and only accepts loopback addresses")
-		}
-		argv = append(argv, "--control-plane.base-url", raw)
+	override, err := controlPlaneOverride()
+	if err != nil {
+		return nil, err
 	}
+	argv = append(argv, override...)
 	return argv, nil
+}
+
+// controlPlaneOverride is a test hook for the contract suite: it points
+// tunnel-client at a mock control plane. Only loopback addresses are
+// accepted, so it cannot be used to send a repository anywhere else.
+func controlPlaneOverride() ([]string, error) {
+	raw := os.Getenv("REPOCHAT_CONTROL_PLANE_URL")
+	if raw == "" {
+		return nil, nil
+	}
+	u, err := url.Parse(raw)
+	if err != nil || (u.Scheme != "http" && u.Scheme != "https") || u.User != nil {
+		return nil, errors.New("REPOCHAT_CONTROL_PLANE_URL must be an http(s) URL")
+	}
+	if ip := net.ParseIP(u.Hostname()); ip == nil || !ip.IsLoopback() {
+		return nil, errors.New("REPOCHAT_CONTROL_PLANE_URL is a test hook and only accepts loopback addresses")
+	}
+	return []string{"--control-plane.base-url", raw}, nil
 }
 
 func (l *launcher) serve(ctx context.Context) (int, error) {

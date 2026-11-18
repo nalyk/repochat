@@ -8,7 +8,8 @@ RepoChat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (aut
 | `round1-prompt.txt`, `round1-codex.json` | runda 1: verdict pe fiecare punct și 7 probleme omise (M1–M7) |
 | `round2-prompt.txt`, `round2-codex.json` | runda 2: concesii C1–C16, dezacorduri X1–X8, cerința de onboarding (D17); 5 probleme noi (M8–M12) |
 | `round3-prompt.txt`, `round3-codex.json` | runda 3: textul final al contractului; consens de design |
-| `impl-*` | revizia implementării (cod și dovezi de test) |
+| `impl-round1-prompt.txt`, `impl-round1-findings.md` | revizia implementării: 13 probleme reproduse de Codex, toate reparate |
+| `impl-round2-*` | verificarea reparațiilor |
 
 ## Ce a schimbat dezbaterea
 
@@ -23,4 +24,4 @@ Codex a confirmat defectele MVP-ului și a găsit probleme reale în propunerea 
 
 Puncte unde Claude nu a cedat și Codex a acceptat compromisul: configurația git a utilizatorului rămâne activă (X1), rezultatele rămân text cu o linie `@meta` în loc de `structuredContent` (X3), repository-ul poate fi schimbat liber între porniri, cu avertizare, iar legarea profilului de un repository este opțională (X6).
 
-Consensul din runda 3 privește designul. Corectitudinea implementării este verificată separat, prin teste și prin revizia din fișierele `impl-*`.
+Consensul din runda 3 privește designul. Corectitudinea implementării a fost verificată separat: prin teste, prin rularea cu binarul real `tunnel-client` și prin revizia din fișierele `impl-*`, care a găsit probleme pe care designul agreat nu le prevenea.

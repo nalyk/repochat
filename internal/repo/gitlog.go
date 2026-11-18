@@ -14,6 +14,7 @@ const (
 	DefaultLogLimit = 20
 	MaxLogLimit     = 100
 	maxLogWithStats = 30
+	maxLogScan      = 2000 // commits examined per call when a filter is applied in-process
 	maxLogStatFiles = 25
 	MaxBlameLines   = 200
 	maxRefsPerKind  = 200
@@ -109,7 +110,18 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 		title = "history of " + short(oid)
 	}
 
-	args := []string{"log", "-z", "--no-color", "--date=short", "--format=%H%x00%P%x00%ad%x00%an%x00%D%x00%s"}
+	// With masking on, the message filter runs here, on the MASKED message,
+	// and paging counts matched commits only. What the caller can observe
+	// (results, counts, next_skip) therefore depends on disclosed text alone
+	// and cannot be used to test guesses about masked content.
+	maskedGrep := o.Grep != "" && r.red.Enabled()
+	format := "--format=%H%x00%P%x00%ad%x00%an%x00%D%x00%s"
+	fields := 6
+	if maskedGrep {
+		format += "%x00%B"
+		fields = 7
+	}
+	args := []string{"log", "-z", "--no-color", "--date=short", format}
 	var filters []string
 	if o.Author != "" {
 		args = append(args, "-i", "--author="+o.Author)
@@ -126,7 +138,9 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 		filters = append(filters, d.flag+"="+d.v)
 	}
 	if o.Grep != "" {
-		args = append(args, "-i", "--fixed-strings", "--grep="+o.Grep)
+		if !maskedGrep {
+			args = append(args, "-i", "--fixed-strings", "--grep="+o.Grep)
+		}
 		filters = append(filters, "message~"+strconv.Quote(o.Grep))
 	}
 	if o.Pickaxe != "" {
@@ -148,40 +162,48 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 		pathArgs = []string{rel}
 		filters = append(filters, "path="+rel)
 	}
-	// Post-filters can drop candidates, so over-fetch a little for them.
+	// Filters applied here rather than by git need a wider look: scan a
+	// bounded number of commits and count matches ourselves.
+	local := maskedGrep || o.Pickaxe != ""
 	fetch := o.Limit + 1
-	postFilter := o.Pickaxe != "" || (o.Grep != "" && r.red.Enabled())
-	if postFilter {
-		fetch = o.Limit*3 + 1
+	if local {
+		fetch = maxLogScan + 1
+	} else {
+		args = append(args, "--skip="+strconv.Itoa(o.Skip))
 	}
-	args = append(args, "--skip="+strconv.Itoa(o.Skip), "-n", strconv.Itoa(fetch))
+	args = append(args, "-n", strconv.Itoa(fetch))
 	args = append(args, revs...)
 	args = append(args, "--")
 	args = append(args, pathArgs...)
 
-	out, err := r.git(ctx, 16<<20, args...)
+	out, truncated, code, err := r.gitRaw(ctx, 32<<20, args...)
 	if err != nil {
 		return nil, err
 	}
+	if code != 0 {
+		return nil, r.gitFailure("log", out)
+	}
 	toks := splitNUL(out)
-	if len(toks)%6 != 0 {
+	if truncated {
+		toks = toks[:len(toks)/fields*fields] // drop the incomplete last record
+	} else if len(toks)%fields != 0 {
 		return nil, errors.New("unexpected output from git log")
 	}
 	res := &LogResult{}
 	var commits []logCommit
-	consumed := 0
-	for i := 0; i+5 < len(toks); i += 6 {
+	scanned, matched := 0, 0
+	scanCapped := truncated
+	needle := strings.ToLower(o.Grep)
+	for i := 0; i+fields <= len(toks); i += fields {
 		c := logCommit{toks[i], toks[i+1], toks[i+2], toks[i+3], toks[i+4], toks[i+5]}
-		consumed++
-		if o.Grep != "" && r.red.Enabled() {
-			// The filter must hold for the DISCLOSED message, so masked text
-			// can never be probed through it.
-			body, err := r.git(ctx, 1<<20, "log", "-1", "--no-walk", "--format=%B", c.oid)
-			if err != nil {
-				return nil, err
-			}
-			masked, _ := r.red.Text(string(body), false)
-			if !strings.Contains(strings.ToLower(masked), strings.ToLower(o.Grep)) {
+		scanned++
+		if local && scanned > maxLogScan {
+			scanCapped = true
+			break
+		}
+		if maskedGrep {
+			masked, _ := r.red.Text(toks[i+6], false)
+			if !strings.Contains(strings.ToLower(masked), needle) {
 				continue
 			}
 		}
@@ -194,18 +216,18 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 				continue
 			}
 		}
+		matched++
+		if local && matched <= o.Skip {
+			continue
+		}
 		if len(commits) == o.Limit {
 			res.More = true
-			consumed--
 			break
 		}
 		commits = append(commits, c)
 	}
-	if !res.More && consumed == fetch {
-		res.More = true
-	}
 	res.Count = len(commits)
-	res.NextSkip = o.Skip + consumed
+	res.NextSkip = o.Skip + len(commits)
 
 	var b strings.Builder
 	fmt.Fprintf(&b, "LOG %s", title)
@@ -241,6 +263,9 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 	}
 	if res.More {
 		fmt.Fprintf(&b, "[more commits: call git_log again with skip=%d]\n", res.NextSkip)
+	} else if scanCapped {
+		fmt.Fprintf(&b, "[only the %d most recent commits were examined for this filter; narrow with rev, path, since or until to look further back]\n", maxLogScan)
+		res.More = true
 	}
 	if res.Redactions > 0 {
 		fmt.Fprintf(&b, "[note: %d secret-looking value(s) masked as [REDACTED:…]]\n", res.Redactions)
@@ -380,6 +405,9 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 		} else if !ok {
 			return nil, errors.New("this repository has no commits yet")
 		}
+		if err := r.beforeWorktreeRead(ctx); err != nil {
+			return nil, err
+		}
 		op := r.newOpener()
 		data, _, truncated, rerr := op.ReadAll(rel, maxRevBlobBytes)
 		op.Close()
@@ -430,7 +458,7 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 		return nil, err
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("git blame failed for %s: %s", rel, firstErr(nil, out))
+		return nil, r.gitFailure("blame", out)
 	}
 
 	commits := map[string]*blameCommit{}

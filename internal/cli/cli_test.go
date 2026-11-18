@@ -122,12 +122,12 @@ func fakeTunnelClient(args []string) int {
 		fmt.Println(orDefault(os.Getenv("FAKE_VERSION"), "0.0.21") + " (git sha: fake)")
 		return 0
 	}
-	if len(args) >= 5 && args[0] == "admin" && args[3] == "get" {
+	if len(args) >= 5 && args[0] == "admin" && args[len(args)-2] == "get" {
 		if os.Getenv("CONTROL_PLANE_API_KEY") != os.Getenv("FAKE_GOOD_KEY") {
 			fmt.Fprintln(os.Stderr, "error: 401 Unauthorized: invalid api key")
 			return 1
 		}
-		fmt.Printf("{\"id\":%q,\"name\":\"Test tunnel\",\"workspace_ids\":[\"ws_1\"]}\n", args[4])
+		fmt.Printf("{\"id\":%q,\"name\":\"Test tunnel\",\"workspace_ids\":[\"ws_1\"]}\n", args[len(args)-1])
 		return 0
 	}
 	if len(args) == 0 || args[0] != "run" {
@@ -937,6 +937,23 @@ func TestCommandQuotingMatchesUpstreamParser(t *testing.T) {
 	}
 	if _, err := decodeSession("not base64!"); err == nil {
 		t.Error("garbage sessions must be rejected")
+	}
+}
+
+func TestControlPlaneOverrideIsLoopbackOnly(t *testing.T) {
+	for _, bad := range []string{"https://evil.example", "http://10.0.0.5:8080", "http://localhost.evil.example", "ftp://127.0.0.1", "http://user:pw@127.0.0.1"} {
+		t.Setenv("REPOCHAT_CONTROL_PLANE_URL", bad)
+		if args, err := controlPlaneOverride(); err == nil {
+			t.Errorf("%s must be refused, got %v", bad, args)
+		}
+	}
+	t.Setenv("REPOCHAT_CONTROL_PLANE_URL", "http://127.0.0.1:9999")
+	if args, err := controlPlaneOverride(); err != nil || len(args) != 2 {
+		t.Errorf("loopback must be accepted: %v %v", args, err)
+	}
+	t.Setenv("REPOCHAT_CONTROL_PLANE_URL", "")
+	if args, err := controlPlaneOverride(); err != nil || args != nil {
+		t.Errorf("unset means no override: %v %v", args, err)
 	}
 }
 

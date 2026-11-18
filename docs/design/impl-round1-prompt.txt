@@ -1,0 +1,37 @@
+Implementation review, round 1. The design contract we agreed (C1'..C16, X1'..X8', D17', M1..M12) is now implemented at
+the repository root (the old ./src MVP is gone; it lives in the first git commit). Review the CODE against the contract.
+Read-only: do not modify files. You may run read-only commands and `go vet`; running `go test` is fine if your sandbox
+allows it (it writes only to temp dirs) — say whether you ran it.
+
+Layout: main.go; internal/mcp (server.go, schema.go); internal/repo (repo.go, fsaccess.go, fileset.go, policy.go,
+redact.go, read.go, search.go, gitrev.go, gitdiff.go, gitlog.go, browse.go, outline.go); internal/tools/tools.go;
+internal/cli (run.go, setup.go, helper.go, config.go, session.go, serve.go, audit.go, doctor.go, inspect.go, term*.go);
+tests next to them; test/onboarding_pty.py; Makefile; .github/workflows; README.md (Romanian); docs/design.
+
+My own evidence (verify, don't trust): `go vet ./...` clean; `go test -race ./...` passes; fuzz targets ran 8 s each;
+hostile-git fixtures have positive controls that fired for textconv, external diff driver, diff.external, clean filter,
+fsmonitor hook, GIT_EXTERNAL_DIFF and ext:: lazy fetch on git 2.34.1; first-run onboarding passes through a real pty
+(13 checks) with a stand-in tunnel-client. NOT run: the contract suite against the real tunnel-client
+(internal/cli/contract_test.go, opt-in; needs a binary download the product owner has not authorised yet) and any real
+ChatGPT session.
+
+Known deviations from the contract that I am declaring up front — judge each:
+ V1 Diff patches are produced with porcelain `git diff` for working-tree/index modes and `git diff-tree` for commits;
+    both get --no-ext-diff --no-textconv -M. (X2')
+ V2 `--deny`/`--allow` patterns and .repochatignore use an in-process gitignore-style matcher (not git's), documented.
+ V3 Withheld names are hidden by default everywhere; `repochat files --withheld` shows them locally only.
+ V4 The legacy-era per-request `_meta` version key is ignored once initialize has been received (handshake governs).
+ V5 git_log `grep` uses git --grep to find candidates and then re-checks the filter on the MASKED message when
+    redaction is on; `author` filtering is left to git (author names are disclosed anyway).
+ V6 The search time budget makes a search INCOMPLETE and resumable at file granularity.
+ V7 Launcher puts tunnel-client in its own process group, passes the ownership lock fd to it (ExtraFiles) and on Linux
+    sets Pdeathsig; takeover is cooperative over a unix socket in a 0700 dir.
+ V8 REPOCHAT_CONTROL_PLANE_URL (loopback-only) exists solely so the contract suite can point the real tunnel-client at
+    a mock control plane.
+
+Return, per finding: id (I1..), severity (critical/major/minor), file:line evidence, a concrete failing scenario, and
+the fix you propose. Prioritise: (a) any way a withheld path's content or a masked secret can reach a tool result,
+(b) any way a read tool can execute a repository-controlled program or touch files outside the repository,
+(c) MCP protocol non-conformance that would break tunnel-client or ChatGPT, (d) onboarding/launcher behaviour that is
+unsafe or misleading, (e) claims in README.md that the code does not back. Also give a verdict per deviation V1..V8
+(accept/reject). Finally state `consensus_reached` = true only if nothing critical/major remains.

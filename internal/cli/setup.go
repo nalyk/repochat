@@ -193,7 +193,13 @@ type tunnelInfo struct {
 func verifyTunnel(ctx context.Context, helper, id, key string) (*tunnelInfo, error) {
 	ctx, cancel := context.WithTimeout(ctx, 25*time.Second)
 	defer cancel()
-	cmd := exec.CommandContext(ctx, helper, "admin", "--json", "tunnels", "get", id)
+	args := []string{"admin", "--json"}
+	override, err := controlPlaneOverride()
+	if err != nil {
+		return nil, err
+	}
+	args = append(append(args, override...), "tunnels", "get", id)
+	cmd := exec.CommandContext(ctx, helper, args...)
 	cmd.Env = helperEnv("CONTROL_PLANE_API_KEY=" + key)
 	var stderr strings.Builder
 	cmd.Stderr = &stderr

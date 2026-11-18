@@ -60,6 +60,13 @@ func TestGlobSemantics(t *testing.T) {
 		{"file?.txt", []string{"file1.txt", "d/fileA.txt"}, []string{"file.txt", "file12.txt"}},
 		{"[ab]*.md", []string{"a.md", "bz.md"}, []string{"c.md"}},
 		{"[!a]x", []string{"bx"}, []string{"ax"}},
+		{"data[[:digit:]].txt", []string{"data1.txt", "d/data9.txt"}, []string{"dataX.txt", "data12.txt"}},
+		{"[[:upper:][:digit:]]*.md", []string{"A.md", "7x.md"}, []string{"a.md"}},
+		{"[^[:alpha:]]x", []string{"1x"}, []string{"ax"}},
+		{"a[!b]c", []string{"axc"}, []string{"abc", "a/c"}},
+		{"[]]x", []string{"]x"}, []string{"ax"}},
+		{"[a-c]1", []string{"b1"}, []string{"d1"}},
+		{`[\]a]z`, []string{"]z", "az"}, []string{"bz"}},
 		{`weird\*name`, []string{"weird*name"}, []string{"weirdXname"}},
 		{"a.b", []string{"a.b"}, []string{"aXb"}},
 	}
@@ -79,7 +86,7 @@ func TestGlobSemantics(t *testing.T) {
 			}
 		}
 	}
-	for _, bad := range []string{"", "/", "   ", strings.Repeat("a", 600)} {
+	for _, bad := range []string{"", "/", "   ", strings.Repeat("a", 600), "a[bc", "x[[:digit:]", "[[:bogus:]]"} {
 		if _, err := CompileGlob(bad); err == nil {
 			t.Errorf("pattern %q should be rejected", bad)
 		}
@@ -88,9 +95,9 @@ func TestGlobSemantics(t *testing.T) {
 
 func TestPolicyPrecedence(t *testing.T) {
 	ignore := "# comment\n\ninternal/private/\n*.sql\n!schema.sql\n\\#literal\n"
-	p, warnings := NewPolicy(ignore, globs(t, "*.csv", "vendor/"), globs(t, ".env.ci", "*.sql", "data.csv", "internal/private/ok.go"))
-	if len(warnings) != 0 {
-		t.Fatalf("unexpected warnings: %v", warnings)
+	p, err := NewPolicy(ignore, globs(t, "*.csv", "vendor/"), globs(t, ".env.ci", "*.sql", "data.csv", "internal/private/ok.go"))
+	if err != nil {
+		t.Fatal(err)
 	}
 	cases := map[string]string{
 		"main.go":                 "",
@@ -115,9 +122,12 @@ func TestPolicyPrecedence(t *testing.T) {
 			t.Errorf("Check(%q) = %q, want %q", path, got, want)
 		}
 	}
-	_, warnings = NewPolicy(strings.Repeat("x", 600)+"\nok.txt\n", nil, nil)
-	if len(warnings) != 1 {
-		t.Errorf("an invalid ignore line should produce one warning, got %v", warnings)
+	// A line that cannot be understood must stop everything: skipping it
+	// would serve what it was written to withhold.
+	for _, bad := range []string{strings.Repeat("x", 600), "data[0-9.txt", "x[[:nope:]]"} {
+		if _, err := NewPolicy("ok.txt\n"+bad+"\n", nil, nil); err == nil || !strings.Contains(err.Error(), "line 2") {
+			t.Errorf("ignore line %q must be an error naming the line, got %v", bad, err)
+		}
 	}
 }
 

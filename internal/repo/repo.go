@@ -56,6 +56,9 @@ type Repo struct {
 	Name   string // sanitized directory name
 	ID     string // stable identifier: name plus a short hash of the root path
 	Opts   Options
+	// Logf, when set, receives diagnostics that must stay on this machine
+	// (git's own error output). It is never part of a tool result.
+	Logf func(format string, args ...any)
 
 	root     *os.Root
 	rootInfo os.FileInfo
@@ -68,7 +71,7 @@ type Repo struct {
 	snap       *Snapshot
 	snapAt     time.Time
 	filterArgs []string
-	authorized map[string]bool
+	authorized map[string]time.Time
 	emptyTree  string
 }
 
@@ -88,7 +91,7 @@ func FindRoot(start string) (string, error) {
 		return "", fmt.Errorf("%s is not a directory", start)
 	}
 	for dir := abs; ; {
-		if _, err := os.Lstat(filepath.Join(dir, ".git")); err == nil {
+		if looksLikeGitDir(filepath.Join(dir, ".git")) {
 			return dir, nil
 		}
 		parent := filepath.Dir(dir)
@@ -97,6 +100,31 @@ func FindRoot(start string) (string, error) {
 		}
 		dir = parent
 	}
+}
+
+// looksLikeGitDir reports whether path is a repository's .git: a directory
+// holding HEAD, or a "gitdir:" file (linked worktrees, submodules). A stray
+// entry that merely happens to be called .git is skipped.
+func looksLikeGitDir(path string) bool {
+	fi, err := os.Lstat(path)
+	if err != nil {
+		return false
+	}
+	if fi.IsDir() {
+		_, err := os.Stat(filepath.Join(path, "HEAD"))
+		return err == nil
+	}
+	if !fi.Mode().IsRegular() {
+		return false
+	}
+	f, err := os.Open(path)
+	if err != nil {
+		return false
+	}
+	defer f.Close()
+	head := make([]byte, 8)
+	n, _ := f.Read(head)
+	return string(head[:n]) == "gitdir: "
 }
 
 // Open opens the repository whose working tree contains start.
@@ -113,7 +141,7 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 	}
 	opts.MaxOutputBytes = min(max(opts.MaxOutputBytes, MinOutput), MaxOutput)
 
-	r := &Repo{Root: root, Opts: opts, red: NewRedactor(!opts.NoRedact), authorized: map[string]bool{}}
+	r := &Repo{Root: root, Opts: opts, red: NewRedactor(!opts.NoRedact), authorized: map[string]time.Time{}}
 	if r.allow, err = CompileGlobs(opts.Allow); err != nil {
 		return nil, fmt.Errorf("--allow %w", err)
 	}
@@ -251,6 +279,11 @@ var gitBaseConfig = []string{
 	"-c", "submodule.recurse=false",
 	"-c", "gc.auto=0",
 	"-c", "maintenance.auto=false",
+	// Settings that make git read a file named by the repository's own
+	// configuration (possibly outside the repository) into its output.
+	"-c", "mailmap.file=/dev/null",
+	"-c", "mailmap.blob=",
+	"-c", "log.mailmap=false",
 }
 
 // gitEnv builds the environment for git from an allowlist. Notably absent:
@@ -387,12 +420,23 @@ func (r *Repo) git(ctx context.Context, limit int, args ...string) ([]byte, erro
 		return nil, err
 	}
 	if code != 0 {
-		return nil, fmt.Errorf("git %s failed: %s", args[0], firstErr(nil, out))
+		return nil, r.gitFailure(args[0], out)
 	}
 	if truncated {
 		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", args[0], limit)
 	}
 	return out, nil
+}
+
+// gitFailure reports a failed git command. git's error text can quote files
+// that the repository's configuration points at (for example the first line
+// of a configured ignore-revs file), so it goes to the local log only and the
+// caller gets a message with nothing repository-controlled in it.
+func (r *Repo) gitFailure(subcommand string, stderr []byte) error {
+	if r.Logf != nil {
+		r.Logf("git %s failed: %s", subcommand, firstErr(nil, stderr))
+	}
+	return fmt.Errorf("git %s failed; the reason is in repochat's local log on the user's machine (ask the user to run `repochat doctor`)", subcommand)
 }
 
 // gitText runs a small query and returns trimmed stdout (or stderr when the
@@ -425,10 +469,10 @@ func (r *Repo) refreshFilterArgs(ctx context.Context) error {
 			}
 			name := key[len("filter."):]
 			dot := strings.LastIndexByte(name, '.')
-			if dot <= 0 {
+			if dot < 0 {
 				continue
 			}
-			name = name[:dot]
+			name = name[:dot] // may be empty: "filter..clean" is a valid key
 			if seen[name] {
 				continue
 			}
@@ -447,6 +491,16 @@ func (r *Repo) refreshFilterArgs(ctx context.Context) error {
 	r.filterArgs = args
 	r.mu.Unlock()
 	return nil
+}
+
+// beforeWorktreeRead must be called before any git command that reads
+// working-tree file contents (status, working-tree diff, blame of the working
+// file): those are the commands that run clean filters. It re-reads the list
+// of configured filter drivers so one added since the last look is
+// neutralised too. A driver added during the command itself is outside what
+// repochat can prevent (see the README: not a sandbox).
+func (r *Repo) beforeWorktreeRead(ctx context.Context) error {
+	return r.refreshFilterArgs(ctx)
 }
 
 // checkRoot fails closed when the directory at Root is no longer the one that

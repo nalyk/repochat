@@ -129,13 +129,15 @@ Fiecare răspuns se termină cu o linie `@meta {json}`: dacă e complet, cursoru
 - Un fișier este servit doar dacă git îl listează și politica îl admite. Symlink-urile nu sunt urmate nicăieri, nici dacă un director este înlocuit cu un symlink în timpul accesului.
 - Un diff sau un commit care atinge doar fișiere reținute nu produce conținut. O listă goală de căi permise nu devine „toate căile”.
 - Configurația din repository nu poate face o operație de citire să ruleze un program: filtre `clean`/`smudge`, `textconv`, drivere de diff, `fsmonitor`, `diff.external`, `GIT_EXTERNAL_DIFF`, descărcări automate printr-un remote. Fiecare caz este testat cu un control pozitiv: testul arată întâi că git simplu rulează programul.
+- Configurația din repository nu poate aduce în răspunsuri conținutul unui fișier din afara lui (`mailmap.file`, `blame.ignoreRevsFile`). Textul de eroare al lui git nu ajunge niciodată la model; rămâne în jurnalul local.
 - Cheia API nu apare în argumentele niciunui proces, nu ajunge în mediul serverului MCP și nu ajunge la git. `tunnel-client` primește un mediu construit dintr-o listă albă.
 - Un singur RepoChat pe tunel, pe acest calculator. Preluarea se face cooperativ, printr-un socket privat; niciun proces nu este semnalizat după PID.
 - Textul din repository (surse, mesaje de commit, nume de fișiere) este tratat ca date nesigure: caracterele de control sunt neutralizate înainte să ajungă la model sau în terminal.
 
 **Ce nu garantează:**
 
-- **Nu este un sandbox.** Configurația git din repository este tratată ca nesigură pentru execuție, ca măsură suplimentară. Dacă un proces local înlocuiește directorul repository-ului sau `.git` în timpul rulării, RepoChat se oprește când observă, dar nu promite mai mult. Configurația git a utilizatorului și a sistemului este considerată de încredere.
+- **Nu este un sandbox.** Configurația git din repository este tratată ca nesigură pentru execuție, ca măsură suplimentară. Lista filtrelor git se recitește înaintea fiecărei operații, dar un proces local care modifică `.git/config` chiar în timpul unei comenzi, sau care înlocuiește directorul repository-ului, iese din ce poate preveni RepoChat. Configurația git a utilizatorului și a sistemului este considerată de încredere.
+- Un tipar din `.repochatignore` pe care RepoChat nu îl înțelege oprește servirea, cu numărul liniei. E intenționat: un tipar sărit ar expune exact ce trebuia ascuns.
 - **Mascarea nu e o garanție.** Verifică singur cu `repochat files` și `repochat call`.
 - **Cine poate folosi pluginul poate citi repository-ul** cât timp rulează RepoChat. Creează pluginul ca *personal*. Tunelul nu știe ce conversație îl folosește: dacă treci la alt repository, conversațiile vechi îl văd pe cel nou. RepoChat te avertizează la schimbare.
 - **Instrucțiuni ascunse în cod** (prompt injection) pot influența modelul. RepoChat le marchează ca date, dar decizia aparține modelului.
@@ -172,13 +174,17 @@ make test-contract    # suita de contract cu tunnel-client REAL și un control p
 
 Ce acoperă testele automate: politica de expunere, mascarea, accesul la fișiere și cursele pe symlink-uri, căutarea, toate instrumentele git pe repository-uri sintetice (fără commituri, HEAD detașat, worktree legat, submodul, fișier lipsă, pointer LFS), configurații git ostile cu control pozitiv, protocolul MCP în ambele ere (negociere, erori, anulare, concurență, limite), lansatorul cap-coadă cu un `tunnel-client` simulat (argumente, mediu, stări, preluare, eșecuri) și prima pornire într-un pseudo-terminal real.
 
-**Ce nu a fost verificat și trebuie făcut de tine:**
+**Ce a fost verificat cu binarul real `tunnel-client` (v0.0.21), fără cont OpenAI:**
 
-1. **Conexiunea reală cu ChatGPT.** Are nevoie de un tunel și de o cheie din contul tău. Dacă planul tău ChatGPT nu oferă Secure MCP Tunnel pentru pluginuri personale, RepoChat nu poate schimba asta.
-2. **Suita de contract cu binarul real `tunnel-client`** (`make test-contract`). Este scrisă după documentația protocolului și rulează obligatoriu la release, dar nu a fost rulată în mediul în care a fost dezvoltat RepoChat, pentru că presupune descărcarea binarului. Până trece o dată, compatibilitatea cu `tunnel-client` real se sprijină pe citirea surselor lui (v0.0.21), nu pe o rulare.
-3. **Instalatorul pe arhiva reală.** Regulile de extragere sunt testate pe arhive construite; structura arhivei oficiale a fost dedusă din scripturile de împachetare ale OpenAI.
+- Instalatorul a descărcat arhiva oficială, a verificat suma SHA-256 fixată în cod și a instalat binarul.
+- Suita de contract (`make test-contract`) a rulat clientul real contra unui control plane simulat local: clientul a acceptat linia de comandă a RepoChat, a pornit serverul MCP prin propriul parser de argumente, a trecut de poarta de inițializare și a transportat `initialize`, `tools/list` și apeluri de instrumente cap-coadă. Stările din terminal („running”, „connected”, „remote activity”) au venit din punctul lui real de diagnoză. Căutarea tunelului (`admin tunnels get`) și `repochat doctor` au fost verificate la fel.
 
-Designul a fost revizuit adversarial de Codex CLI în mai multe runde; transcrierea este în [`docs/design/`](docs/design/).
+**Ce nu a fost verificat și rămâne de făcut de tine:**
+
+1. **O sesiune reală ChatGPT.** Are nevoie de un tunel și de o cheie din contul tău. Controlul plane simulat urmează documentația protocolului; serverele OpenAI pot avea reguli pe care simularea nu le are. Dacă planul tău ChatGPT nu oferă Secure MCP Tunnel pentru pluginuri personale, RepoChat nu poate schimba asta.
+2. **macOS.** Codul se compilează pentru macOS și CI rulează testele acolo, dar dezvoltarea și toate rulările de mai sus s-au făcut pe Linux.
+
+Designul și apoi implementarea au fost revizuite adversarial de Codex CLI. Revizia implementării a găsit 13 probleme reale, toate reparate și acoperite cu teste de regresie. Transcrierea este în [`docs/design/`](docs/design/).
 
 ## Licență
 

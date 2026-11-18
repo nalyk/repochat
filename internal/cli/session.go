@@ -138,7 +138,11 @@ func openRepo(ctx context.Context, s *session, cfg *Config) (*repo.Repo, error) 
 	if start == "" {
 		start = "."
 	}
-	return repo.Open(ctx, start, s.repoOptions(cfg))
+	r, err := repo.Open(ctx, start, s.repoOptions(cfg))
+	if err == nil {
+		r.Logf = stderrLogf(os.Stderr)
+	}
+	return r, err
 }
 
 // newServer builds the MCP server for a repository.
