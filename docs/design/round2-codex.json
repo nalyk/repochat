@@ -1,0 +1,203 @@
+{
+    "responses": [
+        {
+            "id": "C1",
+            "decision": "counter",
+            "reason": "Major: verifying directory handles is insufficient if subsequent operations reopen full paths from the original root. Also, os.Root follows internal symlinks, and checking root identity only during refresh leaves Git\u2019s pathname-based access exposed between refreshes. Evidence: [Root semantics](https://pkg.go.dev/os#Root).",
+            "counter_proposal": "Anchor each next component to the previously verified directory handle; never restart traversal through already-checked pathname components. Require nonblocking, directory-only, no-follow opens for directories and the proposed leaf checks. For Git, either preserve equivalent root identity or explicitly exclude concurrent root/metadata replacement from the security guarantee and stop when detected. Add ancestor-swap tests between component verification and leaf access."
+        },
+        {
+            "id": "C2",
+            "decision": "accept",
+            "reason": "These additions address the protocol-override, lazy-fetch, replacement-object, range, and subprocess-lifecycle problems. The explicit 'not a sandbox' boundary is appropriate. C14 supplies the necessary gitfile/linked-worktree handling; C1 still needs the separate traversal clarification.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C3",
+            "decision": "accept",
+            "reason": "The zero-path guard, all-or-error enumeration, and directory-descendant check close the identified authorization widening. Per-file production is acceptable despite its subprocess cost; retain the overall call deadline.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C4",
+            "decision": "accept",
+            "reason": "Matching the disclosed representation closes the prefix oracle. Disabling raw Git pickaxe while masking is enabled is a reasonable, explicit limitation. Filtering actual matching paths before reporting commits is the right rule when masking is disabled.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C5",
+            "decision": "counter",
+            "reason": "Major contract ambiguity: unfiltered for-each-ref --contains also considers refs/stash and other namespaces. The merge-base invocation must specify both commits in the correct order. Evidence: [ref filtering](https://git-scm.com/docs/git-for-each-ref), [ancestor direction](https://git-scm.com/docs/git-merge-base).",
+            "counter_proposal": "Enumerate only refs/heads/, refs/remotes/, and refs/tags/, peeling commit-bearing tags; capture their tip OIDs plus HEAD for the authorization check. Authorize candidate C only when C is an ancestor of an authorized tip: merge-base --is-ancestor C TIP. Distinguish exit 1 from operational errors. Never use unfiltered refs or --all as authorization roots."
+        },
+        {
+            "id": "C6",
+            "decision": "accept",
+            "reason": "The two universes, tracked-file semantics, precedence, hidden-name default, explicit unsupported-name category, and fail-closed enumeration resolve the substantive policy disagreements. A direct withheld-path response intentionally reveals policy status; this is not a promise of filename-existence secrecy.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C7",
+            "decision": "counter",
+            "reason": "Major: a hunk or blame range can contain exactly one PEM body line. The two-line heuristic misses that deterministic case and can mask unrelated base64 source. 'Best effort' does not justify a known range-selection bypass for a supported secret format.",
+            "counter_proposal": "Determine PEM spans from the complete bounded source versions before extracting hunks or blame ranges, then project spans onto displayed line coordinates. Handle both diff sides. If the necessary source cannot be examined within bounds, omit affected content with an explicit reason. Keep the base64 heuristic only as optional additional masking."
+        },
+        {
+            "id": "C8",
+            "decision": "counter",
+            "reason": "Major: 256 retained 4 MiB frames permit 1 GiB before decoded-object overhead. A 500k-entry limit likewise does not bound pathname/snapshot memory. stdout-only caps leave stderr capture unbounded.",
+            "counter_proposal": "Add aggregate queued-request byte and decoded-argument budgets, plus a fileset byte budget. For example, cap queued payloads at 16 MiB independently of call count. Bound stderr capture and all intermediate buffers. Reject overload without blocking cancellation handling. Preserve the proposed count limits, deadlines, blob checks, and process cleanup."
+        },
+        {
+            "id": "C9",
+            "decision": "counter",
+            "reason": "Minor contract correction: initialize must be an explicit pre-handshake exception. Malformed metadata is different from an unsupported version string; modern clientCapabilities remains mandatory. Evidence: [required metadata and errors](https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta).",
+            "counter_proposal": "Explicitly allow legacy initialize before era selection. Validate modern metadata types and required fields first, returning -32602 for malformed/missing fields; return -32022 for a well-formed unsupported version. Retain the batching, cancellation, lossless-ID, duplicate-request, and writer-failure rules."
+        },
+        {
+            "id": "C10",
+            "decision": "accept",
+            "reason": "The initialization shim, restricted environment, frozen child configuration, and local probe protections address the earlier integration issues. Upstream confirms control-plane status becomes ok after a successful poll. 'Exercised' here means a remote request reached the child, not that its response reached ChatGPT. Evidence: [poll health implementation](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/controlplane/health.go#L110).",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C11",
+            "decision": "accept",
+            "reason": "This adequately separates syntax, authentication, local operation, and remote exercise; protects stored configuration; restores terminal state; and keeps introspection on the production pipeline.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C12",
+            "decision": "counter",
+            "reason": "Minor: tokens also need repository/process namespace and resolved revision identities. Generation must not advance merely because the three-second refresh timer fired, or normal model latency can make every continuation expire.",
+            "counter_proposal": "Bind cursors to repository identity, process/snapshot namespace, resolved OIDs where applicable, and the listed fields. Reuse generations when the represented snapshot is unchanged. Bound token size and validate positions. Document cursor lifetime and retain actionable stale-snapshot errors."
+        },
+        {
+            "id": "C13",
+            "decision": "counter",
+            "reason": "Minor: NUL framing suits filenames, but cannot replace command-specific parsing for raw objects and patches. cat-file content is length-framed. Also, permitting newline/tab in an argument can forge additional live log lines. Evidence: [cat-file framing](https://git-scm.com/docs/git-cat-file#_batch_output).",
+            "counter_proposal": "Use NUL-delimited path records, size-framed object reads, and explicit patch parsers. Sanitize human-readable fields before JSON serialization, not the completed protocol envelope. Escape newline/tab inside single-line log arguments; preserve them in multiline source content."
+        },
+        {
+            "id": "C14",
+            "decision": "accept",
+            "reason": "This is an adequate supported-shapes contract. It preserves submodule boundaries, identifies missing data, avoids fetches, and states merge/root comparison behavior.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C15",
+            "decision": "counter",
+            "reason": "Minor: the stated a..b meaning is correct for diff, not git_log\u2019s commit-set selection. Multiple best merge bases also need an explicit outcome; Git otherwise leaves the selected base unspecified. Evidence: [merge-base ambiguity](https://git-scm.com/docs/git-merge-base).",
+            "counter_proposal": "Scope endpoint-comparison language to diff tools; describe log ranges as commit-set operations. For merge_base=true, reject multiple best bases with an actionable error or document a deterministic supported rule. Retain parser-backed Go outlines and labelled heuristics."
+        },
+        {
+            "id": "C16",
+            "decision": "accept",
+            "reason": "The corrected wording, supported release compiler, build attestations, checksums, and native Linux/macOS CI are suitable.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X1",
+            "decision": "accept",
+            "reason": "I accept retaining explicitly trusted user/system configuration. Preserving global ignores avoids an exposure regression. 'Protected configuration' is Git\u2019s trust classification, not proof that its settings are harmless; your stated trust boundary and execution overrides are what make this acceptable.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X2",
+            "decision": "counter",
+            "reason": "Minor: I accept porcelain for worktree comparisons, but git status does not accept --no-ext-diff or --no-textconv; those must not be added indiscriminately. This is confirmed by the installed git status -h and [status options](https://git-scm.com/docs/git-status).",
+            "counter_proposal": "Use command-specific templates: hardened porcelain status with porcelain/NUL output, and diff-producing commands with --no-ext-diff --no-textconv. Keep optional locks disabled and filters neutralized. Describe this as an implementation choice, rather than a general requirement that plumbing must write the index."
+        },
+        {
+            "id": "X3",
+            "decision": "accept",
+            "reason": "Text-only tool results are valid; structuredContent is optional. The stable footer supplies inspectable metadata. The claimed unknown-client behavior is unverified, but you do not need that claim to justify this product choice.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X4",
+            "decision": "accept",
+            "reason": "A bounded five-second EOF drain is a reasonable compromise for pipe-driven use and prompt shutdown. This resolves my objection to unbounded draining.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X5",
+            "decision": "accept",
+            "reason": "Showing bounded, redacted arguments live is a defensible transparency choice while persistent audit defaults remain metadata-only. Remember that stderr can be captured by shells or supervisors; avoid describing it as guaranteed nonpersistent.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X6",
+            "decision": "accept",
+            "reason": "Given K8, explicit invocation in a repository can authorize the switch. The banner, previous-repository notice, optional binding, result identity, and audience disclosure make the residual risk visible. Result metadata detects mistakes; it does not enforce conversation isolation. Safe takeover still requires M10.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X7",
+            "decision": "accept",
+            "reason": "Explicitly withholding unsupported filenames is a valid scope decision and avoids silent identifier corruption. Apply it to ancestor components as well as leaf names.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X8",
+            "decision": "counter",
+            "reason": "Major release-validation gap: optional local execution is reasonable, but a production release must not pass while the only real tunnel-client contract suite is silently skipped.",
+            "counter_proposal": "Keep the integration test opt-in locally, but require it in release CI with a supplied, pinned, verified upstream binary. Missing binary means the release job fails, not passes with a skip. No download or execution is requested in this design-review session."
+        },
+        {
+            "id": "K8",
+            "decision": "accept",
+            "reason": "One invocation can own guided onboarding and daily operation. External account permissions and browser installation remain prerequisites the program cannot guarantee or bypass; D17 should report those blockers precisely.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "D17",
+            "decision": "counter",
+            "reason": "The overall flow is workable. I verified that v0.0.21 admin tunnels get supports runtime keys, and that the specified platform ZIP assets exist. However, request arrival does not prove ChatGPT identity, installation completion, or response delivery. Installer bounds and takeover identity also need explicit contracts. Evidence: [runtime-key lookup](https://github.com/openai/tunnel-client/blob/v0.0.21/cmd/client/admin/tunnels_command.go#L126), [release assets](https://github.com/openai/tunnel-client/releases/tag/v0.0.21).",
+            "counter_proposal": "Retain the guided flow and pinned default installer. Incorporate M8\u2013M12 below. Report metadata-lookup success separately from polling authorization; call the first request 'remote MCP activity detected'. Mark onboarding complete only after explicit installation confirmation or an appropriate successful smoke test, without claiming an unidentified caller is ChatGPT."
+        }
+    ],
+    "new_issues": [
+        {
+            "id": "M8",
+            "severity": "major",
+            "detail": "D17 caps the download but not explicitly decompressed bytes, extraction work, or installation races. Selecting a ZIP entry by basename alone also leaves duplicate-entry and entry-type ambiguity. A checksum verifies the archive bytes, not safe extraction behavior.",
+            "proposed_change": "Require HTTPS on every redirect and exact approved hostnames. Bound total time, compressed bytes, entry count, and actual decompressed binary bytes. Accept exactly one expected regular binary entry; reject duplicates and symlink entries. Extract into an exclusively created private temporary file, then atomically install under a verified user-owned directory with an installation lock. Preserve the explicit distinction between embedded pins and same-release checksum verification."
+        },
+        {
+            "id": "M9",
+            "severity": "major",
+            "detail": "D17 equates the first child request with 'ChatGPT connected' and completed onboarding. The tunnel also supports other OpenAI products, and discovery during plugin creation can happen before installation or conversational use. Request receipt does not establish successful response delivery. Evidence: [supported tunnel callers](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [separate response-delivery evidence](https://github.com/openai/tunnel-client/blob/v0.0.21/docs/health.md).",
+            "proposed_change": "Separate remote discovery, successful tool execution, and user-confirmed ChatGPT use. Label unidentified traffic generically. Keep installation instructions available until installation is confirmed; offer a short repo_overview smoke-test prompt. Do not infer caller identity from self-reported clientInfo or mark onboarding complete merely on initialize/tools-list."
+        },
+        {
+            "id": "M10",
+            "severity": "major",
+            "detail": "A takeover prompt authorizes stopping the previous repochat instance, not killing whichever process currently has a PID recorded in a stale lock file. PID reuse and unlinking/recreating a locked file can respectively kill an unrelated process or permit two simultaneous owners.",
+            "proposed_change": "Use a persistent OS-backed lock and never unlink it to force acquisition. Prefer cooperative shutdown through an owner-authenticated private local control mechanism. Verify instance identity before any signaling, wait for the previous tunnel process and children to terminate, then acquire ownership before starting the replacement. Test stale PIDs, PID reuse, simultaneous takeovers, and failed shutdown."
+        },
+        {
+            "id": "M11",
+            "severity": "minor",
+            "detail": "The unrestricted multiline hidden prompt lacks a termination and ambiguity contract. Users need to know when pasting is complete, while duplicate IDs, extra tokens, and validation errors must not cause secret echoing or silent value replacement.",
+            "proposed_change": "Specify bounded paste framing and a visible completion instruction. Require exactly one tunnel ID and one key after parsing; reject ambiguous or extra values without printing them. Restore terminal state on all handled exit paths and test CRLF, EOF, cancellation, and non-TTY operation."
+        },
+        {
+            "id": "M12",
+            "severity": "minor",
+            "detail": "A successful tunnel metadata lookup does not prove the user can run/select that tunnel or add a ChatGPT plugin. A missing workspace association is not the only possible onboarding blocker. Git is also a prerequisite even when tunnel-client is installed automatically. Evidence: [separate permission requirements](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#permissions-and-access).",
+            "proposed_change": "Preflight supported Git before installing helpers or collecting credentials. Distinguish metadata access, successful polling, workspace association, and ChatGPT plugin permissions. Provide targeted recovery instructions for each failure. Before starting service, show the selected repository, exposure counts, and audience disclosure within the existing onboarding flow."
+        }
+    ],
+    "consensus_reached": false,
+    "remaining_disagreements": [
+        "C1: traversal must remain anchored to verified handles; Git root-replacement guarantees need an explicit boundary.",
+        "C5: authorization roots and ancestor-check direction must be specified precisely.",
+        "C7: hunk/blame redaction must cover known single-line PEM fragments using source-derived spans.",
+        "C8: aggregate request/fileset memory and stderr need byte budgets.",
+        "X8: the pinned real tunnel-client integration suite must be mandatory for releases.",
+        "D17/M8\u2013M10: safe extraction/install, truthful completion reporting, and identity-safe takeover remain major open requirements.",
+        "Minor wording corrections remain in C9, C12, C13, C15, and X2."
+    ],
+    "summary": "Most compromises are accepted, including trusted global Git config, text-only results, bounded EOF draining, live argument display, and easy repository switching. Remaining blockers concern precise enforcement and verification, not additional product scope. This round used source/document inspection and read-only CLI help; no files were modified, binaries downloaded, or integration tests executed."
+}

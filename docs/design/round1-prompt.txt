@@ -1,0 +1,145 @@
+You are an independent senior reviewer (security + MCP protocol + Go). I am another AI engineer about to rewrite a small
+tool into a full product. Review my DESIGN before I implement it. Scope: design review only — do not write code, do not
+modify files.
+
+Read the existing MVP in ./src (main.go, main_test.go, README.md) to verify my defect list, then judge the design below.
+Use web search where a claim depends on external facts (openai/tunnel-client repo and docs, MCP spec 2026-07-28 at
+modelcontextprotocol.io, OpenAI developer docs on custom MCP servers / Secure MCP Tunnel). Verify, don't trust me.
+
+For EVERY item id (F1..F5, B1..B11, D1..D16) return a verdict: agree / modify / disagree, a severity for the problem you
+see (none if agree), a short rationale with evidence (file:line or URL), and the concrete change you propose.
+Then list missed items (M1..): things a production-quality product of this kind needs that the design lacks, or risks I
+did not see (security holes, protocol non-conformance, tunnel-client integration traps, UX traps, git edge cases).
+Answer Q1..Q5. Be adversarial and specific; prefer fewer, well-evidenced points over generic advice.
+Constraints K1..K7 are product decisions, not findings — challenge them only if self-defeating.
+
+# repochat v1.0 — design brief for adversarial review
+
+## What it is
+`repochat` = one static Go binary with two roles:
+1. `repochat mcp` — a READ-ONLY MCP server (stdio, newline-delimited JSON-RPC) for ONE local Git repository.
+2. `repochat` (launcher) — starts OpenAI's official `tunnel-client` with `repochat mcp` as its stdio child, so ChatGPT Web
+   (custom MCP plugin, Connection: Tunnel) can read the repo the user is standing in. Also usable directly by any stdio MCP client.
+
+The existing v0.1.0 MVP is in `src/` (main.go, main_test.go, README.md). It will be replaced by a restructured module at the repo root.
+
+## Constraints (product-owner decisions — NOT findings; do not relitigate unless you find them self-defeating)
+- K1 Go, standard library only (zero third-party modules). go.mod `go 1.24` (needs `os.Root`).
+- K2 Read-only forever: no write tools, no arbitrary command execution; the model never supplies raw git argv.
+- K3 Transport to ChatGPT = official tunnel-client over stdio. No own tunnel, no HTTP listener in repochat.
+- K4 One repository per process (multi-repo is a non-goal).
+- K5 Linux + macOS. Windows is a non-goal.
+- K6 No semantic/vector index, no local LLM calls.
+- K7 A real ChatGPT end-to-end run is impossible in this environment (no tunnel credentials). Everything else must be
+     covered by automated tests, including a fake `tunnel-client` harness for the launcher.
+
+## Verified external facts (checked against openai/tunnel-client source @HEAD, v0.0.21, and MCP spec 2026-07-28)
+- F1 tunnel-client flags exist: `run --control-plane.tunnel-id`, `--control-plane.api-key env:VAR|file:/path`,
+     `--mcp.command` (shell-like argv split with '..', "..", backslash; `,channel=` suffix is special),
+     `--health.listen-addr` (default 127.0.0.1:8080), `--health.url-file`, `/readyz`, `/healthz`, `/ui`.
+- F2 tunnel-client spawns the stdio child with inherited env + cwd and `cmd.Stderr = os.Stderr`; by default it does NOT
+     send `notifications/initialized`; default stdio failure policy = restart child.
+- F3 Tunnel limits: 10 MiB per message, 120 s per request, 600 req/min.
+- F4 MCP current revision is 2026-07-28 (stateless: no initialize; per-request `_meta` keys
+     `io.modelcontextprotocol/protocolVersion` + `clientCapabilities` required; `server/discover` mandatory; every result has
+     `resultType`; tools/list result needs `ttlMs` + `cacheScope`; unsupported version → error -32022 with
+     data.supported/requested; `ping` removed). Legacy revisions (≤ 2025-11-25) use the initialize handshake.
+     A dual-era server answers `initialize` with legacy semantics and `_meta`-carrying requests statelessly.
+- F5 OpenAI custom-MCP docs: `search`/`fetch` tools are NOT required; ChatGPT respects `readOnlyHint` (tools without it
+     are treated as write actions needing confirmation); first 512 chars of server instructions should be self-contained.
+
+## Defects found in v0.1.0 (to be fixed)
+- B1 `tools/list` emits `"required":null` for 4/6 tools (invalid JSON Schema).
+- B2 `repo_info` fails on a repo with no commits.
+- B3 initialize echoes any protocolVersion (confirmed `2099-01-01`).
+- B4 Secret-name regex blocks legit source (`token.go`, `password.service.ts`) and hides it silently.
+- B5 Same filter misses real secret files (`terraform.tfstate`, `*.tfvars`, `service-account.json`, `.htpasswd`, …).
+- B6 Walks the disk with a hard-coded ignore list; ignores `.gitignore`; exposes ignored local files.
+- B7 Search that hits a cap with 0 results answers "No matches" (false negative).
+- B8 read_file: 300 lines/call, no total line count; `git_log` has no diffs; no diff/show/blame at all.
+- B9 git can execute repo-configured programs (clean filters, textconv, fsmonitor …); API key stays in git's env.
+- B10 Tests are happy-path only.
+- B11 Launcher lets tunnel-client bind its default health port 127.0.0.1:8080 (port clash, undocumented listener) while
+      README claims "opens no port".
+
+## Proposed design (review each item)
+- D1 Layout: `main.go`; `internal/mcp` (JSON-RPC/MCP engine, transport-agnostic, no repo knowledge);
+     `internal/repo` (fileset, policy, redaction, read, search, git, outline); `internal/tools` (tool catalogue binding
+     repo→mcp); `internal/cli` (run/setup/doctor/mcp/call/tools/files/log/version, config, audit). Makefile, CI workflow, README.
+- D2 File universe = `git ls-files -z --cached --others --exclude-standard` (deduped). Ignored files are invisible.
+     `--tracked-only` drops `--others`. Snapshot cached ≤ 3 s. EVERY file access must be a member of the snapshot; no dir walking.
+- D3 Deny policy on top of D2: (a) built-in secret-name rules that never match source-code extensions (so `token.go`
+     is readable, `secrets.yaml`, `.env`, `*.pem`, `*.tfstate`, `id_rsa`, `.npmrc`, `credentials.json` … are withheld;
+     `.env.example|sample|template|dist` allowed); (b) `.repochatignore` in the repo (gitignore syntax, evaluated by git via
+     `git ls-files -i --exclude-from`) may only TIGHTEN; (c) user-level `--deny GLOB` / `--allow GLOB` (CLI + user config)
+     may loosen built-ins. Withheld files are DISCLOSED: listed by name with a `[withheld]` marker and counted in search
+     footers, so the model never mistakes "hidden" for "absent". Their content is never returned by any tool, including git tools.
+- D4 Path safety: repo-relative slash paths, cleaned; must be in the snapshot; opened via `os.Root` (no escape through
+     `..`/symlinks even under races); symlinks never followed (listed as `name -> target`, content not served); regular files only.
+- D5 Content redaction (defense in depth, default ON, `--no-redact`): high-confidence patterns replaced by
+     `[REDACTED:<kind>]` in ALL tool outputs: PEM private-key blocks, AWS access key ids, GitHub/GitLab/Slack tokens,
+     OpenAI/Anthropic keys, Google API keys, Stripe live keys, `scheme://user:pass@host` credentials, JWTs.
+     Redaction count is disclosed in the tool output. No entropy heuristics (too noisy for code).
+- D6 Git hardening: fixed argv templates. Model-supplied values are only: (i) revisions — regex-validated, then resolved
+     with `git rev-parse --verify --end-of-options <rev>^{commit}` to a full SHA which is what gets used; (ii) paths —
+     policy-checked, passed after `--` with `GIT_LITERAL_PATHSPECS=1`; (iii) integers; (iv) free text only as the value part
+     of `--author=…`, `--grep=…`, `-S…` single argv elements. Env = allowlist (PATH, HOME, LANG, TZ, TMPDIR, XDG_CONFIG_HOME)
+     + `GIT_TERMINAL_PROMPT=0 GIT_OPTIONAL_LOCKS=0 GIT_PAGER=cat LC_ALL=C`. Always `-c core.fsmonitor=false
+     -c core.hooksPath=/dev/null -c core.pager=cat -c diff.external= -c log.showSignature=false -c protocol.allow=never`,
+     `--no-ext-diff --no-textconv` on diff-producing commands, and every configured `filter.<x>.clean|smudge|process`
+     neutralised via `-c` (drivers enumerated with `git config --get-regexp`). Context timeouts; output is stream-capped.
+     The `mcp` process unsets `CONTROL_PLANE_API_KEY`/`OPENAI_API_KEY` at startup. For diff/show, the changed-file list is
+     computed first (`--name-status -z -M`), filtered by policy (both sides of renames), and only allowed paths are passed as pathspecs.
+- D7 Tools (all `readOnlyHint:true, destructiveHint:false, idempotentHint:true, openWorldHint:false`, `title`, strict
+     input schema, model-friendly validation errors as `isError:true`, unknown tool → JSON-RPC -32602):
+     1 `repo_overview` (name, branch/detached/unborn, HEAD, upstream ahead/behind, dirty counts, file counts per top-level
+       dir and per extension, key manifests present, policy + limits summary);
+     2 `list_files` (path prefix, depth, glob, limit, cursor; sizes; withheld markers);
+     3 `find_files` (substring/glob over paths, ranked);
+     4 `read_file` (path, start_line, max_lines default 500 / max 2000, optional `rev`; header: total lines, size, range, next_start_line);
+     5 `read_files` (batch ≤ 10 paths under one byte budget);
+     6 `search_code` (literal or RE2 regex, case_sensitive, whole_word, include/exclude globs, context_lines 0..5,
+       max_results, cursor; grouped by file; footer states files scanned/total and `complete: true|false` + reason);
+     7 `file_outline` (heuristic per-language definition lines: funcs/classes/types — Go, Py, JS/TS, Java, C#, Rust, C/C++, Ruby, PHP, Kotlin, Swift);
+     8 `git_status`; 9 `git_log` (limit, skip, path, author, since, until, grep, pickaxe `-S`, rev/range, with_stats);
+     10 `git_diff` (mode worktree|staged|head|range `a..b`/`a...b`; path filter; stat_only; context; per-file truncation notices);
+     11 `git_show` (commit metadata + stat + capped patch); 12 `git_blame` (path, line range ≤ 200, optional rev);
+     13 `git_refs` (branches local/remote, tags).
+     No `search`/`fetch` compatibility tools (F5). No MCP resources/prompts.
+- D8 Limits: per-response budget 200 KB default (`--max-output-kb`), search time budget 10 s, files > 4 MB skipped by
+     search and COUNTED in the footer, long lines truncated at 2000 chars with a marker, per-call hard timeout 60 s.
+- D9 MCP engine: dual-era per F4. Legacy: `initialize` negotiates among {2025-11-25, 2025-06-18, 2025-03-26, 2024-11-05}
+     (echo if supported, else newest legacy), `ping`, lenient about missing `notifications/initialized`. Modern: 2026-07-28
+     semantics whenever a request carries the `_meta` protocol-version key. Concurrent request handling (pool of 8),
+     `notifications/cancelled` cancels in-flight work, single writer mutex, JSON-RPC batch arrays answered as arrays,
+     parse error → -32700 with null id, handler panics → -32603, stdin EOF → drain and exit 0, stdout carries protocol bytes only.
+- D10 Activity log: one line per tool call on stderr (tool, compact args, bytes, duration, ok/err, redactions) — visible
+     live in the user's terminal because tunnel-client forwards child stderr; plus a JSONL audit file under the XDG state
+     dir (0600, rotated at 5 MB, default ON, `--no-audit-log`), viewable with `repochat log`.
+- D11 Launcher: finds repo root from any subdirectory; refuses `$HOME` or `/` as root unless `--allow-broad-root`;
+     credentials from env > config profile; self-tests the MCP server in-process before starting; runs tunnel-client with
+     `run --control-plane.tunnel-id … --control-plane.api-key env:CONTROL_PLANE_API_KEY --mcp.command "<abs binary> mcp --session <base64url JSON>"
+     --health.listen-addr 127.0.0.1:0 --health.url-file <tmp>`; key only via env; forwards signals; polls `/readyz` and
+     prints a "connected" banner + admin UI URL; propagates exit code; `--print-command` dry run; args after `--` pass through.
+- D12 `setup`: guided wizard (URLs for each step), hidden key input with SIGINT-safe echo restore, validation
+     (tunnel id shape; key charset `^[0-9A-Za-z_-]+$` as tunnel-client requires), atomic 0600 write, named profiles
+     (`--profile`), non-interactive mode via flags/env.
+- D13 `doctor`: ✓/✗ report + exit code: git version, repo root, exposed/withheld file counts, tunnel-client path + version,
+     config perms, credentials, and a real subprocess MCP self-test in both eras.
+- D14 Introspection: `repochat tools`, `repochat call <tool> [json]` (prints exactly what the model would receive),
+     `repochat files [--withheld]`, `repochat mcp-config` (snippets for other stdio MCP clients).
+- D15 Tests: policy matrix; traversal/symlink; fileset vs .gitignore; redaction; search (regex/context/caps/completeness);
+     read ranges; git tools on synthetic repos (unborn HEAD, detached, renames, binary); hostile `.git/config`
+     (filter/textconv/fsmonitor/pager must NOT execute — marker-file negative controls); MCP conformance for both eras
+     (negotiation, errors, cancel, concurrency, batch); schema validity of every tool; launcher against a fake
+     `tunnel-client` (argv/env assertions, key never in argv); fuzz targets for path and revision validators; `go vet`, `-race`.
+- D16 Distribution: Makefile (build/test/cross-compile linux+darwin × amd64+arm64, CGO off, checksums), version+commit via
+     ldflags, MIT, CI workflow, README rewritten honestly (content IS sent to OpenAI on demand; no inbound port in repochat;
+     tunnel-client opens a loopback health/admin port), threat model, limitations, E2E checklist.
+
+## Open questions
+- Q1 Is K4 (single repo) acceptable for a "full-featured" v1, or is it self-defeating?
+- Q2 Withheld file NAMES are disclosed (D3). Acceptable, or should names be hidden too?
+- Q3 Redaction default ON (D5): right default, or does it harm code comprehension / give false assurance?
+- Q4 Audit JSONL default ON (D10): right default?
+- Q5 What is missing for this to be a complete, production-usable product rather than an MVP? Be concrete.

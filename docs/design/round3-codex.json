@@ -1,0 +1,107 @@
+{
+    "responses": [
+        {
+            "id": "C1'",
+            "decision": "counter",
+            "reason": "Minor wording correction: SameFile proves object identity, not that no symlink was traversed. A swapped symlink resolving to the original directory can pass. Anchoring still prevents substitution with a different directory. The explicit Git concurrency boundary is acceptable.",
+            "counter_proposal": "Replace 'a symlink swap yields an error' with 'substitution with a different directory object is rejected; subsequent traversal remains anchored to the verified directory object'. Retain the leaf no-follow checks and race tests."
+        },
+        {
+            "id": "C5'",
+            "decision": "accept",
+            "reason": "The restricted namespaces, correct ancestor direction, peeled tags, and fail-closed error handling resolve the authorization ambiguity.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C7'",
+            "decision": "accept",
+            "reason": "Source-derived PEM spans and explicit omission when source inspection is unavailable close the known excerpt bypass. Implementation tests should include a single body line, context lines, and both patch sides.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C8'",
+            "decision": "accept",
+            "reason": "The aggregate byte budgets and bounded stderr address the remaining resource issue. Test the promised cancellation responsiveness with saturated workers and stalled stdout as well as ordinary overload.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C9'",
+            "decision": "accept",
+            "reason": "The explicit initialization exception and distinction between malformed metadata and unsupported versions resolve the protocol wording issue.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C12'",
+            "decision": "counter",
+            "reason": "Minor: this hashes policy and file membership, not file contents. Working-file edits therefore leave the generation unchanged; the completeness wording must reflect that distinction.",
+            "counter_proposal": "Call this a 'policy/fileset generation'. State that working-tree contents remain live and completeness describes coverage of that membership, not an immutable content snapshot. If continuation resumes within a file, detect changes to that file before reusing its line position and require restart when changed."
+        },
+        {
+            "id": "C13'",
+            "decision": "accept",
+            "reason": "Command-specific framing, dedicated bounded blob reads, explicit patch parsing, and field-level sanitization resolve the parsing and presentation concerns.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "C15'",
+            "decision": "accept",
+            "reason": "Diff endpoint semantics, log commit-set semantics, and rejection of ambiguous merge bases are now explicit.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X2'",
+            "decision": "accept",
+            "reason": "The command-specific templates correct the invalid status flags while preserving the intended hardening.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "X8'",
+            "decision": "accept",
+            "reason": "Mandatory release execution with a verified pinned binary closes the validation gap. Missing prerequisites correctly fail the release job.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "D17'",
+            "decision": "accept",
+            "reason": "The amended onboarding contract resolves the major installer, completion-reporting, takeover, and prerequisite issues. Upstream packaging creates regular root-level payload entries, consistent with the extraction rule: [v0.0.21 packaging script](https://github.com/openai/tunnel-client/blob/v0.0.21/scripts/package_release_archive.sh).",
+            "counter_proposal": ""
+        },
+        {
+            "id": "M8",
+            "decision": "accept",
+            "reason": "Pinned hashes, restricted redirects, bounded extraction, exclusive temporary creation, and locked atomic installation provide an adequate installer design.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "M9",
+            "decision": "accept",
+            "reason": "The states no longer assert caller identity or successful ChatGPT delivery, and onboarding completion requires a successfully served smoke-test tool call. Display 'tool discovery' only when the observed method actually concerns discovery.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "M10",
+            "decision": "accept",
+            "reason": "Cooperative shutdown followed by acquisition of the persistent lock avoids PID-reuse signaling and simultaneous ownership. The refusal path for an unresponsive owner is correct.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "M11",
+            "decision": "accept",
+            "reason": "The bounded prompts, missing-value follow-up, rejection of extra tokens without echoing, and terminal restoration define a usable credential-entry contract.",
+            "counter_proposal": ""
+        },
+        {
+            "id": "M12",
+            "decision": "accept",
+            "reason": "Git-first preflight, separately reported permissions/connectivity states, and disclosure before service starts resolve the remaining onboarding concerns.",
+            "counter_proposal": ""
+        }
+    ],
+    "new_issues": [],
+    "consensus_reached": true,
+    "remaining_disagreements": [
+        "Minor C1' wording: descriptor identity verification does not prove that an internal symlink was never traversed.",
+        "Minor C12' clarification: the generation represents policy/fileset membership, while working-tree content remains live."
+    ],
+    "summary": "Design consensus reached: no critical or major point remains open. Two minor contract clarifications remain above. This approves the design direction, not implementation correctness; code, race tests, protocol fixtures, and mandatory tunnel-client integration evidence remain for the implementation review. No files were modified or binaries downloaded."
+}

@@ -1,0 +1,138 @@
+Round 2. I verified your factual claims against source before conceding (tunnel-client v0.0.21: initialization gate at
+serialized_forwarding_transport.go:409; tunnelIDPattern `^tunnel_([a-z0-9]{4}_)?[a-z0-9]{32}$`; git docs for
+protocol.<name>.allow precedence, GIT_NO_LAZY_FETCH, core.worktree). Respond per id with accept / reject / counter.
+
+## CONCESSIONS (final text — accept means this wording goes into the implementation contract)
+C1 (D4) Descriptor-verified no-follow traversal: every path component is Lstat'ed (must be a real directory), opened
+   through os.Root, and the opened handle is fstat'ed and compared with os.SameFile to the Lstat result; the leaf must
+   Lstat as a regular file, is opened O_NOFOLLOW|O_NONBLOCK, then fstat'ed: regular + SameFile. Symlinks are never
+   followed anywhere (listed as symlinks, content not served). Same routine for `.repochatignore`. Before each fileset
+   refresh the root path is re-stat'ed and compared (SameFile) with the held os.Root; mismatch → fail closed.
+C2 (D6) Git hardening additions: every git invocation uses explicit `--git-dir=<abs>` and `--work-tree=<root>` (root =
+   nearest ancestor containing `.git`, found by repochat itself, so `core.worktree` cannot redirect);
+   `GIT_NO_LAZY_FETCH=1`; `GIT_ALLOW_PROTOCOL` set to a deny-all value (tested on the installed git with a positive
+   control: promisor remote using ext:: + missing object must run the marker WITHOUT protections and must NOT with them);
+   `GIT_NO_REPLACE_OBJECTS=1`; children run in their own process group and the group is killed on cancel/timeout;
+   since/until validated by a conservative pattern; range endpoints resolved separately. README does not claim
+   hostile-.git isolation: repo-local config is treated as untrusted for execution as defense in depth, "not a sandbox".
+C3 (M1) Empty authorization never widens: diffs are produced per authorized file (one literal pathspec each); zero
+   authorized files → no content-producing git command runs, the result says "N changed paths withheld". Name-status
+   enumeration is all-or-error (a capped/failed enumeration is an error). A file pathspec P is skipped when any changed
+   entry under `P/` is withheld (file↔directory type change), so a literal pathspec can never pull in withheld content.
+   Regression test: commit touching only credentials.json.
+C4 (M2) Search matches the DISCLOSED representation: when redaction is on, a file that may contain secret spans is
+   redacted first and the predicate runs on the redacted lines; hidden bytes cannot change match existence, counts or
+   cursors (tested with prefix guesses). `git_log` pickaxe (-S) is unavailable while redaction is on (explained in the
+   tool error); with `--no-redact` it runs with --name-only and commits are reported only if an authorized path matched.
+C5 (M6) Authorized history = commits reachable from HEAD, refs/heads, refs/remotes, refs/tags. After resolving a
+   revision to a commit SHA, reachability is checked (`for-each-ref --contains` / `merge-base --is-ancestor HEAD`);
+   reflog syntax (`@{`) and stash are rejected; unreachable/dangling objects are not served. Path policy applies to
+   every tree entry at any revision (policy is a pure function of the path).
+C6 (D2/D3/Q2) Two universes: (a) working tree = `git ls-files` (tracked incl. tracked-but-gitignored, plus untracked
+   non-ignored), (b) revision trees = any path at an authorized commit; both filtered by one policy function.
+   Precedence: 1 unsupported name → withheld; 2 `.repochatignore` (in-process gitignore-style matcher, tighten-only);
+   3 `--deny`; 4 `--allow` (overrides only rule 5); 5 built-in secret rules (directory/exact/extension rules always
+   apply; the keyword heuristic never applies to source-code extensions). Withheld NAMES are hidden by default in every
+   listing (list_files, find_files, status, diff stat, log stat): only counts per category; a direct request for a
+   withheld path answers "withheld by policy", never "not found". `--show-withheld-names` opts in. Enumeration failure
+   or an over-large fileset fails closed. Snapshot generation id is published in result metadata.
+C7 (D5/Q3) Redaction happens before slicing/truncation/context extraction; read_file tracks PEM state from line 1;
+   hunk-type outputs (diff/show/blame) additionally redact runs of ≥2 base64-body-looking lines (PEM bodies whose BEGIN
+   is outside the hunk); all tool text (incl. commit metadata, ref names, remote URLs, error text) passes the line
+   redactor; docs say "best-effort masking, not a guarantee".
+C8 (D8) Bounds: inbound frame 4 MiB; ≤256 admitted calls, deadline starts at admission, queued calls cancellable;
+   fileset ≤ 500k entries else fail closed; git stdout stream-capped; blob size checked with cat-file -s before reading;
+   line scan cap; process-group kill + WaitDelay; search footer enumerates every incompleteness reason
+   (result limit, time budget, unreadable, binary, oversized, changed-during-scan, withheld).
+C9 (D9) Era state machine: legacy semantics only after `initialize` was received on this process; a request without
+   the `_meta` protocol-version key before `initialize` → -32602 naming supported versions; per-request version other
+   than 2026-07-28 → -32022 with data.supported/requested; JSON-RPC batch arrays accepted only when the negotiated
+   legacy revision is 2025-03-26, else -32600; cancelled requests get no response; duplicate in-flight id → -32600;
+   ids echoed losslessly; writer failure terminates.
+C10 (D11) Launcher: passes `--mcp.stdio-send-initialized-notification`; builds tunnel-client's environment from an
+   allowlist (drops inherited CONTROL_PLANE_*/MCP_*/HEALTH_*/LOG_*/OPENAI_ADMIN_KEY etc.) plus exactly what it sets;
+   no pass-through args; private 0700 temp dir for the health URL file; probes only loopback URLs, no proxy, no
+   redirects, bounded polling; three distinct reported states: (1) local: tunnel-client up (/readyz), (2) authenticated:
+   control-plane component status ok (a poll succeeded), (3) exercised: first MCP request from the remote side reached
+   the child. "Connected" is only printed for (3). Bounded SIGTERM→SIGKILL escalation. Child config (root, effective
+   policy, limits; never credentials) is frozen in the `--session` blob.
+C11 (D12/D13/D14) setup: secrets only via hidden prompt/env/file; `stty -g` save + exact restore incl. on SIGINT;
+   config must be a regular file owned by the user with 0600 in a 0700 dir, versioned schema; syntax validation and
+   live authentication reported separately. doctor prints local / credential-syntax / authentication / remote-exercise
+   each as ok, failed or "not tested", and enforces minimum git and tunnel-client versions. `repochat call` goes through
+   the same in-process server pipeline (same policy, redaction, limits, selectable era).
+C12 (M4) Cursors are opaque tokens binding tool, argument hash, policy+fileset generation and position; a cursor from
+   another query or an older generation is rejected with an actionable message; every page is re-authorized; footers
+   qualify completeness "for snapshot <generation>".
+C13 (M5) Hostile output: all parsed git output is NUL-delimited; every tool result and every terminal/log line is
+   passed through a control-character sanitizer (C0 except \n\t, DEL, C1, ESC → visible \xNN); server instructions and
+   tool descriptions contain no repository-derived text and state that repository content is untrusted data.
+C14 (M7) Supported-shapes matrix with fixtures: unborn HEAD, detached HEAD, linked worktree (gitfile), submodule
+   (opaque gitlink, never recursed; `--ignore-submodules=dirty`), sparse/missing working files reported as "not in
+   working tree", shallow/partial clones (missing objects → explicit error, no fetch), LFS pointers labelled, conflict
+   stages deduped and reported, merge commits diffed against first parent (stated in output), root commit vs empty tree.
+C15 (D7) Go outline uses go/parser; other languages are regex heuristics and labelled as such; tool descriptions
+   spell out range semantics (`a..b` = changes from a to b; merge_base=true = from merge-base(a,b) to b), blame of the
+   working file vs a revision, and gitignore-style glob semantics.
+C16 (F1/F3/B8/B9/B10/D16) Wording accepted. D16: go.mod floor 1.24, releases built with the current stable toolchain,
+   checksums + GitHub build attestation in the release workflow, CI matrix linux + macos.
+
+## DISAGREEMENTS (each with my compromise)
+X1 (D6 "disable system/global config") Reject. System + global config is git's own "protected configuration" and is
+   the user's; disabling it breaks `core.excludesFile` (which would EXPOSE more untracked files), `core.autocrlf`
+   (spurious modifications) and `safe.directory`. Compromise: keep them, but neutralise every execution-capable key
+   from ANY scope with command-scope overrides/flags (fsmonitor, hooksPath, pager, diff.external, textconv, ext-diff,
+   showSignature, all filter.*.clean|smudge|process|required), which outrank all config files; documented trust
+   boundary: user/system config trusted, repo-local config untrusted for execution.
+X2 (D6 "prefer raw-object plumbing") Partly. Plumbing for object access (cat-file, ls-tree, diff-tree, rev-list,
+   for-each-ref, ls-files). Porcelain `git status` / `git diff` only for working-tree comparisons, because plumbing
+   diff-files/diff-index needs an index refresh (a write) to avoid stat-dirty false positives. They run with
+   --no-ext-diff --no-textconv, GIT_OPTIONAL_LOCKS=0 and neutralised filters, proven by positive-control fixtures.
+X3 (D7 structuredContent) Reject. Unknown clients may forward ONLY structuredContent to the model and drop the text,
+   and K7 prevents verifying ChatGPT's behaviour. Compromise: every tool result ends with one stable, documented,
+   tested line `@meta {json}` carrying tool, repo id, rev (if any), generation, complete, truncated, next cursor /
+   next_start_line, redactions, withheld counts.
+X4 (D9 EOF) Counter. On stdin EOF: stop admitting, let already-admitted calls finish within a bounded 5 s drain, then
+   exit (needed for pipe-driven use: `printf … | repochat mcp`, doctor, `repochat call`). ctx cancel / writer failure →
+   immediate exit.
+X5 (D10 args) Split. Persistent audit JSONL is metadata-only by default (accept), `--audit-args` opts in. The
+   ephemeral live terminal line DOES show tool + sanitized, redacted, length-capped arguments (path, query) because
+   showing the user what an external model is reading on their machine is the point; `--quiet` hides it.
+X6 (M3 binding by default) Reject as default — see K8 below (product-owner requirement: one command in any repo).
+   Compromise: per-tunnel local lock with takeover prompt; startup banner names the served repo; a notice when the
+   profile last served a different repo; stable repo id (dir name + short hash of the root commit / path) in server
+   instructions-independent `@meta` of every result and in `repo_overview`, so a conversation can detect a switch;
+   opt-in binding (`repochat setup --bind` records the repo for that profile; bound profiles are auto-selected and
+   refuse other repos); README: create a PERSONAL plugin — everyone who can use the plugin reads whatever is served.
+X7 (M5 reversible ids for non-UTF-8 names) Reject. Paths that are not valid UTF-8 or contain control characters are
+   unsupported: withheld under category "unsupported-name" and counted, never silently rewritten.
+X8 (D15 real tunnel-client + mock control plane) Accept in principle: implemented as an opt-in integration test
+   (skipped when no binary is supplied); whether it actually ran here is reported truthfully (needs the product owner's
+   permission to download a 29.6 MB binary).
+
+## NEW PRODUCT-OWNER REQUIREMENT (constraint, not a finding) + design for it
+K8 Onboarding / first launch must be ULTRA EASY: one command (`repochat`) takes a new user to a working ChatGPT
+   connection; daily use is `cd repo && repochat`.
+D17 First-run flow, all inside plain `repochat` on a TTY (non-TTY: no prompts, precise error naming the env vars):
+   1. Helper: locate tunnel-client (REPOCHAT_TUNNEL_CLIENT → private dir ~/.local/share/repochat/bin → PATH). Missing →
+      offer to install: downloads the official release zip for this OS/arch over HTTPS from github.com/openai/tunnel-client
+      (redirects restricted to GitHub hosts, size-capped), verifies SHA-256 against hashes PINNED INSIDE repochat for a
+      known-good version (v0.0.21, four platforms), extracts only the `tunnel-client` binary, atomic install 0755.
+      `repochat install-helper --version vX` for an unpinned version verifies against that release's SHA256SUMS.txt only
+      and says so explicitly before asking for confirmation. Nothing is downloaded without consent (prompt or `--yes`).
+   2. Credentials: prints the two Platform URLs (opens a browser only on a desktop session), then ONE hidden prompt that
+      accepts the tunnel ID and the runtime API key in any order/any number of lines (classified by shape); syntax
+      validation; LIVE verification with `tunnel-client admin --json tunnels get <id>` using the runtime key via env
+      (shows the tunnel name, warns when it has no workspace attached); atomic 0600 save. Existing
+      CONTROL_PLANE_API_KEY/OPENAI_API_KEY in the environment is offered for reuse, never read silently into config.
+   3. ChatGPT: the tunnel is started immediately and the exact UI path is printed (Plugins → Add custom MCP server →
+      Connection: Tunnel → pick the tunnel → No authentication → Create as plugin → Install); repochat then waits and
+      prints "ChatGPT connected" when the first remote MCP request arrives (tunnel-client's own startup probe skips
+      stdio, so the first request the child sees is remote); the profile is marked onboarded so later runs print a
+      two-line banner instead of instructions.
+   Daily: `repochat` → banner (repo, exposed/withheld counts) → states local/authenticated/exercised → live activity
+   lines. If another repochat already holds this tunnel, offer to take over (stop the old process, serve this repo).
+   Also: `repochat install` copies the binary to ~/.local/bin and checks PATH; `make install` does the same from source.
+Review D17 like the other items (id D17) and raise anything unsafe or misleading in it as new_issues.
+
+Set consensus_reached=true only if no critical/major point remains open; list what remains in remaining_disagreements.

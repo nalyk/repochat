@@ -1,0 +1,79 @@
+Round 3 (design). I accept every counter. Final contract text per id — reply accept/reject/counter; declare design
+consensus if nothing critical/major remains. Implementation review (code + test evidence) follows in a later round.
+
+C1' Traversal is anchored: each component is Lstat'ed and opened relative to the PREVIOUSLY VERIFIED directory handle
+    (never by re-walking a pathname); a directory is opened with os.Root.OpenRoot on the parent handle (an O_DIRECTORY
+    open: cannot block on FIFOs, yields ENOTDIR for non-directories) and its fstat must be SameFile with the Lstat
+    result, which must be a real directory — so a symlink swap yields an error, never another directory. Leaf: Lstat
+    regular → open O_NOFOLLOW|O_NONBLOCK via the verified parent handle → fstat regular + SameFile. Tests swap an
+    ancestor for a symlink (a) before traversal and (b) after its handle was verified but before the leaf is opened.
+    Git boundary: concurrent replacement of the root directory or of `.git` by a local process is EXPLICITLY outside
+    the guarantee; root identity (stat + SameFile against the held handle) is checked before EVERY git invocation and
+    every fileset refresh, and repochat stops serving when it differs.
+C5' Authorization roots are exactly HEAD and refs under refs/heads/, refs/remotes/, refs/tags/ (tags peeled).
+    Candidate C (a resolved commit OID) is authorized iff `git merge-base --is-ancestor C HEAD` exits 0, or
+    `git for-each-ref --count=1 --contains=C refs/heads/ refs/remotes/ refs/tags/` (pattern-restricted, never --all,
+    never refs/stash) prints a ref. Exit 1 / empty output = not authorized; any other exit status = operational error
+    → fail closed with an error, never treated as authorized. Revisions using `@{` are rejected before resolution.
+C7' PEM spans are computed from the complete source versions, not from the excerpt. Blame: the full file (working copy
+    or blob at the revision) is run through the line redactor from line 1 and the displayed range takes those masked
+    lines. Diffs: when a patch contains any line that could be key material (BEGIN/END marker or a base64-only line),
+    both sides' full contents (old: base blob / index blob; new: target blob / index blob / working file, ≤ 32 MiB
+    each) are scanned for PEM line spans, the patch is parsed (`@@ -a,b +c,d @@`), and every context/removed/added line
+    whose old/new line number lies in a span is masked. If a side cannot be read within bounds the file's patch is
+    omitted with an explicit reason. The ≥2-line base64 heuristic stays only as additional masking.
+C8' Extra budgets: admitted calls ≤ 256 AND the sum of their raw request frames ≤ 16 MiB (over budget → immediate
+    -32603 "server busy" from the reader loop, which never blocks on workers, so cancellations are always processed);
+    fileset ≤ 500k entries AND ≤ 64 MiB of path bytes, else fail closed; git stderr capture ≤ 8 KiB; every
+    intermediate buffer has an explicit cap.
+C9' `initialize` is an explicit pre-handshake exception. Order of checks for a request carrying the protocol-version
+    key: type validation (version must be a string; for 2026-07-28 clientCapabilities must be present and an object)
+    → -32602 when malformed/missing; a well-formed version that is not supported → -32022 with data.supported and
+    data.requested. Batching, cancellation, lossless ids, duplicate-id and writer-failure rules as in C9.
+C12' Cursor tokens (≤ 512 bytes, positions range-checked) bind: repo id, tool, argument hash, resolved OIDs where a
+    revision is involved, and the snapshot generation — a CONTENT hash of (policy, path set), so it does not change
+    when the 3 s cache is merely refreshed; it changes only when files are added/removed/re-classified. A stale or
+    foreign cursor is rejected with "restart without cursor". Cursor lifetime = until the path set or policy changes.
+C13' NUL-delimited records for every path list; object content read from a dedicated `cat-file blob <oid>` process
+    after a `cat-file -s` size check; patches go through an explicit hunk parser (needed for C7'). Human-readable
+    fields are sanitized before JSON serialization (never the envelope). Single-line fields (log lines, names, refs,
+    subjects, arguments) additionally escape \n and \t; multi-line source content keeps them.
+C15' Tool text: git_diff `base`/`target` compare two endpoints (changes from base to target); merge_base=true compares
+    merge-base(base,target) to target and is REJECTED with an actionable error when `git merge-base --all` returns
+    more than one base. git_log `range` "a..b" is a commit-set (commits reachable from b and not from a).
+X2' Command-specific templates: `status --porcelain=v2 --branch -z` gets no diff flags; every diff-producing command
+    gets `--no-ext-diff --no-textconv`; optional locks off and filters neutralised for all.
+X8' The real tunnel-client contract suite (pinned, hash-verified upstream binary + local mock control plane) is opt-in
+    locally and MANDATORY in the release workflow: the job installs the pinned helper and runs the suite with
+    REPOCHAT_REQUIRE_TUNNEL_CLIENT=1, under which a missing binary is a test FAILURE, not a skip.
+D17' Onboarding, amended:
+    M8  Installer: HTTPS only, every redirect hop must be https to an exact allowlisted host (github.com,
+        objects.githubusercontent.com, release-assets.githubusercontent.com); bounded total time, compressed bytes
+        (≤ 80 MiB), ZIP entry count (≤ 64) and decompressed binary bytes (≤ 200 MiB); the archive must contain exactly
+        one regular-file entry named `tunnel-client` (duplicates, symlink/dir entries with that name → reject);
+        extracted to an O_EXCL temp file inside the private 0700 install dir (verified: owned by the user, not a
+        symlink), fsync, chmod 0755, atomic rename, all under an flock'ed install lock. Default = version pinned in
+        repochat with embedded SHA-256 per platform; any other version is labelled "verified only against that
+        release's own SHA256SUMS.txt" before the consent prompt.
+    M9  Wording/state: "authenticated" = control-plane polling ok; first remote request = "remote MCP activity
+        detected (tool discovery)" with no claim about who the caller is; onboarding is marked complete only after a
+        tool call has been SERVED successfully during the guided smoke test (the wizard asks the user to send
+        "@RepoChat give me an overview of this repository"); until then the plugin-creation instructions are shown
+        on every start (short form) and never suppressed.
+    M10 Takeover: ownership of a tunnel is an flock on a persistent per-tunnel lock file (never unlinked). The owner
+        listens on a Unix socket inside the user-only 0700 state dir. A newcomer that cannot get the lock connects to
+        that socket and requests a cooperative stop; the owner stops tunnel-client and its children, then exits and
+        thereby releases the lock; the newcomer then acquires the lock (bounded wait) before starting anything. No
+        PID is ever signalled. If the owner does not answer, repochat reports it and does NOT start a second instance.
+        Tests: stale socket file, simultaneous takeovers, unresponsive owner.
+    M11 Paste contract: one hidden prompt reads one line ("paste the tunnel ID and the API key, then press Enter");
+        values are classified by shape; exactly one tunnel ID and one key are required — if one is missing a second
+        hidden prompt asks for precisely that one; duplicates or unrecognised tokens are rejected without echoing
+        anything; input bounded to 4 KiB; terminal state saved with `stty -g` and restored on every exit path incl.
+        SIGINT; non-TTY → no prompt, exit with the env-var instructions. Tests: CRLF, EOF, extra tokens, non-TTY.
+    M12 Order: git preflight first (before any download or credential prompt). Statuses reported separately:
+        tunnel metadata readable (admin tunnels get) / polling authenticated (health control-plane ok) / remote
+        activity / tool call served; each failure prints its own recovery hint (wrong key or missing Tunnels Read+Use,
+        tunnel has no ChatGPT workspace attached, plugin creation not permitted in the workspace). Before the tunnel
+        starts, the banner shows the repo path, exposed/withheld counts and the audience note (everyone who can use
+        this plugin can read this repository while repochat runs; create it as a personal plugin).

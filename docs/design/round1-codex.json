@@ -1,0 +1,302 @@
+{
+    "verdicts": [
+        {
+            "id": "F1",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The flags and quoting parser exist in v0.0.21 and inspected HEAD. However, the special trailing ',channel=' interpretation applies to the qualified 'command=...' form, not every command string. This is argv parsing, not shell execution. Evidence: [binding parser](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/runtimeconfig/config.go#L2452), [argv parser](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/runtimeconfig/config.go#L2835).",
+            "proposed_change": "Document the exact accepted command form. Test the launcher\u2019s encoder against the actual upstream parser, including spaces, quotes, backslashes, commas, and executable paths containing '=\u2026'."
+        },
+        {
+            "id": "F2",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "Confirmed: exec.Command receives no replacement Env or Dir, stderr is inherited explicitly, restart is the default, and the initialized-notification shim defaults false. Crucially, tunnel-client also gates legacy operational requests on initialization; server-side leniency cannot bypass that gate. Evidence: [child creation](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/mcpclient/stdio_command.go#L185), [initialization gate](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/mcpclient/serialized_forwarding_transport.go#L712).",
+            "proposed_change": "Retain the fact; apply the initialization-gate correction in D11."
+        },
+        {
+            "id": "F3",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The numbers are correct defaults, but their scope matters: 10 MiB covers the serialized tunnel envelope; 120 seconds includes hosted queue time and final delivery; the rate allowance is shared for the documented tunnel/caller grouping. Evidence: [official tunnel limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits).",
+            "proposed_change": "Record these as service defaults with their scopes, not guaranteed application budgets. Keep local deadlines comfortably below the remaining service deadline."
+        },
+        {
+            "id": "F4",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "Verified, including the current revision, required per-request fields, discovery, resultType, caching fields, removed ping, and version error. Modern metadata belongs in params._meta. Evidence: [current revision](https://modelcontextprotocol.io/docs/2026-07-28/learn/versioning), [changes](https://modelcontextprotocol.io/specification/2026-07-28/changelog), [dual-era behavior](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning).",
+            "proposed_change": "Retain; turn each normative requirement into a wire-level acceptance test."
+        },
+        {
+            "id": "F5",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "All three claims are explicitly documented for custom MCP servers. Company-knowledge eligibility has separate search/fetch requirements, which your stated product does not need. Evidence: [custom MCP documentation](https://developers.openai.com/api/docs/guides/custom-mcp-server).",
+            "proposed_change": "Retain the custom-plugin scope and avoid implying company-knowledge compatibility."
+        },
+        {
+            "id": "B1",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "schema inserts the variadic required slice directly; calls without required arguments produce a nil slice and therefore JSON null. The affected tools are repo_info, tree, git_status, and git_log. Evidence: [schema helper](/home/ubuntu/gits/repochat/src/main.go:647).",
+            "proposed_change": "Omit required when empty, or emit an empty array. Validate the serialized catalogue against its declared JSON Schema dialect."
+        },
+        {
+            "id": "B2",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "repo_info requires rev-parse --short HEAD to succeed and returns its error. An unborn repository has no HEAD commit. Evidence: [repo_info](/home/ubuntu/gits/repochat/src/main.go:671).",
+            "proposed_change": "Represent unborn HEAD explicitly; distinguish it from corruption and other Git failures."
+        },
+        {
+            "id": "B3",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The handler copies any nonempty requested protocolVersion into the response without checking support. Evidence: [initialize handler](/home/ubuntu/gits/repochat/src/main.go:705).",
+            "proposed_change": "Negotiate only implemented legacy revisions and separately validate modern per-request versions."
+        },
+        {
+            "id": "B4",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The regex matches token/password followed by a dot, including your examples. Tree and search silently omit matches. Evidence: [regex](/home/ubuntu/gits/repochat/src/main.go:38), [tree filtering](/home/ubuntu/gits/repochat/src/main.go:512).",
+            "proposed_change": "Replace broad keyword matching with explicit credential-file rules and disclose exclusions."
+        },
+        {
+            "id": "B5",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The listed names/extensions are absent from the rules: terraform.tfstate, ordinary *.tfvars, service-account.json, and .htpasswd do not match the current expression. Evidence: [regex](/home/ubuntu/gits/repochat/src/main.go:38).",
+            "proposed_change": "Add explicit rules and regression cases, while documenting that filename policy cannot identify every secret."
+        },
+        {
+            "id": "B6",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "Tree and search use WalkDir with hard-coded filtering; read_file likewise never consults Git ignore rules. This both exposes ignored files and hides tracked source under names such as vendor. Evidence: [tree](/home/ubuntu/gits/repochat/src/main.go:500), [search](/home/ubuntu/gits/repochat/src/main.go:565), [path checks](/home/ubuntu/gits/repochat/src/main.go:389).",
+            "proposed_change": "Use an explicitly defined Git fileset consistently across discovery, reads, and search."
+        },
+        {
+            "id": "B7",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The zero-result return occurs before the capped-search footer. Its wording says 'within scanned text files', but does not reveal that scanning stopped early. Scanner errors are also discarded. Evidence: [search completion](/home/ubuntu/gits/repochat/src/main.go:619).",
+            "proposed_change": "Return completeness, scanned/skipped counts, and stop reasons even when there are zero matches."
+        },
+        {
+            "id": "B8",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The limitations are correctly identified: reads clamp at 300 lines, omit totals, and git_log requests metadata only. These are documented capability gaps, not protocol or security defects. Evidence: [read limit](/home/ubuntu/gits/repochat/src/main.go:448), [git_log](/home/ubuntu/gits/repochat/src/main.go:689).",
+            "proposed_change": "Classify these as product requirements. Prioritize reliable read continuation and diff/show before broad language-outline coverage."
+        },
+        {
+            "id": "B9",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Credential inheritance is confirmed. Repo-configured clean/process filters remain a relevant execution surface when Git inspects worktree contents. However, the common Git wrapper already disables fsmonitor, hooks, and paging, and current tools do not request textconv-producing diffs. Evidence: [environment](/home/ubuntu/gits/repochat/src/main.go:351), [Git wrapper](/home/ubuntu/gits/repochat/src/main.go:367), [filter behavior](https://git-scm.com/docs/gitattributes).",
+            "proposed_change": "Narrow the defect statement to reachable execution paths and credential inheritance; retain the broader surfaces as requirements for new Git tools."
+        },
+        {
+            "id": "B10",
+            "verdict": "disagree",
+            "severity": "minor",
+            "rationale": "Tests already reject traversal, absolute paths, secret paths, internal aliases to secrets, external symlinks, unknown tools, and insecure config permissions. Evidence: [path negatives](/home/ubuntu/gits/repochat/src/main_test.go:47), [unknown tool](/home/ubuntu/gits/repochat/src/main_test.go:105), [permissions negative](/home/ubuntu/gits/repochat/src/main_test.go:132).",
+            "proposed_change": "Replace 'happy-path only' with 'limited negative coverage; missing race, hostile Git configuration, resource exhaustion, and substantive protocol conformance coverage'."
+        },
+        {
+            "id": "B11",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The launcher supplies no health override, upstream defaults to 127.0.0.1:8080, and README says no port is opened. Evidence: [launcher](/home/ubuntu/gits/repochat/src/main.go:340), [README claim](/home/ubuntu/gits/repochat/src/README.md:22), [upstream default](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/runtimeconfig/config.go#L147).",
+            "proposed_change": "Use an ephemeral loopback port and disclose the health/admin listener."
+        },
+        {
+            "id": "D1",
+            "verdict": "agree",
+            "severity": "none",
+            "rationale": "The separation addresses the MVP\u2019s current coupling between repository operations, tool dispatch, and wire handling. Evidence: [combined dispatch and protocol code](/home/ubuntu/gits/repochat/src/main.go:669).",
+            "proposed_change": "Retain. Make the repository service expose policy-enforced operations so CLI and MCP cannot accidentally choose different safety paths."
+        },
+        {
+            "id": "D2",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "The command excludes ignored untracked files, but tracked files remain listed even when matching .gitignore. More seriously, current-index membership excludes historical files already removed from the index, conflicting with historical read/show/diff. A filename snapshot also does not freeze content. Evidence: [ls-files semantics](https://git-scm.com/docs/git-ls-files).",
+            "proposed_change": "Specify separate current-worktree and revision-tree universes, both subject to current operator policy. State that tracked files remain eligible despite .gitignore, or explicitly subtract them. Publish snapshot generation and freshness; fail closed on enumeration failure rather than serving an incomplete security allowlist."
+        },
+        {
+            "id": "D3",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "As written, git ls-files -i lacks the required explicit -c or -o. A universal source-extension exemption also overrides meaningful secret-directory rules unless precedence is specified. Passing a repository-controlled exclusion filename directly to Git can follow a symlink outside the root. Evidence: [ignored-file selection requirements](https://git-scm.com/docs/git-ls-files#Documentation/git-ls-files.txt---ignored).",
+            "proposed_change": "Define precedence: mandatory boundaries and explicit denies win; allow only overrides designated built-ins. Source extensions exempt keyword heuristics, not denied directories. Safely open and bound the ignore file, evaluate a stable copy with explicit -c/-o/-i/-z, and intersect results with the authorized universe. Disclose counts by default; make name disclosure configurable."
+        },
+        {
+            "id": "D4",
+            "verdict": "modify",
+            "severity": "critical",
+            "rationale": "os.Root deliberately follows symlinks that remain inside the root. Thus an eligible path replaced with a link to .env or .git/config can bypass path-based policy unless no-follow enforcement is independently race-safe. Lstat followed by Root.Open does not provide that guarantee. Evidence: [Go\u2019s documented Root semantics](https://go.dev/blog/osroot).",
+            "proposed_change": "Require descriptor-based no-follow traversal for every component, with platform-specific stdlib implementations where necessary. Open the final object without blocking on special files, then verify its type. Apply this to policy files too. Specify how root identity remains consistent between Go descriptors and Git subprocesses."
+        },
+        {
+            "id": "D5",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Output-only regex replacement can miss a PEM body requested without its BEGIN line, secrets split by output caps, and patch lines carrying diff prefixes. This design does not specify where redaction occurs relative to slicing and rendering. The MVP already slices content before returning it: [read_file](/home/ubuntu/gits/repochat/src/main.go:456).",
+            "proposed_change": "Detect secret spans in bounded source content before line selection, truncation, context extraction, or diff formatting; preserve line numbering. Handle oversized or incomplete blocks conservatively. Redact repository-derived metadata and errors field by field. Report that masking is best effort, and address the search oracle in M2."
+        },
+        {
+            "id": "D6",
+            "verdict": "modify",
+            "severity": "critical",
+            "rationale": "protocol.allow=never is only a fallback: repository protocol.<name>.allow settings can override it. Missing objects may trigger lazy fetches, including configured helpers. The environment also retains global/system configuration through HOME/XDG, and Git can redirect worktree access through core.worktree. Filter enumeration followed by a separate command is another mutable-config boundary. Evidence: [protocol precedence](https://git-scm.com/docs/git-config#Documentation/git-config.txt-protocolallow), [lazy-fetch controls](https://git-scm.com/docs/git#Documentation/git.txt-GITNOLAZYFETCH), [external transport commands](https://git-scm.com/docs/git-remote-ext).",
+            "proposed_change": "Add GIT_NO_LAZY_FETCH=1 and a tested deny-all GIT_ALLOW_PROTOCOL setting; enforce a Git version that supports required protections. Disable system/global config explicitly, deliberately preserve needed global ignore patterns, pin worktree/gitdir identities, and control replacement objects. Resolve range endpoints separately and validate dates. Prefer raw-object plumbing; do not claim hostile-.git isolation from a blacklist of config switches alone."
+        },
+        {
+            "id": "D7",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "The catalogue is useful and its error split is substantially correct: malformed call envelopes are protocol errors, while actionable tool-input failures can use isError. Missing details affect correctness: range meanings, merge-parent selection, working versus committed blame, history-path authorization, and glob semantics. Evidence: [MCP tool error rules](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#errors), [blame rename behavior](https://git-scm.com/docs/git-blame).",
+            "proposed_change": "Specify these contracts before implementation. Use stable structured result fields alongside readable text, including source revision, completeness, and continuation. Restrict Git statistics and pickaxe to authorized paths. Mark outlines explicitly heuristic; use Go\u2019s stdlib parser for Go. Keep the proposed tool names and annotations."
+        },
+        {
+            "id": "D8",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Response and wall-clock limits do not bound incoming JSON, queued work, fileset memory, decompressed Git objects, long-line scanning, or descendant processes. The MVP demonstrates the distinction by allocating CombinedOutput before truncating it. Evidence: [current Git output handling](/home/ubuntu/gits/repochat/src/main.go:376).",
+            "proposed_change": "Budget encoded response bytes, reserving space for metadata and truncation notices. Bound input frames, queue length, arguments, filesets, bytes read, object sizes, and intermediate buffers. Start deadlines at admission; cancel queued work independently of the worker pool. Bound process-tree shutdown and pipe draining. Enumerate every reason for incomplete search, including unreadable, binary, changed, and oversized files."
+        },
+        {
+            "id": "D9",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Uniform batch-array responses conflict with MCP\u2019s removal of batching in 2025-06-18. Modern missing metadata must produce -32602, rather than silently selecting legacy behavior. Cancellation must suppress subsequent messages for a cancelled modern stdio request. EOF should terminate promptly, not drain an unbounded queue. Evidence: [batch removal](https://modelcontextprotocol.io/specification/2025-06-18/changelog), [metadata requirements](https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta), [stdio rules](https://modelcontextprotocol.io/specification/2026-07-28/basic/transports/stdio).",
+            "proposed_change": "Dispatch by explicit era and negotiated revision. Reject arrays for revisions from 2025-06-18 onward; support older batching only if retaining those revisions. Define -32600 envelope validation, lossless string/integer IDs, duplicate-ID handling, and no replies to valid notifications. Keep cancellation/admission outside workers. Cancel and perform a bounded shutdown on EOF; terminate on writer failure."
+        },
+        {
+            "id": "D10",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Compact arguments can contain credentials, confidential search strings, or sensitive paths. D5 covers tool outputs, not necessarily these logs. Rotation at 5 MB does not define total retention or concurrent-process behavior. Forwarded stderr makes raw terminal controls another output boundary. Evidence: [stderr forwarding](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/mcpclient/stdio_command.go#L196).",
+            "proposed_change": "Default to metadata-only logs: timestamp, local request/session ID, tool, outcome, duration, counts, truncation, and redaction totals. Make argument capture opt-in and separately sanitized. Use private directories, bounded retention, and coordinated or per-session rotation. Record cancellation and partial outcomes; make logging failures visible without silently changing tool semantics."
+        },
+        {
+            "id": "D11",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "Legacy calls can be rejected by tunnel-client before reaching your lenient server when initialized is absent. Also, /readyz can succeed before stdio protocol activity or successful polling; it cannot justify 'connected'. Evidence: [upstream initialization gate](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/mcpclient/serialized_forwarding_transport.go#L400), [health semantics](https://github.com/openai/tunnel-client/blob/master/docs/health.md#supervising-startup).",
+            "proposed_change": "Enable --mcp.stdio-send-initialized-notification explicitly. Distinguish local-ready, polling/authenticated, and remotely-exercised states. Freeze root and effective policy in the child configuration, excluding credentials. Sanitize inherited tunnel configuration and constrain reserved passthrough overrides. Use a private temporary directory, bounded readiness polling, strict loopback URL validation, no proxy/redirects for probes, and bounded signal escalation."
+        },
+        {
+            "id": "D12",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The key charset matches upstream; tunnel IDs have a more specific current syntax than the MVP\u2019s prefix/length check. The existing setup restores 'echo', not the terminal\u2019s exact prior state. Literal key flags would also expose secrets through argv/history. Evidence: [upstream validation](https://github.com/openai/tunnel-client/blob/master/pkg/runtimeconfig/config.go#L179), [existing terminal handling](/home/ubuntu/gits/repochat/src/main.go:103).",
+            "proposed_change": "Use env/file input for noninteractive secrets. Restore the exact terminal state on supported interruption paths and handle non-TTY input explicitly. Validate config schema/version, ownership, parent-directory permissions, and symlinks. Report syntax validation separately from successful authentication."
+        },
+        {
+            "id": "D13",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The proposed subprocess tests improve materially on the MVP, but credential presence is not validity and a local MCP exchange does not verify tunnel transport. Upstream health documentation explicitly separates these states. Evidence: [health contract](https://github.com/openai/tunnel-client/blob/master/docs/health.md), [current doctor](/home/ubuntu/gits/repochat/src/main.go:243).",
+            "proposed_change": "Print separate local, credential-syntax, transport, and remote-test statuses, including 'not tested'. Enforce dependency compatibility rather than only displaying versions. Run all subprocess checks through the same hardened environment and effective policy used in production."
+        },
+        {
+            "id": "D14",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "These commands are valuable, but 'exactly what the model would receive' requires the same policy, serialization, redaction, limits, and selected protocol era. Directly calling a lower-level repository function would produce misleading diagnostics. Evidence: the MVP currently has distinct [call](/home/ubuntu/gits/repochat/src/main.go:669) and [tool-result](/home/ubuntu/gits/repochat/src/main.go:736) layers.",
+            "proposed_change": "Route call through the production tool pipeline and expose protocol selection. Generate client-native JSON argv arrays with an explicit root and equivalent policy settings; never embed credentials. Include effective-policy and exclusion summaries in local introspection."
+        },
+        {
+            "id": "D15",
+            "verdict": "modify",
+            "severity": "major",
+            "rationale": "The matrix is strong, but a fake tunnel-client that merely accepts expected argv cannot detect upstream quoting or initialization-gate mistakes. Marker absence is also inconclusive unless the unsafe fixture demonstrably executes the marker. Evidence: [upstream initialization tests](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/mcpclient/serialized_forwarding_transport_test.go#L59).",
+            "proposed_change": "Add credential-free contract tests using a pinned real tunnel-client against a local mock control plane. Pair execution-prevention tests with positive controls. Cover internal symlink swaps, ignore-file symlinks, empty authorization lists, lazy fetch/protocol overrides, redaction slicing and search oracles, malformed IDs/envelopes, queue cancellation, EOF, output failure, root replacement, and cursor invalidation. Run native Linux/macOS tests, not only cross-compilation."
+        },
+        {
+            "id": "D16",
+            "verdict": "modify",
+            "severity": "minor",
+            "rationale": "The distribution plan is appropriate, but 'go 1.24' must remain a compatibility floor rather than the release compiler. Go 1.24 is outside the currently supported release window. Static binaries also retain their embedded runtime until rebuilt. Evidence: [Go release policy](https://go.dev/doc/devel/release#policy).",
+            "proposed_change": "Build releases with a supported patched toolchain, publish build provenance and authenticated release verification, and define security-update ownership. Document supported Git/tunnel-client versions and their external-runtime requirement. Keep the honest E2E limitation and make the eventual real-account checklist a release acceptance step."
+        }
+    ],
+    "missed_items": [
+        {
+            "id": "M1",
+            "title": "An empty authorization list must never become an unrestricted Git query",
+            "severity": "critical",
+            "detail": "D6 filters changed paths and then passes allowed pathspecs. If every path is withheld, invoking git diff/show with '--' and zero paths removes the restriction. A commit changing only credentials.json is the essential regression case. A capped or failed name-status enumeration can cause related authorization errors. Evidence: [optional diff pathspecs](https://git-scm.com/docs/git-diff).",
+            "proposed_change": "Return an explicit withheld-only/empty result without running a content-producing command. Treat authorization enumeration as all-or-error. Recheck emitted patch records against the authorized set; never interpret an empty set as 'all paths'."
+        },
+        {
+            "id": "M2",
+            "title": "Search can reveal redacted secrets through a match oracle",
+            "severity": "major",
+            "detail": "If search matches raw content but masks returned lines, an attacker can extend a known token prefix one character at a time and observe matches or counts. Git pickaxe creates a similar oracle, including for withheld files if matching occurs before path restriction. This follows directly from D5\u2019s output-only promise combined with D7\u2019s arbitrary search inputs.",
+            "proposed_change": "Apply file authorization and secret-span masking before searchable predicates. Match against the disclosed representation, or exclude masked spans from matching. Disable pickaxe under redaction unless it provides equivalent protection. Test that hidden-byte guesses cannot change observable results."
+        },
+        {
+            "id": "M3",
+            "title": "Tunnel identity is not repository identity or conversation authorization",
+            "severity": "major",
+            "detail": "Reusing one tunnel/profile for repository B can let an old conversation intended for A read B. Two concurrent processes sharing a tunnel are explicitly unsupported. The server also receives self-reported client identity, not trustworthy conversation authorization. Evidence: [single-instance restriction](https://github.com/openai/tunnel-client/blob/master/docs/configuration.md#multiple-channels), [identity trust limits](https://modelcontextprotocol.io/specification/2026-07-28/basic#_meta).",
+            "proposed_change": "Bind profiles to a canonical repository identity by default, require explicit local rebinding, and display that binding at startup. Acquire a per-tunnel local process lock and document its cross-host limitation. Prefer dedicated tunnels for distinct repositories. Explain that associated tunnel users may access the entire exposed repository; readOnlyHint does not authorize disclosure."
+        },
+        {
+            "id": "M4",
+            "title": "Cursor and consistency contracts are absent",
+            "severity": "major",
+            "detail": "A three-second fileset cache can change between pages. Offset cursors then skip or duplicate files, and search cannot substantiate complete:true over a changing corpus. A cursor must also not replay a broader policy after exclusions tighten. MCP describes cursors as opaque, but that alone supplies no integrity or snapshot binding. Evidence: [pagination](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/pagination).",
+            "proposed_change": "Bind bounded, validated cursors to repository identity, tool/query, ordering, policy generation, snapshot generation, and expiry. Reject stale cursors actionably. Reauthorize every page. Pin Git revisions and expose live-file change detection; qualify completeness as applying to the declared snapshot."
+        },
+        {
+            "id": "M5",
+            "title": "Repository text and filenames are hostile output",
+            "severity": "major",
+            "detail": "README instructions, commit messages, refs, filenames, and symlink targets can contain prompt injection, newlines, terminal escapes, or invalid UTF-8. Newline-delimited Git parsing and raw '%s' terminal logging are unsafe presentation choices. The MVP already formats repository text directly: [search formatting](/home/ubuntu/gits/repochat/src/main.go:613). OpenAI also identifies prompt injection as a custom-server risk: [custom MCP guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server).",
+            "proposed_change": "Use NUL-delimited Git formats and structured parsing. Define reversible identifiers for non-UTF-8 filenames rather than silently replacing bytes. Escape terminal controls and quote displayed names/targets. Label repository material as untrusted data and keep it out of server instructions and tool descriptions."
+        },
+        {
+            "id": "M6",
+            "title": "Resolving a commit proves existence, not authorization",
+            "severity": "major",
+            "detail": "An arbitrary SHA can resolve to unreachable history or a commit borrowed from another repository through objects/info/alternates. Thus 'one repository' is not enforced merely by rev-parse inside its directory. Replacement refs can also change the content associated with an apparently pinned revision. Evidence: [object-store borrowing and replacement refs](https://git-scm.com/docs/gitrepository-layout).",
+            "proposed_change": "Define authorized history explicitly\u2014such as commits reachable from selected local/remote branches and tags\u2014and check membership after resolution. Decide separately whether stash, reflog, and unreachable objects are exposed. Disable replacement-object substitution unless explicitly supported. Continue applying path policy within every authorized tree."
+        },
+        {
+            "id": "M7",
+            "title": "Common Git repository shapes need explicit support or degradation",
+            "severity": "minor",
+            "detail": "The brief does not define linked worktrees, gitfiles, submodule boundaries, sparse checkout, shallow/partial history, LFS pointers, conflict stages, or merge-commit patch semantics. These can produce plausible but incomplete results rather than obvious failures. Gitfiles and shared metadata are normal layouts, not traversal attacks. Evidence: [repository layouts](https://git-scm.com/docs/gitrepository-layout), [index stages](https://git-scm.com/docs/git-ls-files#Documentation/git-ls-files.txt---stage).",
+            "proposed_change": "Add a supported-shapes matrix and fixtures. Treat submodules as opaque gitlinks unless launched separately; never recurse implicitly. Identify sparse/missing paths, unavailable objects, LFS pointers, and conflict stages explicitly. Define root-commit and merge-parent comparisons, and reject unsupported cases without reporting complete coverage."
+        }
+    ],
+    "answers": [
+        {
+            "id": "Q1",
+            "answer": "K4 is acceptable and improves the authorization model. Multiple processes can serve multiple repositories. The necessary product feature is reliable repository-to-tunnel binding and safe switching, not multi-repository tools. Address M3 before calling the launcher production-ready."
+        },
+        {
+            "id": "Q2",
+            "answer": "Names can themselves disclose customers, incidents, usernames, or infrastructure. Default to withheld counts and categories; offer explicit name disclosure and an always-hide-name policy. Always distinguish withheld from absent. Redact names and symlink targets too when they contain recognizable credentials."
+        },
+        {
+            "id": "Q3",
+            "answer": "Default ON is appropriate as best-effort masking. Preserve line references, disclose affected ranges/counts, and allow local override. Do not promise secret-free output. Redaction must precede slicing and search predicates; otherwise partial reads and match oracles undermine it."
+        },
+        {
+            "id": "Q4",
+            "answer": "Default ON is reasonable for a bounded metadata-only local audit. Default argument capture is not. Make paths/query text a separate opt-in, enforce retention across rotations, and handle concurrent sessions safely. Describe it as local diagnostic history, not tamper-proof auditing."
+        },
+        {
+            "id": "Q5",
+            "answer": "Production readiness requires four concrete gates: (1) prove that every tool, history path, empty selection, and cursor respects one authorization model; (2) eliminate internal-symlink bypasses and Git helper/lazy-fetch execution; (3) pass independent protocol fixtures and a pinned real tunnel-client/mock-control-plane integration suite, including initialization and restart; (4) ship reliable repository binding, exposure/completeness summaries, bounded private diagnostics, and supported-platform/dependency checks. More outline languages are optional. The real ChatGPT run remains an explicitly unverified acceptance step under K7."
+        }
+    ],
+    "overall": "Revise before implementation. The product scope and most external facts hold up, but D4 and D6 do not yet support their security guarantees; D9 has a batching error; D11 misses an upstream initialization gate and overstates readiness. Reviewed all three requested MVP files and primary documentation, plus tunnel-client v0.0.21 at 714f2d67844b660af25754f1d19b0360b346b13b and inspected HEAD cdb97579b5515ef975b57e6811c4def71b1471df. This was source/document review: no files were modified, no tests or exploit fixtures were executed, and no authenticated E2E result is claimed. Per your convention, severity 'none' on an agreed defect means no objection to that diagnosis, not that the underlying defect is harmless. K1\u2013K7 remain viable."
+}
