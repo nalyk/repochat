@@ -204,6 +204,51 @@ func saveConfig(cfg *Config) error {
 	return os.Rename(tmp.Name(), path)
 }
 
+// updateConfig changes the saved configuration safely when several repochat
+// processes run at once: under an exclusive lock it re-reads the file, applies
+// the change to that fresh copy and writes it back. Writing back a copy read
+// earlier would undo whatever another instance saved in the meantime (for
+// example a profile added while this one was running).
+func updateConfig(change func(*Config)) (*Config, error) {
+	path, err := configPath()
+	if err != nil {
+		return nil, err
+	}
+	dir := filepath.Dir(path)
+	if err := privateDir(dir); err != nil {
+		return nil, err
+	}
+	lock, err := os.OpenFile(filepath.Join(dir, ".config.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	defer lock.Close()
+	if err := syscall.Flock(int(lock.Fd()), syscall.LOCK_EX); err != nil {
+		return nil, err
+	}
+	defer syscall.Flock(int(lock.Fd()), syscall.LOCK_UN)
+	cfg, err := loadConfig()
+	if err != nil {
+		return nil, err
+	}
+	change(cfg)
+	if err := saveConfig(cfg); err != nil {
+		return nil, err
+	}
+	return cfg, nil
+}
+
+// updateProfile applies a change to one saved profile, if it still exists and
+// still refers to the same tunnel.
+func updateProfile(name, tunnelID string, change func(*Profile)) error {
+	_, err := updateConfig(func(c *Config) {
+		if p := c.Profiles[name]; p != nil && p.TunnelID == tunnelID {
+			change(p)
+		}
+	})
+	return err
+}
+
 func (c *Config) profileNames() []string {
 	names := make([]string, 0, len(c.Profiles))
 	for n := range c.Profiles {

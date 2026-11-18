@@ -1,4 +1,6 @@
-# Revizia implementării, runda 1 (Codex CLI)
+# Revizia implementării (Codex CLI)
+
+Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
 
 Codex a citit codul, a rulat `go vet` și `go test -race` și a construit probe proprii contra binarului. Runda nu s-a încheiat cu un răspuns structurat: după ultima probă, serviciul OpenAI a oprit răspunsul cu un filtru de siguranță („possible cybersecurity risk”), declanșat de conținutul probelor. Constatările de mai jos sunt extrase din jurnalul de execuție al lui Codex (comenzile rulate și ieșirile lor), nu dintr-un verdict final.
 

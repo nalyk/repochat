@@ -1,6 +1,8 @@
 # Revizia de design cu Codex CLI
 
-RepoChat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (autor) și Codex CLI (`codex exec`, sandbox doar-citire, cu căutare web), rulată local. Fișierele de aici sunt transcrierea brută: ce i s-a trimis lui Codex și ce a răspuns, în JSON validat pe o schemă.
+Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
+
+repochat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (autor) și Codex CLI (`codex exec`, sandbox doar-citire, cu căutare web), rulată local. Fișierele de aici sunt transcrierea brută: ce i s-a trimis lui Codex și ce a răspuns, în JSON validat pe o schemă.
 
 | Fișier | Conținut |
 |---|---|

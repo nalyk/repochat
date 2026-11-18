@@ -1,5 +1,7 @@
 # Jurnal de modificări
 
+Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
+
 ## 1.0.0
 
 Rescriere completă a MVP-ului 0.1.0 (păstrat în istoricul git, în primul commit).

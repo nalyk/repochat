@@ -2,7 +2,7 @@
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)
-LDFLAGS := -s -w -X repochat/internal/cli.Version=$(VERSION) -X repochat/internal/cli.Commit=$(COMMIT)
+LDFLAGS := -s -w -X github.com/nalyk/repochat/internal/cli.Version=$(VERSION) -X github.com/nalyk/repochat/internal/cli.Commit=$(COMMIT)
 GOFLAGS := -trimpath
 PLATFORMS := linux/amd64 linux/arm64 darwin/amd64 darwin/arm64
 

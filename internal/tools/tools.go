@@ -14,8 +14,8 @@ import (
 	"sort"
 	"strings"
 
-	"repochat/internal/mcp"
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 // Instructions is the server-level guidance sent to the client. It is static:

@@ -5,7 +5,7 @@ package main
 import (
 	"os"
 
-	"repochat/internal/cli"
+	"github.com/nalyk/repochat/internal/cli"
 )
 
 func main() {

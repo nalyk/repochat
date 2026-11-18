@@ -218,3 +218,125 @@ func TestRealTunnelClientRejections(t *testing.T) {
 		}
 	}
 }
+
+// TestRealTunnelClientTwoTunnelsInParallel runs two repochat instances at the
+// same time, each with its own real tunnel-client and its own tunnel, and
+// checks that each tunnel is answered by its own repository only.
+func TestRealTunnelClientTwoTunnelsInParallel(t *testing.T) {
+	bin := os.Getenv("REPOCHAT_REAL_TUNNEL_CLIENT")
+	if bin == "" {
+		if os.Getenv("REPOCHAT_REQUIRE_TUNNEL_CLIENT") == "1" {
+			t.Fatal("REPOCHAT_REQUIRE_TUNNEL_CLIENT=1 but REPOCHAT_REAL_TUNNEL_CLIENT is not set")
+		}
+		t.Skip("set REPOCHAT_REAL_TUNNEL_CLIENT=/path/to/tunnel-client to run the contract suite against the real binary")
+	}
+	e := setup(t, "")
+	t.Setenv("REPOCHAT_TUNNEL_CLIENT", bin)
+	second := makeRepo(t, "other")
+	if err := saveConfig(&Config{DefaultProfile: "default", Profiles: map[string]*Profile{
+		"default": {TunnelID: testTunnel, APIKey: testKey},
+		"two":     {TunnelID: secondTunnel, APIKey: testKey},
+	}}); err != nil {
+		t.Fatal(err)
+	}
+
+	script := []string{
+		`{"jsonrpc":"2.0","id":"i","method":"initialize","params":{"protocolVersion":"2025-11-25","capabilities":{},"clientInfo":{"name":"contract-suite","version":"1"}}}`,
+		`{"jsonrpc":"2.0","id":"o","method":"tools/call","params":{"name":"repo_overview","arguments":{}}}`,
+		`{"jsonrpc":"2.0","id":"r","method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"}}}`,
+	}
+	type state struct {
+		next        int
+		outstanding bool
+		responses   []string
+	}
+	var mu sync.Mutex
+	tunnels := map[string]*state{testTunnel: {}, secondTunnel: {}}
+	srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		parts := strings.SplitN(strings.TrimPrefix(r.URL.Path, "/v1/tunnels/"), "/", 2)
+		mu.Lock()
+		st := tunnels[parts[0]]
+		mu.Unlock()
+		if st == nil || r.Header.Get("Authorization") != "Bearer "+testKey {
+			http.Error(w, `{"error":"unknown tunnel"}`, http.StatusNotFound)
+			return
+		}
+		rest := ""
+		if len(parts) == 2 {
+			rest = parts[1]
+		}
+		w.Header().Set("Content-Type", "application/json")
+		mu.Lock()
+		defer mu.Unlock()
+		switch {
+		case r.Method == http.MethodGet && rest == "":
+			fmt.Fprintf(w, `{"id":%q,"name":"mock","description":"","organization_ids":["org"],"workspace_ids":["ws"]}`, parts[0])
+		case r.Method == http.MethodGet && rest == "poll":
+			if st.outstanding || st.next >= len(script) {
+				mu.Unlock()
+				time.Sleep(150 * time.Millisecond)
+				mu.Lock()
+				w.WriteHeader(http.StatusNoContent)
+				return
+			}
+			id := fmt.Sprintf("req_%d", st.next)
+			fmt.Fprintf(w, `{"commands":[{"request_id":%q,"shard_token":"shard","command_type":"jsonrpc","channel":"main","created_at":%q,"response_timeout":"30s","headers":{},"jsonrpc":%s}]}`,
+				id, time.Now().UTC().Format(time.RFC3339), script[st.next])
+			st.next++
+			st.outstanding = true
+		case r.Method == http.MethodPost && rest == "response":
+			body, _ := io.ReadAll(io.LimitReader(r.Body, 16<<20))
+			var resp struct {
+				RespType string          `json:"resp_type"`
+				RespJSON json.RawMessage `json:"resp_json"`
+			}
+			json.Unmarshal(body, &resp)
+			if resp.RespType == "" || resp.RespType == "jsonrpc_response" {
+				st.responses = append(st.responses, string(resp.RespJSON))
+				st.outstanding = false
+			}
+			io.WriteString(w, `{"status":"ok"}`)
+		default:
+			http.NotFound(w, r)
+		}
+	}))
+	defer srv.Close()
+	t.Setenv("REPOCHAT_CONTROL_PLANE_URL", srv.URL)
+
+	_, errA, doneA := start("--root", e.repo)
+	_, errB, doneB := start("--root", second, "--profile", "two")
+	defer func() {
+		runCLI("stop")
+		for _, done := range []chan int{doneA, doneB} {
+			select {
+			case <-done:
+			case <-time.After(20 * time.Second):
+				t.Error("a launcher did not stop")
+			}
+		}
+	}()
+	waitFor(t, "both tunnels answered every command", func() bool {
+		mu.Lock()
+		defer mu.Unlock()
+		return len(tunnels[testTunnel].responses) == len(script) && len(tunnels[secondTunnel].responses) == len(script)
+	})
+	mu.Lock()
+	first := strings.Join(tunnels[testTunnel].responses, "\n")
+	other := strings.Join(tunnels[secondTunnel].responses, "\n")
+	mu.Unlock()
+	wantIn(t, first, "REPOSITORY project", "# project")
+	wantIn(t, other, "REPOSITORY other", "# other")
+	if strings.Contains(first, "REPOSITORY other") || strings.Contains(other, "REPOSITORY project") {
+		t.Error("a tunnel was answered with the other repository")
+	}
+	for _, log := range []string{errA.String(), errB.String()} {
+		wantIn(t, log, "is running", "connected to OpenAI", "repo_overview")
+		if strings.Contains(log, "already in use") || strings.Contains(log, "stopped unexpectedly") {
+			t.Errorf("the instances disturbed each other:\n%s", log)
+		}
+	}
+	out, _, _ := runCLI("status")
+	if !strings.Contains(out, "sharing "+e.repo) || !strings.Contains(out, "sharing "+second) {
+		t.Errorf("status must list both instances:\n%s", out)
+	}
+}

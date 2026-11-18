@@ -16,9 +16,9 @@ import (
 	"syscall"
 	"time"
 
-	"repochat/internal/mcp"
-	"repochat/internal/repo"
-	"repochat/internal/tools"
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/tools"
 )
 
 func signalContext() (context.Context, context.CancelFunc) {

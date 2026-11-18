@@ -11,8 +11,8 @@ import (
 	"strings"
 	"testing"
 
-	"repochat/internal/mcp"
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 var bg = context.Background()

@@ -14,7 +14,7 @@ import (
 	"syscall"
 	"time"
 
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 // cmdDoctor checks every part of the setup separately and says, for each,
@@ -100,7 +100,7 @@ func cmdDoctor(c *console, args []string) int {
 	if r == nil {
 		skip("MCP server", "no repository")
 	} else if err := subprocessSelfTest(ctx, r.Root, &s); err != nil {
-		bad("MCP server", err.Error(), "this is a bug in repochat; please report it")
+		bad("MCP server", err.Error(), "this is a bug in repochat; please report it at "+projectURL+"/issues")
 	} else {
 		pass("MCP server", "answers in a subprocess: handshake, tool list and a tool call, legacy and 2026-07-28 protocols")
 	}

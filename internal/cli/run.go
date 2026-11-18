@@ -21,10 +21,11 @@ import (
 	"syscall"
 	"time"
 
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 const (
+	projectURL = "https://github.com/nalyk/repochat"
 	pluginsURL = "https://chatgpt.com/plugins"
 	tunnelsURL = "https://platform.openai.com/settings/organization/tunnels"
 	apiKeysURL = "https://platform.openai.com/settings/organization/api-keys"
@@ -659,7 +660,7 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 				l.setState("serving")
 				if l.prof != nil && !l.prof.Onboarded && !l.creds.FromEnv {
 					l.prof.Onboarded = true
-					if err := saveConfig(l.cfg); err == nil {
+					if err := updateProfile(l.profName, l.creds.TunnelID, func(p *Profile) { p.Onboarded = true }); err == nil {
 						c.ok("first tool call served — setup is complete. From now on: %s in any repository.", c.bold("repochat"))
 					}
 				}
@@ -745,7 +746,8 @@ func (l *launcher) banner() {
 		}
 		if l.prof.LastRepo != l.r.Root {
 			l.prof.LastRepo = l.r.Root
-			_ = saveConfig(l.cfg)
+			root := l.r.Root
+			_ = updateProfile(l.profName, l.creds.TunnelID, func(p *Profile) { p.LastRepo = root })
 		}
 	}
 	c.say("")

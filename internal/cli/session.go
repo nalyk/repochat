@@ -15,9 +15,9 @@ import (
 	"strings"
 	"time"
 
-	"repochat/internal/mcp"
-	"repochat/internal/repo"
-	"repochat/internal/tools"
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/tools"
 )
 
 // Version and Commit are set at build time (-ldflags -X).

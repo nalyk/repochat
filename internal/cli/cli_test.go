@@ -20,7 +20,7 @@ import (
 	"testing"
 	"time"
 
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 // The test binary plays three roles: the tests themselves, a stand-in for

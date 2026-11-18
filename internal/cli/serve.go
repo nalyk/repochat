@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"repochat/internal/mcp"
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 // cmdMCP runs the MCP server on stdin/stdout. It is what tunnel-client (or

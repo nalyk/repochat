@@ -13,7 +13,7 @@ import (
 	"syscall"
 	"time"
 
-	"repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 type wizardOptions struct {
@@ -146,13 +146,16 @@ func credentialWizard(ctx context.Context, c *console, cfg *Config, profile, hel
 		}
 	}
 
-	cfg.Profiles[profile] = p
-	if cfg.DefaultProfile == "" {
-		cfg.DefaultProfile = profile
+	set := func(c *Config) {
+		c.Profiles[profile] = p
+		if c.DefaultProfile == "" {
+			c.DefaultProfile = profile
+		}
 	}
-	if err := saveConfig(cfg); err != nil {
+	if _, err := updateConfig(set); err != nil {
 		return nil, fmt.Errorf("cannot save the configuration: %w", err)
 	}
+	set(cfg) // keep the caller's copy in step
 	path, _ := configPath()
 	c.ok("saved to %s (readable only by you)", path)
 	return p, nil
@@ -288,11 +291,12 @@ func cmdSetup(c *console, args []string) int {
 			c.fail("no profile named %q", name)
 			return 1
 		}
-		delete(cfg.Profiles, name)
-		if cfg.DefaultProfile == name {
-			cfg.DefaultProfile = ""
-		}
-		if err := saveConfig(cfg); err != nil {
+		if _, err := updateConfig(func(c *Config) {
+			delete(c.Profiles, name)
+			if c.DefaultProfile == name {
+				c.DefaultProfile = ""
+			}
+		}); err != nil {
 			c.fail("%v", err)
 			return 1
 		}
@@ -304,8 +308,11 @@ func cmdSetup(c *console, args []string) int {
 			c.fail("no profile named %q", name)
 			return 1
 		}
-		p.BoundRepo = ""
-		if err := saveConfig(cfg); err != nil {
+		if _, err := updateConfig(func(c *Config) {
+			if p := c.Profiles[name]; p != nil {
+				p.BoundRepo = ""
+			}
+		}); err != nil {
 			c.fail("%v", err)
 			return 1
 		}
@@ -340,8 +347,12 @@ func cmdSetup(c *console, args []string) int {
 	}
 	if *bind && o.TunnelID == "" && o.APIKey == "" {
 		if p := cfg.Profiles[name]; p != nil { // bind an existing profile without re-entering credentials
-			p.BoundRepo = o.Bind
-			if err := saveConfig(cfg); err != nil {
+			bound := o.Bind
+			if _, err := updateConfig(func(c *Config) {
+				if p := c.Profiles[name]; p != nil {
+					p.BoundRepo = bound
+				}
+			}); err != nil {
 				c.fail("%v", err)
 				return 1
 			}

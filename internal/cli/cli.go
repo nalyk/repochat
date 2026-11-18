@@ -116,6 +116,8 @@ func printHelp(c *console) {
 What ChatGPT can see: the files git knows about in this repository (not the ones
 ignored by .gitignore), minus files that look like secrets, plus the commit history.
 Whatever it reads is sent to OpenAI. Nothing can be changed through repochat.
+
+Project: https://github.com/nalyk/repochat
 `, c.bold("RepoChat "+versionString()), c.bold("Everyday use"), c.bold("Commands"), c.bold("See what is exposed"),
 		c.bold("Control what is exposed (options for repochat, mcp, files, call)"), c.bold("Plumbing"))
 }
