@@ -1,0 +1,14 @@
+{
+    "fixes": [
+        {
+            "id": "P1",
+            "status": "not_verified",
+            "evidence": "internal/mcp/server.go:379-382 correctly releases single-call admission after writeAsync returns. However, handleBatch appends responses at lines 412-413 and releases admission at line 415, before queueing the response array at line 419. TestFinishedCallsWaitingForOutputStayAdmitted (internal/mcp/server_test.go:606-639) covers individual requests only and passed.",
+            "gap": "The batch path still bypasses admission limits: finished responses accumulate in the batch array after their reservations are released. A large valid 2025-03-26 batch can retain thousands of large replies and exhaust memory. This remains a major gap in P1. Retain release callbacks until writeValue(out) returns; release cancelled calls immediately."
+        }
+    ],
+    "new_defects": [],
+    "tests_run": "At commit 85ffc39, GOCACHE=/tmp/repochat-verify-cache go vet ./... passed. GOCACHE=/tmp/repochat-verify-cache go test -race -count=1 ./... passed all four tested packages, including the new regression. The opt-in real-client contract tests were not rerun. No files were modified or new programs written.",
+    "consensus_reached": false,
+    "summary": "P1 is fixed for individual requests but remains open for batches because admission is released before their responses are queued. All executed checks passed."
+}

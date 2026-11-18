@@ -182,9 +182,9 @@ Ce acoperă testele automate: politica de expunere, mascarea, accesul la fișier
 **Ce nu a fost verificat și rămâne de făcut de tine:**
 
 1. **O sesiune reală ChatGPT.** Are nevoie de un tunel și de o cheie din contul tău. Controlul plane simulat urmează documentația protocolului; serverele OpenAI pot avea reguli pe care simularea nu le are. Dacă planul tău ChatGPT nu oferă Secure MCP Tunnel pentru pluginuri personale, RepoChat nu poate schimba asta.
-2. **macOS.** Codul se compilează pentru macOS și CI rulează testele acolo, dar dezvoltarea și toate rulările de mai sus s-au făcut pe Linux.
+2. **macOS, folosit de un om.** CI rulează pe macOS toată suita, inclusiv prima pornire în pseudo-terminal, și trece. Nimeni nu l-a folosit încă interactiv acolo, iar suita de contract cu `tunnel-client` real a rulat doar pe Linux.
 
-Designul și apoi implementarea au fost revizuite adversarial de Codex CLI. Revizia implementării a găsit 13 probleme reale, toate reparate și acoperite cu teste de regresie. Transcrierea este în [`docs/design/`](docs/design/).
+Designul și apoi implementarea au fost revizuite adversarial de Codex CLI. Revizia implementării a găsit, în mai multe runde, 20 de probleme reale; toate sunt reparate și acoperite cu teste de regresie. Transcrierea este în [`docs/design/`](docs/design/).
 
 ## Licență
 

@@ -43,3 +43,7 @@ Prima rulare pe macOS a trecut toate testele Go, dar a picat testul de primă po
 ## Runda 3
 
 Codex a rulat de data aceasta suita (`go vet`, `go test -race`, inclusiv testele cu `tunnel-client` real) și a confirmat toate cele cinci reparații. A mai găsit o problemă (P1): un apel terminat își elibera locul în limita de admitere înainte ca răspunsul să intre în coada de ieșire, deci un client care nu citește putea acumula răspunsuri fără limită. Locul se eliberează acum abia după ce răspunsul a fost pus în coadă (`impl-round3-codex.json`).
+
+## Runda 4
+
+Codex a confirmat reparația P1 pentru apelurile individuale și a arătat că loturile JSON-RPC (existente doar în revizia 2025-03-26) o ocoleau: apelurile dintr-un lot își eliberau locul înainte ca răspunsul comun să fie pus în coadă. Un lot are acum cel mult 32 de mesaje, iar apelurile lui își păstrează locul până când răspunsul lotului este în coadă (`impl-round4-codex.json`).

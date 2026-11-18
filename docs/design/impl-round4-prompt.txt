@@ -1,0 +1,9 @@
+Final follow-up. P1 was correct and is fixed in commit 85ffc39: internal/mcp/server.go — `outcome.release` returns a
+call's admission reservation (inflight entry and held bytes) and handleLine/handleBatch call it only AFTER the response
+has been queued by writeAsync (or dropped for a cancelled call) → TestFinishedCallsWaitingForOutputStayAdmitted.
+With admission full, further tools/call requests get the immediate "Server busy" reply through the bounded reader
+path, which ends the session after QueueWait when the client is not reading.
+
+Please re-check by reading the code (and run the suite if you can; do not modify files or write new programs).
+Report P1 as verified / not_verified in `fixes`, list anything further in `new_defects`, and set
+consensus_reached=true if no critical or major defect remains open.

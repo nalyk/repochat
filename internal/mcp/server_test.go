@@ -353,6 +353,24 @@ func TestBatchingOnlyIn2025_03_26(t *testing.T) {
 	if len(rs) != 3 || !strings.HasPrefix(rs[1].raw, "batch:") || text(rs[2]) != "ok" {
 		t.Fatalf("2025-03-26 must answer a batch with one array: %v", rs)
 	}
+	// A batch is bounded, and its calls count against admission together.
+	big := "[" + strings.Repeat(`{"jsonrpc":"2.0","id":1,"method":"ping"},`, maxBatch) + `{"jsonrpc":"2.0","id":2,"method":"ping"}]`
+	if rs := run(t, testServer(), old, big); rs[1].Error == nil || rs[1].Error.Code != -32600 {
+		t.Errorf("an oversized batch must be rejected: %s", rs[1].raw)
+	}
+	limited := testServer()
+	limited.MaxPending = 2
+	calls := "[" + strings.TrimSuffix(strings.Repeat(`{"jsonrpc":"2.0","id":%d,"method":"tools/call","params":{"name":"none"}},`, 4), ",") + "]"
+	rs = run(t, limited, old, fmt.Sprintf(calls, 11, 12, 13, 14))
+	busy := 0
+	for _, r := range rs[1:] {
+		if r.Error != nil && strings.Contains(r.Error.Message, "busy") {
+			busy++
+		}
+	}
+	if busy != 2 {
+		t.Errorf("calls in one batch must hold their admission until the batch is answered; %d of 4 refused", busy)
+	}
 	for _, opening := range []string{legacyInit, ""} {
 		lines := []string{batch}
 		if opening != "" {

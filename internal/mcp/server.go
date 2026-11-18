@@ -45,6 +45,7 @@ const (
 	codeUnsupportedVersion = -32022
 
 	cacheTTLMillis = 3600000
+	maxBatch       = 32 // messages per JSON-RPC batch (revision 2025-03-26 only)
 )
 
 // Result is what a tool hands back to the model.
@@ -402,7 +403,15 @@ func (s *Server) handleBatch(ctx context.Context, raw []byte) {
 		s.write(errResp(nullID, codeInvalidRequest, "Invalid Request: empty batch", nil))
 		return
 	}
+	if len(items) > maxBatch {
+		s.write(errResp(nullID, codeInvalidRequest,
+			fmt.Sprintf("Invalid Request: a batch may hold at most %d messages", maxBatch), nil))
+		return
+	}
+	// The whole batch is answered with one array, so every call in it keeps
+	// its admission reservation until that array has been queued.
 	var out []*response
+	var releases []func()
 	for _, item := range items {
 		o := s.process(ctx, item)
 		if o.resp != nil {
@@ -412,11 +421,14 @@ func (s *Server) handleBatch(ctx context.Context, raw []byte) {
 			if r := o.async(); r != nil {
 				out = append(out, r)
 			}
-			o.release()
+			releases = append(releases, o.release)
 		}
 	}
 	if len(out) > 0 {
 		s.writeValue(out)
+	}
+	for _, release := range releases {
+		release()
 	}
 }
 
