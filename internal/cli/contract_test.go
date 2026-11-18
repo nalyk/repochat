@@ -172,3 +172,49 @@ func TestRealTunnelClientContract(t *testing.T) {
 		t.Error("the API key was printed")
 	}
 }
+
+// TestRealTunnelClientRejections checks, with the real client, that a control
+// plane rejecting the connection is reported with the right explanation and
+// ends the run instead of leaving it "starting" forever.
+func TestRealTunnelClientRejections(t *testing.T) {
+	bin := os.Getenv("REPOCHAT_REAL_TUNNEL_CLIENT")
+	if bin == "" {
+		if os.Getenv("REPOCHAT_REQUIRE_TUNNEL_CLIENT") == "1" {
+			t.Fatal("REPOCHAT_REQUIRE_TUNNEL_CLIENT=1 but REPOCHAT_REAL_TUNNEL_CLIENT is not set")
+		}
+		t.Skip("set REPOCHAT_REAL_TUNNEL_CLIENT=/path/to/tunnel-client to run the contract suite against the real binary")
+	}
+	hints := map[int]string{
+		http.StatusUnauthorized: "API key was not accepted",
+		http.StatusForbidden:    "Tunnels permissions Read + Use",
+		http.StatusNotFound:     "Check the tunnel ID",
+	}
+	for status, hint := range hints {
+		e := setup(t, "")
+		t.Setenv("REPOCHAT_TUNNEL_CLIENT", bin)
+		saveProfile(t, testKey)
+		srv := httptest.NewServer(http.HandlerFunc(func(w http.ResponseWriter, _ *http.Request) {
+			w.Header().Set("Content-Type", "application/json")
+			w.WriteHeader(status)
+			io.WriteString(w, `{"error":{"message":"rejected by the mock control plane"}}`)
+		}))
+		t.Setenv("REPOCHAT_CONTROL_PLANE_URL", srv.URL)
+		_, errb, done := start("--root", e.repo)
+		select {
+		case code := <-done:
+			if code == 0 {
+				t.Errorf("HTTP %d: the run must fail", status)
+			}
+		case <-time.After(60 * time.Second):
+			runCLI("stop")
+			<-done
+			t.Errorf("HTTP %d: the launcher kept running:\n%s", status, errb.String())
+		}
+		srv.Close()
+		log := errb.String()
+		wantIn(t, log, fmt.Sprintf("rejected the tunnel connection (HTTP %d)", status), hint)
+		if strings.Contains(log, "connected to OpenAI") || strings.Contains(log, testKey) {
+			t.Errorf("HTTP %d: misleading or leaking output:\n%s", status, log)
+		}
+	}
+}
