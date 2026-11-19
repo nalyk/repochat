@@ -745,13 +745,23 @@ func TestBinaryFilesCanOnlyBeMoved(t *testing.T) {
 
 func TestConflictMarkersAndNulAreRefused(t *testing.T) {
 	c := newChangeFixture(t, map[string]string{"a.txt": "a\n", "rst.txt": "Title\n=======\n\ntext\n"}, Options{})
-	for _, text := range []string{"<<<<<<< HEAD", "=======", ">>>>>>> branch", "x\n<<<<<<< ours\ny"} {
+	for _, text := range []string{"<<<<<<< HEAD", ">>>>>>> branch", "x\n<<<<<<< ours\ny", "<<<<<<<", ">>>>>>>",
+		"=======\n>>>>>>> theirs", "<<<<<<< ours\nmine\n=======\ntheirs\n>>>>>>> theirs"} {
 		c.refuse(t, "conflict marker", Change{Op: "insert", Path: "a.txt", At: "end", Text: text})
 		c.refuse(t, "conflict marker", Change{Op: "create", Path: "n.txt", Text: text})
 	}
+	// F8: a line of seven "=" is also how a title is underlined. It is
+	// refused only in a file that gains a "<<<<<<<" or ">>>>>>>" line with it.
+	c.accept(t, Change{Op: "create", Path: "doc/install.rst", Text: "Install\n=======\n\nRun make.\n"})
+	c.accept(t, Change{Op: "insert", Path: "a.txt", At: "end", Text: "======="})
+	c.accept(t, Change{Op: "insert", Path: "a.txt", At: "end", Text: "======= and more"})
 	// A marker line the file already had is not new; a longer rule is no marker.
 	c.accept(t, Change{Op: "insert", Path: "rst.txt", At: "end", Text: "Other\n======="})
 	c.accept(t, Change{Op: "insert", Path: "a.txt", At: "end", Text: "=========\n<<<<<<<<"})
+	// The file had its own "======="; a new side marker is still refused, and
+	// the refusal names it.
+	ce := c.refuse(t, "conflict marker (>>>>>>>)", Change{Op: "insert", Path: "rst.txt", At: "end", Text: "Again\n=======\n>>>>>>> x"})
+	mustContain(t, ce.Error(), "line 7")
 
 	c.refuse(t, "NUL", Change{Op: "insert", Path: "a.txt", At: "end", Text: "a\x00b"})
 	c.refuse(t, "NUL", Change{Op: "create", Path: "n.txt", Text: "\x00"})

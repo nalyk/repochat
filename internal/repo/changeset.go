@@ -1164,10 +1164,16 @@ func (r *Repo) checkStillMasked(ctx context.Context, p string, shown []shownLine
 
 // conflictMarkerRe matches a line git writes into an unresolved merge
 // conflict: seven markers, then a blank and a label or the end of the line.
-var conflictMarkerRe = regexp.MustCompile(`^(?:<{7}|={7}|>{7})(?: .*)?$`)
+// sideMarkerRe matches those that open or close one. The middle one, seven
+// "=", is also how a title is underlined (reStructuredText, Markdown): it
+// counts only in a file that gains a side marker too.
+var (
+	conflictMarkerRe = regexp.MustCompile(`^(?:<{7}|={7}|>{7})(?: .*)?$`)
+	sideMarkerRe     = regexp.MustCompile(`^(?:<{7}|>{7})(?: .*)?$`)
+)
 
 // checkContent checks a file's new content: size, NUL bytes, UTF-8, new
-// conflict markers, and the syntax gate; a gofmt difference is a warning.
+// conflict markers (see sideMarkerRe), and the syntax gate; a gofmt difference is a warning.
 // before is nil for a new file; gateAsNew judges the syntax as for a new
 // file. lockedAfter marks lines of after that hold a value the model was
 // not shown.
@@ -1187,10 +1193,23 @@ func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]
 			had[l] = true
 		}
 	}
+	// The first marker line the file gains is named, once it is known that
+	// one of those it gains opens or closes a conflict.
+	first, firstLine, side := "", 0, false
 	for n, l := range strings.Split(string(after), "\n") {
 		if l = strings.TrimSuffix(l, "\r"); conflictMarkerRe.MatchString(l) && !had[l] {
-			return refusal(p, "line %d would be a conflict marker (%s) the file did not have; resolve the conflict instead of writing it", n+1, SanitizeLine(l[:7]))
+			if sideMarkerRe.MatchString(l) {
+				side = true
+				if first == "" || !sideMarkerRe.MatchString(first) {
+					first, firstLine = l, n+1
+				}
+			} else if first == "" {
+				first, firstLine = l, n+1
+			}
 		}
+	}
+	if side {
+		return refusal(p, "line %d would be a conflict marker (%s) the file did not have; resolve the conflict instead of writing it", firstLine, SanitizeLine(first[:7]))
 	}
 	if msg := r.syntaxProblem(p, before, gateAsNew || before == nil, after, lockedAfter); msg != "" {
 		return refusal(p, "%s", msg)
