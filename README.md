@@ -111,6 +111,8 @@ repochat session finish             # merge it yourself, after a question [--squ
 repochat session abandon            # remove its workspace; the branch is kept [--delete-branch]
 ```
 
+ChatGPT keeps the tool list it loaded earlier. After you start with `--write` for the first time, and again after you go back to plain `repochat`, open the plugin's settings in ChatGPT and press Refresh tools. Otherwise the nine write tools do not appear, or stay listed after they are gone. ChatGPT asks for confirmation before it calls a tool that is not read-only, and it can remember your answer for the rest of the conversation, separately for each tool.
+
 `--write` cannot be combined with `--no-history`. `repochat mcp --write` does the same for other MCP clients, and `repochat tools --write` and `repochat call --write` show and run the write tools from the terminal.
 
 ### What a session is

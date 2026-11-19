@@ -111,6 +111,8 @@ repochat session finish             # faci merge tu, după o întrebare [--squas
 repochat session abandon            # șterge spațiul de lucru; ramura rămâne [--delete-branch]
 ```
 
+ChatGPT păstrează lista de instrumente pe care a încărcat-o mai devreme. După ce pornești prima dată cu `--write`, și din nou după ce revii la `repochat` simplu, deschide setările pluginului în ChatGPT și apasă Refresh tools. Altfel cele nouă instrumente de scriere nu apar, sau rămân în listă după ce au dispărut. ChatGPT cere confirmare înainte să apeleze un instrument care nu este doar-citire și poate ține minte răspunsul tău pentru restul conversației, separat pentru fiecare instrument.
+
 `--write` nu se poate combina cu `--no-history`. `repochat mcp --write` face același lucru pentru alți clienți MCP, iar `repochat tools --write` și `repochat call --write` arată și rulează instrumentele de scriere din terminal.
 
 ### Ce este o sesiune
