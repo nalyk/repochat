@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"crypto/sha256"
 	"encoding/hex"
 	"errors"
@@ -14,11 +15,12 @@ import (
 // Withheld-path categories. A path is either served or withheld for exactly
 // one of these reasons; withheld content is never returned by any tool.
 const (
-	ReasonUnsupported = "unsupported-name" // not UTF-8, or contains control characters
-	ReasonIgnoreFile  = "repochatignore"   // matched by .repochatignore
-	ReasonDenyFlag    = "deny"             // matched by a --deny pattern
-	ReasonSecretName  = "secret-name"      // matched by a built-in secret-file rule
-	ReasonOwnFiles    = "repochat-files"   // the serving program's own configuration, state or helper
+	ReasonUnsupported = "unsupported-name"   // not UTF-8, or contains control characters
+	ReasonIgnoreFile  = "repochatignore"     // matched by .repochatignore
+	ReasonDenyFlag    = "deny"               // matched by a --deny pattern
+	ReasonSecretName  = "secret-name"        // matched by a built-in secret-file rule
+	ReasonOwnFiles    = "repochat-files"     // the serving program's own configuration, state or helper
+	ReasonUncertain   = "policy-unavailable" // .repochatignore could not be evaluated for this path
 )
 
 // Glob is a gitignore-style pattern.
@@ -212,292 +214,13 @@ func matchAny(globs []*Glob, p string) bool {
 	return false
 }
 
-// ignoreRule is one line of .repochatignore, read twice: as git reads a
-// .gitignore line (the file is documented as having the same syntax) and as
-// this package's more lenient Glob, which older versions used alone.
-//
-// The two readings are combined so that a path is withheld whenever either
-// reading alone would withhold it: a withholding rule applies when one of
-// them matches, a negation ("!") only when both do. So nothing git would
-// ignore under the same rules is served, and nothing an older repochat
-// withheld is served either.
+// ignoreRule is one line of .repochatignore in this package's own, lenient
+// reading (see Glob). What the rules mean is decided by git (ignoreOracle);
+// this reading only ever adds to it: a path it withholds stays withheld even
+// where git would serve it, as it was before git was asked at all.
 type ignoreRule struct {
 	glob   *Glob
-	git    gitPattern
 	negate bool
-}
-
-// matches reports whether the rule applies to the path itself (never because
-// of a parent directory: directories are judged on their own, see ignored).
-func (r ignoreRule) matches(p string, isDir bool) bool {
-	lenient := (isDir || !r.glob.dirOnly) && r.glob.re.MatchString(p)
-	if r.negate {
-		return lenient && r.git.match(p, isDir)
-	}
-	return lenient || r.git.match(p, isDir)
-}
-
-// gitPattern is a .gitignore line as git's dir.c parses it.
-type gitPattern struct {
-	pattern string
-	dirOnly bool // trailing slash: matches directories only
-	noSlash bool // no slash: compared with the last path component alone
-	literal int  // length of the leading part without wildcard characters
-}
-
-// parseGitPattern reads one line (without its line terminator and without a
-// leading "!") the way git's parse_path_pattern does.
-func parseGitPattern(line string) gitPattern {
-	// Trailing spaces are dropped unless a backslash protects them.
-	lastSpace := -1
-	for i := 0; i < len(line); i++ {
-		switch line[i] {
-		case ' ':
-			if lastSpace < 0 {
-				lastSpace = i
-			}
-		case '\\':
-			i++
-			lastSpace = -1
-		default:
-			lastSpace = -1
-		}
-	}
-	if lastSpace >= 0 {
-		line = line[:lastSpace]
-	}
-	g := gitPattern{pattern: line}
-	if strings.HasSuffix(g.pattern, "/") {
-		g.pattern, g.dirOnly = g.pattern[:len(g.pattern)-1], true
-	}
-	g.noSlash = !strings.Contains(g.pattern, "/")
-	for g.literal < len(g.pattern) && !strings.ContainsRune(`*?[\`, rune(g.pattern[g.literal])) {
-		g.literal++
-	}
-	return g
-}
-
-// match reports whether the pattern matches the path itself, as git's
-// match_basename and match_pathname do (including the comparison of the
-// literal head of a path pattern before the wildcard part is looked at).
-func (g gitPattern) match(p string, isDir bool) bool {
-	if g.dirOnly && !isDir {
-		return false
-	}
-	if g.noSlash {
-		return wildmatch(g.pattern, p[strings.LastIndexByte(p, '/')+1:], false) == wmMatch
-	}
-	pattern, literal := g.pattern, g.literal
-	if strings.HasPrefix(pattern, "/") {
-		pattern, literal = pattern[1:], literal-1
-	}
-	if literal > 0 {
-		if literal > len(p) || pattern[:literal] != p[:literal] {
-			return false
-		}
-		pattern, p = pattern[literal:], p[literal:]
-		if pattern == "" && p == "" {
-			return true
-		}
-	}
-	return wildmatch(pattern, p, true) == wmMatch
-}
-
-const (
-	wmMatch = iota
-	wmNoMatch
-	wmAbortAll
-	wmAbortToStarStar
-)
-
-// wildmatch is a port of dowild from git's wildmatch.c, byte for byte in its
-// behaviour (git compares bytes, not characters): pathname selects the mode
-// in which `*`, `?` and bracket expressions do not match a slash and `**`
-// does only as a whole path component.
-func wildmatch(p, text string, pathname bool) int {
-	at := func(s string, i int) byte {
-		if i < len(s) {
-			return s[i]
-		}
-		return 0 // the terminator of the C original; patterns and paths never contain NUL
-	}
-	pi, ti := 0, 0
-	for ; pi < len(p); pi, ti = pi+1, ti+1 {
-		pch, tch := p[pi], at(text, ti)
-		if tch == 0 && pch != '*' {
-			return wmAbortAll
-		}
-		switch pch {
-		case '\\':
-			pi++
-			if tch != at(p, pi) {
-				return wmNoMatch
-			}
-		case '?':
-			if pathname && tch == '/' {
-				return wmNoMatch
-			}
-		case '*':
-			pi++
-			matchSlash := !pathname
-			if at(p, pi) == '*' {
-				before := pi - 2
-				for pi++; at(p, pi) == '*'; pi++ {
-				}
-				if pathname && (before < 0 || p[before] == '/') &&
-					(at(p, pi) == 0 || at(p, pi) == '/' || (at(p, pi) == '\\' && at(p, pi+1) == '/')) {
-					// "**/" also stands for no directory at all.
-					if at(p, pi) == '/' && wildmatch(p[pi+1:], text[ti:], pathname) == wmMatch {
-						return wmMatch
-					}
-					matchSlash = true
-				}
-			}
-			if pi >= len(p) {
-				if !matchSlash && strings.IndexByte(text[ti:], '/') >= 0 {
-					return wmAbortToStarStar
-				}
-				return wmMatch
-			}
-			if !matchSlash && p[pi] == '/' {
-				slash := strings.IndexByte(text[ti:], '/')
-				if slash < 0 {
-					return wmAbortAll
-				}
-				ti += slash
-				continue // the loop step consumes the slash on both sides
-			}
-			for tch != 0 {
-				if next := p[pi]; !strings.ContainsRune(`*?[\`, rune(next)) {
-					// A literal follows: everything before its next
-					// occurrence must belong to the asterisk.
-					for tch = at(text, ti); tch != 0 && (matchSlash || tch != '/') && tch != next; tch = at(text, ti) {
-						ti++
-					}
-					if tch != next {
-						if matchSlash {
-							return wmAbortAll
-						}
-						return wmAbortToStarStar
-					}
-				}
-				if m := wildmatch(p[pi:], text[ti:], pathname); m != wmNoMatch {
-					if !matchSlash || m != wmAbortToStarStar {
-						return m
-					}
-				} else if !matchSlash && tch == '/' {
-					return wmAbortToStarStar
-				}
-				ti++
-				tch = at(text, ti)
-			}
-			return wmAbortAll
-		case '[':
-			pi++
-			c := at(p, pi)
-			negated := c == '!' || c == '^'
-			if negated {
-				pi++
-				c = at(p, pi)
-			}
-			matched := false
-			var prev byte
-			for {
-				switch {
-				case c == 0:
-					return wmAbortAll
-				case c == '\\':
-					pi++
-					if c = at(p, pi); c == 0 {
-						return wmAbortAll
-					}
-					matched = matched || tch == c
-				case c == '-' && prev != 0 && at(p, pi+1) != 0 && at(p, pi+1) != ']':
-					pi++
-					if c = at(p, pi); c == '\\' {
-						pi++
-						if c = at(p, pi); c == 0 {
-							return wmAbortAll
-						}
-					}
-					matched = matched || (tch <= c && tch >= prev)
-					c = 0 // a range cannot start another range
-				case c == '[' && at(p, pi+1) == ':':
-					start := pi + 2
-					for pi = start; at(p, pi) != 0 && at(p, pi) != ']'; pi++ {
-					}
-					if at(p, pi) == 0 {
-						return wmAbortAll
-					}
-					if pi-start-1 < 0 || p[pi-1] != ':' {
-						// No ":]": an ordinary set that contains '['.
-						pi, c = start-2, '['
-						matched = matched || tch == c
-						break
-					}
-					in, known := posixClass(p[start:pi-1], tch)
-					if !known {
-						return wmAbortAll
-					}
-					matched = matched || in
-					c = 0
-				default:
-					matched = matched || tch == c
-				}
-				prev = c
-				pi++
-				if c = at(p, pi); c == ']' {
-					break
-				}
-			}
-			if matched == negated || (pathname && tch == '/') {
-				return wmNoMatch
-			}
-		default:
-			if tch != pch {
-				return wmNoMatch
-			}
-		}
-	}
-	if ti < len(text) {
-		return wmNoMatch
-	}
-	return wmMatch
-}
-
-// posixClass reports whether c belongs to the named class, with git's ASCII
-// definitions, and whether the name is one git knows.
-func posixClass(name string, c byte) (in, known bool) {
-	lower, upper, digit := c >= 'a' && c <= 'z', c >= 'A' && c <= 'Z', c >= '0' && c <= '9'
-	space := c == ' ' || c == '\t' || c == '\n' || c == '\r'
-	print := c >= 0x20 && c < 0x7f
-	switch name {
-	case "alnum":
-		return lower || upper || digit, true
-	case "alpha":
-		return lower || upper, true
-	case "blank":
-		return c == ' ' || c == '\t', true
-	case "cntrl":
-		return c < 0x20 || c == 0x7f, true
-	case "digit":
-		return digit, true
-	case "graph":
-		return print && !space, true
-	case "lower":
-		return lower, true
-	case "print":
-		return print, true
-	case "punct":
-		return print && c != ' ' && !lower && !upper && !digit, true
-	case "space":
-		return space, true
-	case "upper":
-		return upper, true
-	case "xdigit":
-		return digit || (c >= 'a' && c <= 'f') || (c >= 'A' && c <= 'F'), true
-	}
-	return false, false
 }
 
 // Policy decides, from the path alone, whether a file may be served. Because
@@ -512,6 +235,7 @@ func posixClass(name string, c byte) (in, known bool) {
 //  5. built-in secret-file rules  → withheld
 type Policy struct {
 	ignore []ignoreRule
+	oracle *ignoreOracle // git's reading of the same rules; nil when there are none
 	deny   []*Glob
 	allow  []*Glob
 	hash   string
@@ -548,8 +272,15 @@ func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, error) {
 		if err != nil {
 			return nil, fmt.Errorf(".repochatignore line %d cannot be understood (%v). Fix or remove that line; repochat will not guess what it should withhold", n+1, err)
 		}
-		p.ignore = append(p.ignore, ignoreRule{glob: g, git: parseGitPattern(raw), negate: negate})
+		p.ignore = append(p.ignore, ignoreRule{glob: g, negate: negate})
 		fmt.Fprintf(h, "i:%v:%s\n", negate, raw)
+	}
+	if len(p.ignore) > 0 {
+		p.oracle = newIgnoreOracle(ignoreFile)
+		// Answers depend on the git that gives them.
+		if _, id, err := gitIdentity(); err == nil {
+			fmt.Fprintf(h, "git:%s\n", id)
+		}
 	}
 	for _, g := range deny {
 		fmt.Fprintf(h, "d:%s\n", g.src)
@@ -576,7 +307,10 @@ func (p *Policy) Check(rel string) string {
 	if !SupportedName(rel) {
 		return ReasonUnsupported
 	}
-	if p.ignored(rel) {
+	switch ignored, err := p.decide(context.Background(), rel); {
+	case err != nil:
+		return ReasonUncertain
+	case ignored:
 		return ReasonIgnoreFile
 	}
 	if matchAny(p.deny, rel) {
@@ -591,29 +325,54 @@ func (p *Policy) Check(rel string) string {
 	return ""
 }
 
-// ignored applies the .repochatignore rules to a file path as git applies a
-// .gitignore: every parent directory is judged first, from the top, and a
-// file beneath an excluded directory is excluded whatever later rules say (a
-// negation cannot reach into an excluded directory). For each path the last
-// rule that matches decides.
-func (p *Policy) ignored(rel string) bool {
+// lenient is the package's own reading of the rules: the last pattern that
+// matches the file or a directory above it decides.
+func (p *Policy) lenient(rel string) bool {
+	withheld := false
+	for _, r := range p.ignore {
+		if r.glob.Match(rel) {
+			withheld = !r.negate
+		}
+	}
+	return withheld
+}
+
+// decide reports whether .repochatignore withholds the path: when git says
+// so under these rules, or when the lenient reading does. An error means
+// that git could not be asked; the path is then not known to be served.
+func (p *Policy) decide(ctx context.Context, rel string) (bool, error) {
 	if len(p.ignore) == 0 {
-		return false
+		return false, nil
 	}
-	last := func(path string, isDir bool) bool {
-		for i := len(p.ignore) - 1; i >= 0; i-- {
-			if p.ignore[i].matches(path, isDir) {
-				return !p.ignore[i].negate
-			}
+	if p.lenient(rel) {
+		return true, nil
+	}
+	return p.oracle.ignored(ctx, rel)
+}
+
+// ignored is decide for callers that only need to know whether the path is
+// withheld; not knowing counts as withheld.
+func (p *Policy) ignored(rel string) bool {
+	ignored, err := p.decide(context.Background(), rel)
+	return ignored || err != nil
+}
+
+// Prime has git judge a whole list of paths at once, so that the checks
+// which follow find their answers ready instead of each asking on its own.
+// Paths that never reach git (unsupported names, the lenient reading's own
+// verdicts) are left out. An error means the answers are not available;
+// every check of those paths then reports them as withheld.
+func (p *Policy) Prime(ctx context.Context, paths []string) error {
+	if len(p.ignore) == 0 {
+		return nil
+	}
+	ask := make([]string, 0, len(paths))
+	for _, rel := range paths {
+		if rel != "" && SupportedName(rel) && !p.lenient(rel) {
+			ask = append(ask, rel)
 		}
-		return false
 	}
-	for i := 0; i < len(rel); i++ {
-		if rel[i] == '/' && last(rel[:i], true) {
-			return true
-		}
-	}
-	return last(rel, false)
+	return p.oracle.decide(ctx, ask)
 }
 
 // SupportedName reports whether a path can be represented safely: valid

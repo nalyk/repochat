@@ -32,7 +32,12 @@ func TestInterruptWithABrokenStderrStillStopsTheHelper(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	cmd := exec.Command(self, "--root", e.repo)
+	// --quiet: after the start-up lines the launcher prints nothing until it
+	// is told to stop. Without it an activity line could reach the broken
+	// pipe before the signal does, and the launcher would end for that
+	// reason instead (which is its own test, below): the order of the two
+	// events must not be left to chance.
+	cmd := exec.Command(self, "--root", e.repo, "--quiet")
 	cmd.Env = append(os.Environ(), "REPOCHAT_TEST_ROLE=repochat")
 	cmd.Stderr = w
 	if err := cmd.Start(); err != nil {
@@ -45,7 +50,9 @@ func TestInterruptWithABrokenStderrStillStopsTheHelper(t *testing.T) {
 	go func() {
 		sc := bufio.NewScanner(r)
 		for sc.Scan() {
-			if strings.Contains(sc.Text(), "connected to OpenAI") {
+			// The last line of a first run: the stand-in client has made
+			// its calls and nothing further will be printed.
+			if strings.Contains(sc.Text(), "setup is complete") {
 				connected <- true
 				return
 			}
@@ -68,6 +75,7 @@ func TestInterruptWithABrokenStderrStillStopsTheHelper(t *testing.T) {
 		t.Fatalf("the launcher should own the tunnel by now: %v", err)
 	}
 
+	waitFor(t, "the stand-in client to finish its calls", func() bool { return e.readRecord().Responses["read"] != "" })
 	r.Close() // the reader of stderr is gone
 	cmd.Process.Signal(os.Interrupt)
 	done := make(chan error, 1)
@@ -79,7 +87,8 @@ func TestInterruptWithABrokenStderrStillStopsTheHelper(t *testing.T) {
 			if ws, ok := ee.Sys().(syscall.WaitStatus); ok && ws.Signaled() {
 				t.Fatalf("the launcher was killed by %v instead of stopping the share", ws.Signal())
 			}
-			t.Fatalf("the launcher exited with %v", err)
+			// The signal came first, so this is an ordinary stop.
+			t.Fatalf("the launcher exited with %v, want a clean stop", err)
 		}
 	case <-time.After(30 * time.Second):
 		t.Fatal("the launcher did not stop")
@@ -163,11 +172,18 @@ func TestShareEndsWhenItsDisplayIsGone(t *testing.T) {
 	conn.Write([]byte(`{"op":"event","a":{"kind":"call","tool":"read_file","ok":true}}` + "\n"))
 
 	select {
-	case <-done:
+	case code := <-done:
+		// Nobody asked for this stop: it is reported as a failure.
+		if code != 1 {
+			t.Errorf("exit code %d, want 1", code)
+		}
 	case <-time.After(20 * time.Second):
 		t.Fatal("the launcher went on sharing after its display was gone")
 	}
 	if held, err := lockHeld(dir); held || err != nil {
 		t.Error("something still holds the tunnel's lock: tunnel-client was not stopped")
+	}
+	if _, err := os.Stat(filepath.Join(dir, "owner.json")); !errors.Is(err, os.ErrNotExist) {
+		t.Errorf("the launcher did not release the tunnel (owner.json: %v)", err)
 	}
 }

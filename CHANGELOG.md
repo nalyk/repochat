@@ -24,6 +24,7 @@ Nimic din 1.0.0 nu a fost publicat; corecturile de mai jos fac parte din prima v
 Expunere și execuție
 - Git nu mai intră în submodule: `git_diff` nu mai arată conținutul lor (inclusiv fișiere reținute) și nu mai rulează programe din configurația lor.
 - `.repochatignore`: un BOM la început nu mai anulează prima regulă; o negație nu mai readuce fișiere dintr-un director exclus; un fișier care nu este text oprește servirea.
+- `.repochatignore` este evaluat de git însuși (`git check-ignore`, într-un repository gol și izolat), nu de o reimplementare a regulilor lui: prima variantă a reparației copia comportamentul unei singure versiuni de git și servea fișiere pe care o versiune mai nouă le ignoră. Căile care există doar în istoric sunt judecate la fel, în loturi; fără răspunsul lui git nu se servește nimic.
 - Numele fișierelor reținute nu mai pot fi ghicite din numărători care depindeau de interogare.
 - Revizii: formele care caută în mesajele commiturilor sunt refuzate; „inexistent” și „neaccesibil” au același răspuns.
 - `--no-history` acoperă și `git_diff`; `git_status` și `repo_overview` nu mai arată date din commituri.
@@ -56,4 +57,5 @@ Corectitudine
 - Numele membrilor JSON-RPC sunt citite exact (`"ID"` nu este `"id"`).
 
 Lansare
+- Suita pentru accesul la repository rulează în CI și cu git 2.25, 2.34 și 2.43, nu doar cu cel mai nou.
 - Fluxul de lansare verifică și macOS, cere ca tagul să fie pe `main` și nu mai depinde de atestări, indisponibile pentru un repository privat pe un cont personal.

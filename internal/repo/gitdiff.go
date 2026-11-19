@@ -286,6 +286,14 @@ func (r *Repo) diffEntries(ctx context.Context, p *diffPlan, paths []string) ([]
 	if len(entries) == 0 {
 		return nil, nil
 	}
+	// These are paths out of history: most were never in the working-tree
+	// list, so nothing has judged them yet. Every one is checked against the
+	// policy by whoever uses the list; have git judge them all in one go.
+	names := make([]string, 0, len(entries))
+	for _, e := range entries {
+		names = append(names, e.Path, e.Orig)
+	}
+	r.primePolicy(ctx, names)
 
 	out, err = r.git(ctx, diffListCap, p.args([]string{"--numstat", "-z"}, paths)...)
 	if err != nil {

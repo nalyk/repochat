@@ -349,7 +349,9 @@ func (r *Repo) pickaxeTouchesServedPath(ctx context.Context, oid, needle string,
 	if err != nil {
 		return false, err
 	}
-	for _, p := range splitNUL(out) {
+	names := splitNUL(out)
+	_ = pol.Prime(ctx, names)
+	for _, p := range names {
 		if pol.Check(p) == "" {
 			return true, nil
 		}

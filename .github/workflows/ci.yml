@@ -27,3 +27,37 @@ jobs:
         run: make fuzz
       - name: Cross-compile
         run: make dist
+
+  # What a file is allowed to be read depends on git: the file list, the
+  # history and the meaning of .repochatignore all come from it. The suite
+  # therefore also runs against the oldest git repochat accepts and against
+  # the ones in between; the runners above have the newest.
+  git-versions:
+    name: git ${{ matrix.git }}
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - { image: "ubuntu:20.04", git: "2.25" }
+          - { image: "ubuntu:22.04", git: "2.34" }
+          - { image: "ubuntu:24.04", git: "2.43" }
+    runs-on: ubuntu-latest
+    container: ${{ matrix.image }}
+    steps:
+      - name: Install git ${{ matrix.git }}
+        run: |
+          apt-get update
+          DEBIAN_FRONTEND=noninteractive apt-get install -y --no-install-recommends git ca-certificates curl
+          git --version
+          git --version | grep -F "git version ${{ matrix.git }}."
+      - uses: actions/checkout@v4
+      - uses: actions/setup-go@v5
+        with:
+          go-version: stable
+      # As an ordinary user: several tests are about what a user may not read.
+      - name: Repository and tool tests
+        run: |
+          useradd -m tester
+          cp -r . /home/tester/src
+          chown -R tester /home/tester/src
+          su tester -c "cd /home/tester/src && PATH=$(dirname "$(command -v go)"):\$PATH go test -count=1 ./internal/repo/ ./internal/tools/"

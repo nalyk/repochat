@@ -1,230 +1,239 @@
 # repochat
 
-Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat) · <https://github.com/nalyk/repochat>
+[Română](README.ro.md) · Project: <https://github.com/nalyk/repochat>
 
-Discuți în ChatGPT Web despre repository-ul Git de pe calculatorul tău, fără să-l urci nicăieri și fără să deschizi vreun port. repochat este doar pentru citire: prin el nu se poate modifica nimic.
+Talk to ChatGPT about the Git repository on your computer, without uploading it anywhere and without opening a port. repochat is read-only: nothing can be changed through it.
 
 ```bash
-cd ~/projects/proiectul-meu
+cd ~/projects/my-project
 repochat
 ```
 
-Apoi, în ChatGPT: `@RepoChat ce face AuthenticationService și unde e folosit?`
+Then, in ChatGPT: `@RepoChat what does AuthenticationService do and where is it used?`
 
-repochat este un singur binar Go, fără dependențe externe. Vorbește protocolul MCP și ajunge la ChatGPT prin [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), cu clientul oficial OpenAI `tunnel-client`, pe care îl instalează singur la prima pornire.
+It is one Go binary with no third-party dependencies. It speaks MCP and reaches ChatGPT through OpenAI's [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), using OpenAI's own `tunnel-client`, which repochat installs for you on first run.
 
-> **Ce trebuie să știi înainte.** Tot ce citește ChatGPT din repository ajunge la OpenAI. „Local” înseamnă aici că nu urci codul nicăieri dinainte și că legătura pleacă de pe calculatorul tău, nu că datele rămân pe el. Folosește repochat doar cu cod pe care ai voie să-l arăți.
+> Read this before anything else. Whatever ChatGPT reads from your repository is sent to OpenAI. "Local" here means you upload nothing in advance and the connection starts from your machine. It does not mean the data stays on it. Only use repochat with code you are allowed to show.
 
-## Pornire rapidă
+## Why this exists
 
-### 1. Instalare
+I wrote it because of how OpenAI meters things.
 
-Din surse (ai nevoie de Go 1.24+ și git 2.25+):
+Codex in the terminal, in the desktop app and in the IDE all draw on one allowance. OpenAI's [pricing page](https://learn.chatgpt.com/docs/pricing) puts it plainly: "ChatGPT Work and Codex share pricing, credits, and usage limits." On Plus that allowance is a five-hour window with a weekly limit on top, and the estimate for the default model is somewhere between 15 and 160 local messages per window, depending on how heavy each one is. Pro plans have no five-hour window, but the weekly limit stays.
+
+That is fine when the agent is editing code. It is a poor deal for the other half of the job, which is talking: "why is this module shaped like this", "what would break if I changed that", "read these four files and tell me what you would do". An agent answers those by pulling half the repository into its context, and every such question comes out of the same budget I need later for the actual work. More than once I ran out mid-week having mostly asked questions.
+
+Ordinary ChatGPT, the chat on the web, is a separate surface. The same pricing page lists the agentic models as available "in Work and Codex, not Chat", and Chat is not part of the shared allowance it describes. Chat is also where I do my reading: web search, long back-and-forth, half-formed ideas. What Chat cannot do is see my code, unless I paste it in or push it somewhere it can reach.
+
+repochat closes that gap. The repository stays where it is, ChatGPT asks for the files it needs, and the conversation happens in Chat instead of in an agent session. I plan and research in the browser, with the real code in front of the model, and keep the Codex allowance for the sessions that change things.
+
+Three caveats, because I would rather be straight about this:
+
+- I have not measured how tool calls from a plugin count against Chat's own limits, and OpenAI does not spell it out. Third-party guides say the accounting between ChatGPT and Codex is changing again soon. Check your [usage dashboard](https://chatgpt.com/codex/settings/usage) rather than trusting this paragraph.
+- OpenAI documents custom MCP plugins for ChatGPT on the web. I have not tried the mobile or desktop ChatGPT apps and make no claim about them.
+- Secure MCP Tunnel was announced for enterprise customers. If your plan does not offer it for personal plugins, repochat cannot change that.
+
+If you already live in Codex or Claude Code and never hit a limit, you probably do not need this.
+
+## Quick start
+
+### 1. Install
+
+From source (Go 1.24+ and git 2.25+):
 
 ```bash
 git clone https://github.com/nalyk/repochat.git
 cd repochat
-make install          # compilează și copiază binarul în ~/.local/bin
+make install          # builds and copies the binary to ~/.local/bin
 ```
 
-sau, direct cu Go (repository-ul este privat, deci Go trebuie să aibă acces la el):
+Or with Go directly (the repository is private, so Go needs access to it):
 
 ```bash
 GOPRIVATE=github.com/nalyk/repochat go install github.com/nalyk/repochat@latest
 ```
 
-sau, după ce există un release publicat, dintr-o arhivă de la <https://github.com/nalyk/repochat/releases>: dezarhivezi și rulezi `./repochat install`. (Deocamdată nu este publicat niciunul; un tag `v*` îl produce automat.)
+There is no published release yet. A `v*` tag on `main` builds one.
 
-### 2. Prima pornire
+### 2. First run
 
-Intri într-un repository și rulezi `repochat`. Programul te duce prin tot ce lipsește, în ordine:
+Go into a repository and run `repochat`. It walks you through what is missing, in this order:
 
-1. **Verifică git și repository-ul.** Nu descarcă și nu cere nimic până nu știe că are ce servi.
-2. **Instalează `tunnel-client`**, dacă nu îl găsește. Îți arată de unde descarcă și ce verifică, apoi întreabă. Versiunea implicită este fixată, iar arhiva este comparată cu sume SHA-256 compilate în repochat.
-3. **Cere două valori de la OpenAI Platform**, o singură dată, într-un singur câmp ascuns (le lipești în orice ordine):
-   - ID-ul unui tunel creat la <https://platform.openai.com/settings/organization/tunnels> și atașat workspace-ului tău ChatGPT;
-   - o cheie API *Restricted*, cu permisiunile Tunnels: Read + Use, de la <https://platform.openai.com/settings/organization/api-keys>.
+1. It checks git and the repository first. Nothing is downloaded or asked for until it knows there is something to serve.
+2. It installs `tunnel-client` if it cannot find it. It shows where the download comes from and what it verifies, then asks. The version is pinned and the archive is checked against SHA-256 sums compiled into repochat.
+3. It asks once for two values from OpenAI Platform, in a single hidden field (paste them in any order):
+   - the ID of a tunnel created at <https://platform.openai.com/settings/organization/tunnels> and attached to your ChatGPT workspace;
+   - a Restricted API key with Tunnels Read + Use, from <https://platform.openai.com/settings/organization/api-keys>.
 
-   repochat le verifică pe loc la OpenAI și le salvează într-un fișier pe care îl poți citi doar tu.
-4. **Pornește tunelul și îți arată pasul din ChatGPT**, tot o singură dată: <https://chatgpt.com/plugins> → `+` → *Add custom MCP server* → Connection: **Tunnel** → alegi tunelul → *No authentication* → *Create as a plugin* (personal) → *Install*. Numele pluginului îl alegi tu; exemplele de aici folosesc „RepoChat”, de unde `@RepoChat`.
-5. **Confirmă în terminal** când a servit primul apel venit din ChatGPT. Din acel moment configurarea e gata.
+   It verifies them with OpenAI and saves them in a file only you can read.
+4. It starts the tunnel and shows the one step that has to happen in ChatGPT: <https://chatgpt.com/plugins> → `+` → Add custom MCP server → Connection: Tunnel → pick the tunnel → No authentication → Create as a plugin (personal) → Install. You choose the plugin's name; the examples here use "RepoChat".
+5. It confirms in the terminal when the first call from ChatGPT has been served.
 
-Pasul din ChatGPT nu poate fi făcut de un program local: tunelul și pluginul se creează în contul tău. Restul e automat.
+No local program can do the ChatGPT step for you. The tunnel and the plugin live in your account.
 
-### 3. Zi de zi
-
-```bash
-cd alt-proiect && repochat      # Ctrl+C oprește partajarea
-```
-
-Poți porni din orice subdirector. Dacă tunelul e deja folosit de alt repochat (alt repository, alt terminal), programul te întreabă dacă îl oprește pe acela și îl preia.
-
-Fără terminal (scripturi, CI) nu se pune nicio întrebare: setezi `CONTROL_PLANE_TUNNEL_ID` și `CONTROL_PLANE_API_KEY` și adaugi `--yes` unde vrei confirmare implicită.
-
-## Mai multe repository-uri în paralel
-
-Un tunel servește un singur repository la un moment dat. Ca să lucrezi în mai multe în același timp, dai fiecăruia tunelul lui:
+### 3. Day to day
 
 ```bash
-cd ~/projects/api && repochat                    # profilul implicit, primul tunel
-cd ~/projects/web && repochat --profile web      # prima dată cere tunelul și cheia pentru „web”
+cd other-project && repochat      # Ctrl+C stops sharing
 ```
 
-- Fiecare profil are tunelul lui, creat în OpenAI Platform, și pluginul lui în ChatGPT (de exemplu „repochat-api” și „repochat-web”). Permisiunile pentru tuneluri sunt la nivel de organizație, deci aceeași cheie API ar trebui să meargă pentru toate tunelurile ei; asta nu a fost verificat cu un cont real.
-- `repochat setup --profile web --bind`, rulat în repository, leagă profilul de el: de atunci ajunge `repochat`, fără `--profile`, iar profilul refuză alt repository.
-- `repochat status` le listează pe toate; `repochat stop --profile web` oprește doar unul.
-- Dacă pornești al doilea repochat pe **același** tunel, el nu rulează în paralel: te întreabă dacă îl oprește pe primul și îl preia.
+You can start it from any subdirectory. If the tunnel is already in use by another repochat, it asks whether to stop that one and take over.
 
-Verificat automat, inclusiv cu două instanțe reale `tunnel-client` pornite simultan: fiecare tunel primește răspunsuri doar din repository-ul lui. Neverificat, pentru că ține de ChatGPT: cum se comportă o singură conversație în care folosești două pluginuri cu aceleași nume de instrumente. Varianta sigură este o conversație pe plugin.
+Without a terminal (scripts, CI) it asks nothing: set `CONTROL_PLANE_TUNNEL_ID` and `CONTROL_PLANE_API_KEY`, and add `--yes` where you want confirmations answered.
 
-## Ce vede ChatGPT
+## Several repositories at once
 
-| Vede | Nu vede |
-|---|---|
-| fișierele pe care git le cunoaște: urmărite și neurmărite | fișierele ignorate prin `.gitignore` |
-| istoricul accesibil din `HEAD`, ramuri, ramuri remote și taguri | stash, reflog, commituri orfane |
-| numărul fișierelor reținute, pe categorii | conținutul și numele fișierelor reținute |
-| | directorul `.git`, fișiere din afara repository-ului, ținte de symlink |
-| | conținutul submodulelor (un submodul modificat apare doar ca schimbare de commit) |
-| | fișierele proprii ale repochat (configurația cu cheia API, starea, `tunnel-client`), dacă se află în repository |
-
-**Fișiere reținute.** Fișierele care arată a secrete sunt reținute implicit: `.env`, `*.pem`, `*.key`, `id_rsa`, `terraform.tfstate`, `*.tfvars`, `credentials.json`, `secrets.yaml`, `.npmrc`, `service-account.json` și altele asemenea. Regula pe cuvinte-cheie (`token`, `secret`, `password`…) se aplică doar fișierelor de date și de configurare, deci `token.go` sau `password.service.ts` rămân vizibile. Modelul află că există fișiere reținute și câte sunt în tot repository-ul, ca să nu confunde „ascuns” cu „inexistent”. Numărul nu depinde de ce caută: un răspuns nu spune niciodată câte fișiere reținute se potrivesc cu un anumit tipar sau director, pentru că așa li s-ar putea ghici numele literă cu literă.
-
-**Mascare.** Valorile care arată a secrete în fișierele servite (chei AWS, tokenuri GitHub/GitLab/Slack, chei OpenAI/Anthropic/Google/Stripe, JWT, parole în URL-uri, chei private PEM) apar ca `[REDACTED:tip]`. Căutarea lucrează pe textul deja mascat, așa că un secret nu poate fi ghicit caracter cu caracter prin interogări. Mascarea este „best effort”: un secret într-un format necunoscut nu este detectat.
-
-Vezi exact ce s-ar servi, fără să pornești nimic:
+One tunnel serves one repository at a time. To work in several at once, give each its own tunnel:
 
 ```bash
-repochat files                 # fișierele servite
-repochat files --withheld      # fișierele reținute și motivul
-repochat call read_file '{"path":"README.md"}'    # exact textul pe care l-ar primi modelul
+cd ~/projects/api && repochat                    # default profile, first tunnel
+cd ~/projects/web && repochat --profile web      # asks once for the "web" tunnel and key
 ```
 
-## Controlul expunerii
+- Each profile has its own tunnel and its own plugin in ChatGPT. Tunnel permissions are per organization, so one API key should work for all of them; that has not been checked with a real account.
+- `repochat setup --profile web --bind`, run inside the repository, ties the profile to it. After that plain `repochat` is enough there, and the profile refuses any other repository.
+- `repochat status` lists every share on this machine. `repochat stop --profile web` stops one.
 
-| Opțiune | Efect |
+How a single conversation behaves with two plugins that expose the same tool names is ChatGPT's business and has not been tested. One conversation per plugin is the safe way.
+
+A design for one plugin serving several repositories exists in [`docs/superpowers/`](docs/superpowers/). None of it is built.
+
+## What ChatGPT can see
+
+| Sees | Does not see |
 |---|---|
-| `--tracked-only` | ascunde fișierele neurmărite |
-| `--no-history` | doar arborele de lucru, fără commituri vechi: se refuză și `git_diff`, iar `git_status` și `repo_overview` nu mai arată identificatori de commit |
-| `--deny PATTERN` | reține în plus (sintaxă `.gitignore`, repetabil) |
-| `--allow PATTERN` | servește un fișier pe care regulile implicite l-ar reține |
-| `--show-withheld-names` | modelul vede numele fișierelor reținute, nu și conținutul |
-| `--no-redact` | oprește mascarea valorilor |
-| `--max-output-kb N` | bugetul unui răspuns, cu tot cu linia `@meta` (16–2048, implicit 32) |
-| `--profile NUME` | alt tunel salvat |
+| files git knows about: tracked and untracked | files ignored by `.gitignore` |
+| history reachable from `HEAD`, branches, remote branches and tags | stash, reflog, orphaned commits |
+| how many files are withheld in the whole repository, by category | the names and content of withheld files |
+| | the `.git` directory, files outside the repository, symlink targets |
+| | the content of submodules (a changed submodule shows only as a commit change) |
+| | repochat's own files (the configuration with the API key, state, `tunnel-client`) |
 
-Un fișier `.repochatignore` în repository (aceeași sintaxă ca `.gitignore`, citită ca git: o negație `!` nu poate readuce un fișier dintr-un director exclus) reține fișiere pentru toți cei care servesc acel repository. El poate doar să strângă: `--allow` nu trece peste el.
+Files that look like secrets are withheld by default: `.env`, `*.pem`, `*.key`, `id_rsa`, `terraform.tfstate`, `*.tfvars`, `credentials.json`, `secrets.yaml`, `.npmrc`, `service-account.json` and similar. The keyword rule (`token`, `secret`, `password`…) applies only to data and configuration files, so `token.go` stays visible. The model is told that withheld files exist and how many there are in total. That number never depends on what it searches for, because a count per query would let it guess names letter by letter.
 
-Ordinea regulilor: fișierele proprii ale repochat → nume nesuportat → `.repochatignore` → `--deny` → `--allow` → regulile implicite pentru secrete.
+Values that look like secrets (AWS keys, GitHub, GitLab and Slack tokens, OpenAI, Anthropic, Google and Stripe keys, JWTs, passwords in URLs, PEM private keys) appear as `[REDACTED:kind]`. Search runs on the masked text. Masking is best effort: a secret in a format repochat does not know is not caught.
 
-Pune tiparele între ghilimele și dă fiecăruia propriul `--deny` sau `--allow`. Un tipar nepus între ghilimele poate fi extins de shell în mai multe cuvinte, iar comenzile care primesc doar opțiuni refuză orice cuvânt în plus, cu eroare, în loc să ignore în tăcere opțiunile de după el.
-
-**Profile.** `repochat setup --profile client-x` salvează alt tunel. `repochat setup --bind` leagă un profil de repository-ul curent: profilul e ales automat acolo și refuză orice alt repository. E util când un tunel trebuie să servească un singur proiect.
-
-## Comenzi
-
-| Comandă | Ce face |
-|---|---|
-| `repochat` | partajează repository-ul curent |
-| `repochat status` / `stop` | se partajează ceva acum, din orice terminal și cu orice credențiale a fost pornit? / oprește din alt terminal |
-| `repochat doctor` | verifică separat fiecare parte și spune ce nu a putut testa |
-| `repochat setup` | introduce sau schimbă tunelul și cheia; `--list`, `--remove`, `--bind` |
-| `repochat files`, `tools`, `call` | ce se servește, ce instrumente primește modelul, rulează un instrument |
-| `repochat log` | activitatea recentă (ce instrument, când, cât a durat) |
-| `repochat mcp` | serverul MCP propriu-zis (stdio) |
-| `repochat mcp-config` | configurare pentru alți clienți MCP |
-| `repochat install`, `install-helper` | instalează binarul, respectiv `tunnel-client` |
-| `repochat help chatgpt` | pașii din ChatGPT |
-
-## Instrumentele pe care le primește modelul
-
-Toate sunt marcate `readOnlyHint`, deci ChatGPT nu cere confirmare la fiecare apel.
-
-| Instrument | Rol |
-|---|---|
-| `repo_overview` | ramură, HEAD, modificări necomise, structură, tipuri de fișiere, ce poate vedea sesiunea |
-| `list_files`, `find_files` | navigare în arbore; găsire după nume sau tipar |
-| `read_file`, `read_files` | citire cu numere de linie, total de linii și indicația de continuare; și la o revizie veche |
-| `search_code` | căutare literală sau RE2, cu context, filtre și cursor; spune explicit când e incompletă |
-| `file_outline` | definițiile dintr-un fișier (Go: analizor real; alte limbaje: euristic, etichetat ca atare) |
-| `git_status`, `git_log`, `git_diff`, `git_show`, `git_blame`, `git_refs` | starea și istoricul |
-
-Fiecare răspuns se termină cu o linie `@meta {json}`: dacă e complet, cursorul sau linia de continuare, câte valori au fost mascate.
-
-## Securitate
-
-**Ce garantează repochat (verificat prin teste automate):**
-
-- Niciun instrument nu scrie și niciunul nu execută comenzi arbitrare. Modelul nu furnizează niciodată argumente brute pentru git.
-- Un fișier este servit doar dacă git îl listează și politica îl admite. Symlink-urile nu sunt urmate nicăieri, nici dacă un director este înlocuit cu un symlink în timpul accesului.
-- Un diff sau un commit care atinge doar fișiere reținute nu produce conținut. O listă goală de căi permise nu devine „toate căile”. Git nu intră niciodată într-un submodul: nici conținutul lui, nici programele din configurația lui nu sunt atinse.
-- O revizie este un nume de ramură, tag sau commit, urmat cel mult de pași spre părinți (`^`, `~N`). Formele care caută în mesajele commiturilor (`^{/text}`, `:/text`) sunt refuzate, iar o revizie inexistentă și una neaccesibilă primesc același răspuns.
-- Configurația din repository nu poate face o operație de citire să ruleze un program: filtre `clean`/`smudge`, `textconv`, drivere de diff, `fsmonitor`, `diff.external`, `GIT_EXTERNAL_DIFF`, descărcări automate printr-un remote. Fiecare caz este testat cu un control pozitiv: testul arată întâi că git simplu rulează programul.
-- Configurația din repository nu poate aduce în răspunsuri conținutul unui fișier din afara lui (`mailmap.file`, `blame.ignoreRevsFile`). Textul de eroare al lui git nu ajunge niciodată la model; rămâne în jurnalul local.
-- Cheia API nu apare în argumentele niciunui proces și nu ajunge la git. `tunnel-client` primește un mediu construit dintr-o listă albă și îl dă mai departe, cu tot cu cheie, serverului MCP pe care îl pornește; de aceea serverul se repornește singur, înainte să servească ceva, cu un mediu construit tot dintr-o listă albă. Procesul care citește repository-ul nu ține cheia nici în mediu, nici în memorie (verificat și cu `tunnel-client` real).
-- repochat nu își servește niciodată propriile fișiere, oricare ar fi opțiunile, iar directorul personal sau `/` ca rădăcină se refuză fără `--allow-broad-root`, inclusiv pentru `repochat mcp` pornit de alt client.
-- Un singur repochat pe tunel, pe acest calculator. Preluarea se face cooperativ, printr-un socket privat; niciun proces nu este semnalizat după PID. Ctrl+C oprește partajarea și când ieșirea este trimisă printr-un pipe (`repochat 2>&1 | tee jurnal`); dacă cititorul acelui pipe dispare (stderr rupt), partajarea se oprește. Asta nu garantează că cineva urmărește afișajul: cu `--quiet` sau cu stderr trimis într-un fișier nu se oprește nimic.
-- Textul din repository (surse, mesaje de commit, nume de fișiere, numele directorului) și textul trimis de apelant (valorile și numele argumentelor) sunt tratate ca date nesigure: caracterele de control sunt neutralizate înainte să ajungă la model sau în terminal.
-
-**Ce nu garantează:**
-
-- **Nu este un sandbox.** Configurația git din repository este tratată ca nesigură pentru execuție, ca măsură suplimentară. Lista filtrelor git se recitește înaintea fiecărei operații, dar un proces local care modifică `.git/config` chiar în timpul unei comenzi, sau care înlocuiește directorul repository-ului, iese din ce poate preveni repochat. Configurația git a utilizatorului și a sistemului este considerată de încredere.
-- Un tipar din `.repochatignore` pe care repochat nu îl înțelege oprește servirea, cu numărul liniei. E intenționat: un tipar sărit ar expune exact ce trebuia ascuns.
-- **Mascarea nu e o garanție.** Verifică singur cu `repochat files` și `repochat call`.
-- **Cine poate folosi pluginul poate citi repository-ul** cât timp rulează repochat. Creează pluginul ca *personal*. Tunelul nu știe ce conversație îl folosește: dacă treci la alt repository, conversațiile vechi îl văd pe cel nou. repochat te avertizează la schimbare.
-- **Instrucțiuni ascunse în cod** (prompt injection) pot influența modelul. repochat le marchează ca date, dar decizia aparține modelului.
-- `tunnel-client` deschide un port de diagnoză pe `127.0.0.1` (aleatoriu). repochat însuși nu ascultă pe rețea.
-- **Dimensiunea implicită a răspunsurilor (32 KB) este provizorie.** Nu a fost măsurată în sesiuni reale ChatGPT; un argument de dimensiune per apel este planificat pentru versiunea următoare.
-
-Jurnalul local (`repochat log`) reține doar metadate: instrument, rezultat, durată, dimensiune. Argumentele se înregistrează doar cu `--audit-args`. E un istoric pentru tine, nu o pistă de audit rezistentă la modificări.
-
-## Depanare
-
-Începe cu `repochat doctor`: verifică git, repository-ul, serverul MCP (într-un subproces real, în ambele versiuni de protocol), `tunnel-client`, forma credențialelor și accesul la tunel, și spune clar ce nu a putut testa.
-
-| Simptom | Cauză probabilă |
-|---|---|
-| tunelul nu apare în ChatGPT | nu e atașat workspace-ului ChatGPT, sau adminul a restricționat serverele MCP personalizate |
-| „OpenAI rejected the tunnel connection (HTTP 401/403/404)” | cheie greșită / fără Tunnels Read + Use / ID de tunel greșit; rulează `repochat setup` |
-| instrumentele nu apar după o actualizare | în setările pluginului: *Refresh tools* |
-| „does not answer” la preluare sau în `repochat status` | lansatorul a fost oprit forțat și a rămas un `tunnel-client` orfan, care încă ține tunelul; oprește acel proces și repornește |
-| modelul nu găsește un fișier | e ignorat de `.gitignore` sau reținut; vezi `repochat files --withheld` |
-
-`repochat --verbose` arată și jurnalul lui `tunnel-client`.
-
-## Alți clienți MCP
-
-`repochat mcp` este un server MCP obișnuit pe stdio și nu are nevoie de tunel sau de credențiale. `repochat mcp-config` tipărește configurarea pentru Claude Desktop, Claude Code, Cursor sau VS Code. Serverul vorbește atât reviziile cu handshake (2024-11-05 … 2025-11-25), cât și revizia fără stare 2026-07-28.
-
-## Dezvoltare și starea verificării
+See exactly what would be served, without starting anything:
 
 ```bash
-make check            # vet, teste cu detectorul de curse, onboarding în pseudo-terminal
-make fuzz             # fuzzing scurt pe validatorii de intrare
-make dist             # arhive pentru linux/darwin × amd64/arm64 + sume de control
-make test-contract    # suita de contract cu tunnel-client REAL și un control plane simulat
+repochat files                 # served files
+repochat files --withheld      # withheld files and why
+repochat call read_file '{"path":"README.md"}'    # the exact text the model would get
 ```
 
-Ce acoperă testele automate: politica de expunere, mascarea, accesul la fișiere și cursele pe symlink-uri, căutarea, toate instrumentele git pe repository-uri sintetice (fără commituri, HEAD detașat, worktree legat, submodul, fișier lipsă, pointer LFS), configurații git ostile cu control pozitiv, protocolul MCP în ambele ere (negociere, erori, anulare, concurență, limite), lansatorul cap-coadă cu un `tunnel-client` simulat (argumente, mediu, stări, preluare, eșecuri) și prima pornire într-un pseudo-terminal real.
+## Controlling exposure
 
-**Ce a fost verificat cu binarul real `tunnel-client` (v0.0.21), fără cont OpenAI:**
+| Option | Effect |
+|---|---|
+| `--tracked-only` | hide untracked files |
+| `--no-history` | working tree only: history tools and `git_diff` are refused, and `git_status` and `repo_overview` show no commit ids |
+| `--deny PATTERN` | withhold more (`.gitignore` syntax, repeatable) |
+| `--allow PATTERN` | serve a file the built-in secret rules would withhold |
+| `--show-withheld-names` | the model sees the names of withheld files, never their content |
+| `--no-redact` | turn value masking off |
+| `--max-output-kb N` | size of one result, `@meta` line included (16–2048, default 32) |
+| `--profile NAME` | another saved tunnel |
 
-- Instalatorul a descărcat arhiva oficială, a verificat suma SHA-256 fixată în cod și a instalat binarul.
-- Suita de contract (`make test-contract`) a rulat clientul real contra unui control plane simulat local: clientul a acceptat linia de comandă a repochat, a pornit serverul MCP prin propriul parser de argumente, a trecut de poarta de inițializare și a transportat `initialize`, `tools/list` și apeluri de instrumente cap-coadă. Stările din terminal („running”, „connected”, „remote activity”) au venit din punctul lui real de diagnoză. Căutarea tunelului (`admin tunnels get`) și `repochat doctor` au fost verificate la fel.
+A `.repochatignore` file in the repository withholds files for everyone who serves it, with the same syntax as `.gitignore`. Your own git decides what a rule means: repochat asks `git check-ignore` in an empty scratch repository, isolated from your configuration, the system's and the served repository's. You can test a rule with the same command. Names are compared exactly, including case. If git cannot be asked, nothing is served. `.repochatignore` can only tighten; `--allow` does not override it.
 
-**Ce nu a fost verificat și rămâne de făcut de tine:**
+Order of the rules: repochat's own files → unsupported name → `.repochatignore` → `--deny` → `--allow` → built-in secret rules.
 
-1. **O sesiune reală ChatGPT.** Are nevoie de un tunel și de o cheie din contul tău. Controlul plane simulat urmează documentația protocolului; serverele OpenAI pot avea reguli pe care simularea nu le are. Dacă planul tău ChatGPT nu oferă Secure MCP Tunnel pentru pluginuri personale, repochat nu poate schimba asta.
-2. **macOS, folosit de un om.** CI rulează pe macOS toată suita, inclusiv prima pornire în pseudo-terminal, și trece. Nimeni nu l-a folosit încă interactiv acolo, iar suita de contract cu `tunnel-client` real a rulat doar pe Linux.
+Quote your patterns and give each its own `--deny` or `--allow`. An unquoted pattern can be expanded by the shell into several words, and commands that take only options stop with an error on a stray word instead of silently dropping the options after it.
 
-Designul și apoi implementarea au fost revizuite adversarial de Codex CLI. Revizia implementării a găsit, în mai multe runde, 20 de probleme reale; toate sunt reparate și acoperite cu teste de regresie. Transcrierea este în [`docs/design/`](docs/design/).
+## Commands
 
-**Auditul din 19 noiembrie 2026.** Cu toată suita verde, un al doilea audit (trei revizii adversariale, câte una pe pachet, fiecare obligată să reproducă ce raportează pe binarul compilat) a găsit încă aproximativ 50 de defecte reale. Cele mai grave: `git_diff` arăta conținutul fișierelor reținute dintr-un submodul și rula un program din configurația acelui submodul; o linie construită anume oprea tot serverul la căutare; cheia API rămânea în mediul procesului care servește, deși documentația spunea altfel; repochat își servea propriul fișier de configurare dintr-un director personal ținut în git. Toate sunt reparate, fiecare cu un test care a picat înainte de reparație (lista este în [`CHANGELOG.md`](CHANGELOG.md)). Deciziile nesigure au fost discutate cu Codex CLI până la consens: [`docs/design/audit/`](docs/design/audit/). Concluzia agreată: funcțional, 1.0 este complet; ca maturitate este un **candidat în validare** (`v1.0.0-rc.1`), până când o sesiune reală ChatGPT și o evaluare a dimensiunii răspunsurilor sunt făcute pe versiunea reparată.
+| Command | What it does |
+|---|---|
+| `repochat` | share the current repository |
+| `repochat status` / `stop` | is anything shared right now, from any terminal? / stop it from another one |
+| `repochat doctor` | check each part separately and say what it could not test |
+| `repochat setup` | enter or change the tunnel and key; `--list`, `--remove`, `--bind` |
+| `repochat files`, `tools`, `call` | what is served, which tools the model gets, run a tool yourself |
+| `repochat log` | recent activity (which tool, when, how long) |
+| `repochat mcp` | the MCP server itself (stdio) |
+| `repochat mcp-config` | configuration for other MCP clients |
+| `repochat install`, `install-helper` | install the binary, or `tunnel-client` |
+| `repochat help chatgpt` | the ChatGPT steps |
 
-## Proiect
+## Tools the model gets
 
-Cod, release-uri și probleme: <https://github.com/nalyk/repochat>. Modulul Go este `github.com/nalyk/repochat`.
+All 13 are marked `readOnlyHint`, so ChatGPT does not ask for confirmation on every call.
 
-## Licență
+| Tool | Role |
+|---|---|
+| `repo_overview` | branch, HEAD, uncommitted changes, layout, file types, what the session can see |
+| `list_files`, `find_files` | browse the tree; find by name or pattern |
+| `read_file`, `read_files` | read with line numbers and a continuation hint; also at an old revision |
+| `search_code` | literal or RE2 search with context, filters and a cursor; says when it is incomplete |
+| `file_outline` | definitions in a file (Go: real parser; other languages: heuristic, labelled as such) |
+| `git_status`, `git_log`, `git_diff`, `git_show`, `git_blame`, `git_refs` | state and history |
 
-MIT. `tunnel-client` este un program separat, al OpenAI, sub licență Apache-2.0.
+Every result ends with an `@meta {json}` line: whether it is complete, the cursor or next line, how many values were masked.
+
+## Security
+
+What repochat guarantees, each point covered by automated tests:
+
+- No tool writes and none runs arbitrary commands. The model never supplies raw git arguments.
+- A file is served only if git lists it and the policy allows it. Symlinks are never followed, even if a directory is swapped for one during access.
+- A diff or commit that touches only withheld files produces no content. Git never enters a submodule.
+- A revision is a branch, tag or commit name followed at most by parent steps. Forms that search commit messages are refused, and a missing revision and an unreachable one get the same answer.
+- Repository configuration cannot make a read run a program (filters, `textconv`, diff drivers, `fsmonitor`, `diff.external`, lazy fetches). Each case is tested with a positive control that shows plain git does run it.
+- Git's error text never reaches the model.
+- The API key is in no process's arguments and never reaches git. `tunnel-client` hands its environment, key included, to the server it starts, so the server restarts itself with an allowlisted environment before it serves anything.
+- repochat never serves its own files, and it refuses a home directory or `/` as the root without `--allow-broad-root`.
+- One repochat per tunnel on this machine. Takeover is cooperative over a private socket; no process is signalled by PID. Ctrl+C stops sharing even when output goes through a pipe.
+- Repository text and the caller's text have their control characters neutralised before they reach the model or your terminal.
+
+What it does not guarantee:
+
+- It is not a sandbox. Hardening git means switching off known dangerous settings one by one, and a new git release can add one I have not seen. Your user and system git configuration are trusted.
+- Masking is not a guarantee. Check with `repochat files` and `repochat call`.
+- Anyone who can use the plugin can read the repository while repochat runs. Create it as personal. The tunnel does not know which conversation is using it: switch repositories and old conversations see the new one.
+- Old commits are served by default, and a secret removed from the working tree may still be in them. Use `--no-history` if that worries you.
+- Instructions hidden in code (prompt injection) can influence the model. repochat labels repository text as data; what the model does with it is up to the model.
+- The 32 KB default result size is provisional and has not been measured in real ChatGPT sessions.
+- `tunnel-client` opens a diagnostics port on `127.0.0.1`. repochat itself listens on nothing.
+
+The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. It is a history for you and can be edited by anyone with your account.
+
+## Troubleshooting
+
+Start with `repochat doctor`.
+
+| Symptom | Likely cause |
+|---|---|
+| the tunnel does not show up in ChatGPT | it is not attached to the ChatGPT workspace, or an admin restricted custom MCP servers |
+| "OpenAI rejected the tunnel connection (HTTP 401/403/404)" | wrong key, missing Tunnels Read + Use, or wrong tunnel ID; run `repochat setup` |
+| tools missing after an update | plugin settings → Refresh tools |
+| "does not answer" on takeover or in `repochat status` | the launcher was killed and a leftover `tunnel-client` still holds the tunnel; end that process |
+| the model cannot find a file | it is ignored by `.gitignore` or withheld; see `repochat files --withheld` |
+
+`repochat --verbose` also shows `tunnel-client`'s own log.
+
+## Other MCP clients
+
+`repochat mcp` is an ordinary stdio MCP server and needs no tunnel or credentials. `repochat mcp-config` prints configuration for Claude Desktop, Claude Code, Cursor or VS Code. It speaks the handshake revisions (2024-11-05 to 2025-11-25) and the stateless revision 2026-07-28.
+
+## Development and where it stands
+
+```bash
+make check            # vet, race-detector tests, first run through a pseudo-terminal
+make fuzz             # short fuzzing of the input validators
+make dist             # archives for linux/darwin × amd64/arm64, with checksums
+make test-contract    # contract suite with the REAL tunnel-client and a mock control plane
+```
+
+CI runs the full suite on Linux and macOS, and the repository and tool tests again with git 2.25, 2.34 and 2.43.
+
+The 1.0 feature set is complete. As for maturity, this is a candidate under validation, and I would not put a repository I cannot afford to leak behind it yet. An audit on 19 November 2026 found about 50 real defects behind a green CI, including one that leaked withheld files from submodules. They are fixed, each with a test that failed first, and the list is in [`CHANGELOG.md`](CHANGELOG.md). The first version of one fix was itself wrong on newer git, which CI caught. The design reviews and the audit exchange with Codex CLI are in [`docs/design/`](docs/design/).
+
+Still not done:
+
+1. A real ChatGPT session on the fixed build. It needs a tunnel and key from your account; the mock control plane follows the documented protocol, and OpenAI's servers may have rules it lacks.
+2. A measurement of result sizes in real conversations.
+3. Interactive use on macOS. CI passes there, but nobody has sat in front of it.
+
+## License
+
+MIT. `tunnel-client` is a separate program by OpenAI under Apache-2.0.
