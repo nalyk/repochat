@@ -69,6 +69,12 @@ type Tool struct {
 	Description string
 	Schema      Schema
 	Handler     Handler
+
+	// Write marks a tool that changes state: it is advertised as not
+	// read-only and not idempotent. Destructive further marks it as
+	// destructive. Neither set: read-only, as every tool has been so far.
+	Write       bool
+	Destructive bool
 }
 
 // Event is reported to Server.OnEvent for the activity log.
@@ -219,9 +225,9 @@ func ToolJSON(t Tool) map[string]any {
 		"inputSchema": t.Schema.JSON(),
 		"annotations": map[string]any{
 			"title":           title,
-			"readOnlyHint":    true,
-			"destructiveHint": false,
-			"idempotentHint":  true,
+			"readOnlyHint":    !t.Write,
+			"destructiveHint": t.Write && t.Destructive,
+			"idempotentHint":  !t.Write,
 			"openWorldHint":   false,
 		},
 	}
