@@ -10,7 +10,6 @@ import (
 	"strconv"
 	"strings"
 	"unicode/utf16"
-	"unicode/utf8"
 )
 
 const (
@@ -36,6 +35,9 @@ type ReadResult struct {
 	Size       int64
 	Binary     bool
 	Redactions int
+	// FileTag identifies the whole shown content (fileTagOf); set only for a
+	// working-tree read with an anchor key whose scan reached the end.
+	FileTag string
 }
 
 // ReadFile renders lines [start, start+maxLines) of a working-tree file, or
@@ -78,7 +80,7 @@ func (r *Repo) ReadFile(ctx context.Context, p string, start, maxLines int, rev 
 		state = "tracked, has merge conflicts"
 	}
 	res := &ReadResult{Path: rel, Size: fi.Size()}
-	if err := r.render(ctx, res, f, start, maxLines, budget, state); err != nil {
+	if err := r.render(ctx, res, f, start, maxLines, budget, state, r.Opts.AnchorKey); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -124,7 +126,7 @@ func (r *Repo) readAtRev(ctx context.Context, p string, start, maxLines int, rev
 		return nil, err
 	}
 	res := &ReadResult{Path: rel, Rev: sha, Size: int64(len(data))}
-	if err := r.render(ctx, res, bytes.NewReader(data), start, maxLines, budget, "at "+sha[:10]); err != nil {
+	if err := r.render(ctx, res, bytes.NewReader(data), start, maxLines, budget, "at "+sha[:10], nil); err != nil {
 		return nil, err
 	}
 	return res, nil
@@ -166,64 +168,74 @@ func (r *Repo) blobAt(ctx context.Context, sha, rel string) ([]byte, error) {
 // render fills res from the content in src. The whole content is scanned
 // (for the line total and the masking state), which for a large file takes
 // longer than a call may: the scan gives up with ctx's error as soon as ctx
-// is done.
-func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start, maxLines, budget int, state string) error {
-	br := bufio.NewReaderSize(src, 64<<10)
+// is done. With a non-empty anchorKey every shown line carries its anchor,
+// and res.FileTag is set when the scan reached the end of the content.
+func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start, maxLines, budget int, state string, anchorKey []byte) error {
 	var notes []string
-
-	head, _ := br.Peek(8000)
-	switch {
-	case hasUTF16BOM(head):
-		raw, _ := io.ReadAll(io.LimitReader(br, maxUTF16Bytes+1))
-		if len(raw) > maxUTF16Bytes {
-			res.Binary = true
-			res.Text = fmt.Sprintf("FILE %s · %s · UTF-16 text larger than %s: not shown\n", res.Path, humanSize(res.Size), humanSize(maxUTF16Bytes))
-			return nil
-		}
-		br = bufio.NewReaderSize(strings.NewReader(decodeUTF16(raw)), 64<<10)
+	br, kind := prepareText(bufio.NewReaderSize(src, 64<<10), res.Size)
+	switch kind {
+	case textUTF16TooLarge:
+		res.Binary = true
+		res.Text = fmt.Sprintf("FILE %s · %s · UTF-16 text larger than %s: not shown\n", res.Path, humanSize(res.Size), humanSize(maxUTF16Bytes))
+		return nil
+	case textUTF16:
 		notes = append(notes, "decoded from UTF-16")
-	case bytes.IndexByte(head, 0) >= 0:
+	case textBinary:
 		res.Binary = true
 		res.Text = fmt.Sprintf("FILE %s · %s · binary file: content not shown\n", res.Path, humanSize(res.Size))
 		return nil
-	case bytes.HasPrefix(head, []byte("version https://git-lfs.github.com/spec/")) && res.Size < 1024:
+	case textLFSPointer:
 		notes = append(notes, "this is a Git LFS pointer; the real content is stored outside the repository and is not available")
 	}
 
-	st := r.red.NewState()
+	lines := &lineSource{br: br, st: r.red.NewState()}
+	var tagger *fileTagger
+	if len(anchorKey) > 0 {
+		tagger = newFileTagger(anchorKey)
+	}
 	var body strings.Builder
 	lineNo, scanned := 0, int64(0)
-	invalidUTF8, longLines, budgetHit, scanCapped := false, 0, false, false
+	invalidUTF8, longLines, budgetHit, scanCapped, atEOF := false, 0, false, false, false
 	width := len(strconv.Itoa(start + maxLines))
 
 	for {
 		if lineNo&255 == 0 && ctx.Err() != nil {
 			return ctx.Err()
 		}
-		line, n, long, key, err := readLongLine(ctx, br)
+		// Redaction state must see every line, shown or not.
+		ml, n, err := lines.next(ctx)
 		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
 			return err
 		}
 		if n == 0 && err != nil {
+			atEOF = errors.Is(err, io.EOF)
 			break
 		}
 		scanned += int64(n)
 		lineNo++
-		// Redaction state must see every line, shown or not.
-		text := strings.TrimSuffix(string(line), "\r")
-		if !utf8.ValidString(text) {
-			text = strings.ToValidUTF8(text, "\uFFFD")
+		if ml.invalid {
 			invalidUTF8 = true
 		}
-		text = st.Line(text)
-		st.Force(key)
+		var anchor string
+		if tagger != nil {
+			text := ml.shown().Text
+			tagger.add(text)
+			if lineNo >= start && lineNo < start+maxLines && !budgetHit {
+				anchor = anchorOf(anchorKey, text)
+			}
+		}
 
 		if lineNo >= start && lineNo < start+maxLines && !budgetHit {
-			if long || len(text) > maxLineDisplay {
+			if ml.long() {
 				longLines++
 			}
-			shown := truncateLine(text, long)
-			entry := fmt.Sprintf("%*d| %s\n", width, lineNo, Sanitize(shown))
+			shown := truncateLine(ml.text, ml.cut)
+			var entry string
+			if tagger != nil {
+				entry = fmt.Sprintf("%*d:%s| %s\n", width, lineNo, anchor, Sanitize(shown))
+			} else {
+				entry = fmt.Sprintf("%*d| %s\n", width, lineNo, Sanitize(shown))
+			}
 			if body.Len()+len(entry) > budget-512 && res.First != 0 {
 				budgetHit = true
 				res.NextStart = lineNo
@@ -236,6 +248,7 @@ func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start
 			}
 		}
 		if err != nil {
+			atEOF = errors.Is(err, io.EOF)
 			break
 		}
 		if scanned > maxScanBytes {
@@ -243,8 +256,11 @@ func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start
 			break
 		}
 	}
+	if tagger != nil && atEOF && !scanCapped {
+		res.FileTag = tagger.sum()
+	}
 	res.Total, res.TotalKnown = lineNo, !scanCapped
-	res.Redactions = st.Count()
+	res.Redactions = lines.st.Count()
 	if res.NextStart == 0 && res.Last != 0 && (res.Last < res.Total || scanCapped) {
 		res.NextStart = res.Last + 1
 	}

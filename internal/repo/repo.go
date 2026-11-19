@@ -39,6 +39,10 @@ type Options struct {
 	// or the served tree's .repochatignore withholds is withheld. A missing
 	// file is no extra rules; one that cannot be read fails the snapshot.
 	ExtraIgnoreFile string
+	// AnchorKey, when not empty, makes working-tree reads and searches show
+	// each line as <line>:<anchor>|, the anchor being a keyed hash of the
+	// line as shown (see anchorOf). Reads from history never carry anchors.
+	AnchorKey []byte
 }
 
 const (

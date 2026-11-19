@@ -67,9 +67,10 @@ type SearchResult struct {
 }
 
 type searchLine struct {
-	no    int
-	text  string
-	match bool
+	no     int
+	text   string
+	match  bool
+	anchor string // "" when the repository shows no anchors
 }
 
 type fileScan struct {
@@ -571,15 +572,37 @@ func (r *Repo) scanFile(ctx context.Context, op *opener, rel string, m *matcher,
 		order = append(order, i)
 	}
 	sort.Ints(order)
+	anchors := r.searchAnchors(ctx, data, len(lines))
 	for _, i := range order {
 		h, isHit := found[i] // the zero hit puts a context line's excerpt at its start
 		text := windowLine(lines[i], h.start, h.end)
-		fs.lines = append(fs.lines, searchLine{no: i + 1, text: text, match: isHit})
+		sl := searchLine{no: i + 1, text: text, match: isHit}
+		if anchors != nil {
+			sl.anchor = anchors(i)
+		}
+		fs.lines = append(fs.lines, sl)
 		// Counted from what the redactor did to this line, not by looking
 		// for "[REDACTED:" alone: ordinary source text can spell that out.
 		fs.redactions += shownMasks(text, masks[i])
 	}
 	return fs
+}
+
+// searchAnchors returns, when the repository shows anchors, the anchor of
+// each line of data by index: the very anchor read_file shows for it, from
+// shownLines. Should those lines not be the ones the search split data into
+// (a file read_file decodes from UTF-16), every anchor is "???", which no
+// edit accepts.
+func (r *Repo) searchAnchors(ctx context.Context, data []byte, count int) func(int) string {
+	key := r.Opts.AnchorKey
+	if len(key) == 0 {
+		return nil
+	}
+	shown, err := r.shownLines(ctx, data)
+	if err != nil || len(shown) != count || hasUTF16BOM(data) {
+		return func(int) string { return "???" }
+	}
+	return func(i int) string { return anchorOf(key, shown[i].Text) }
 }
 
 // windowLine shortens a long line to an excerpt that begins shortly before
@@ -626,11 +649,16 @@ func renderFileHits(rel string, lines []searchLine) string {
 		if prev != 0 && l.no > prev+1 {
 			b.WriteString("  ⋯\n")
 		}
-		sep := "-"
-		if l.match {
-			sep = ":"
+		switch {
+		case l.anchor != "" && l.match:
+			fmt.Fprintf(&b, "> %d:%s| %s\n", l.no, l.anchor, Sanitize(l.text))
+		case l.anchor != "":
+			fmt.Fprintf(&b, "  %d:%s| %s\n", l.no, l.anchor, Sanitize(l.text))
+		case l.match:
+			fmt.Fprintf(&b, "  %d: %s\n", l.no, Sanitize(l.text))
+		default:
+			fmt.Fprintf(&b, "  %d- %s\n", l.no, Sanitize(l.text))
 		}
-		fmt.Fprintf(&b, "  %d%s %s\n", l.no, sep, Sanitize(l.text))
 		prev = l.no
 	}
 	return b.String()
