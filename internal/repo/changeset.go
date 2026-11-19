@@ -247,6 +247,9 @@ func checkShape(c Change) error {
 			return errors.New("move needs to_path")
 		}
 	}
+	if strings.Contains(strings.ReplaceAll(c.Text, "\r\n", ""), "\r") {
+		return errors.New("text holds a carriage return that does not end a line")
+	}
 	return nil
 }
 
@@ -450,7 +453,9 @@ func (r *Repo) checkPaths(ctx context.Context, w *changeWork, snap *Snapshot, op
 			return refusal(p, "is a protected path (git's own files, continuous-integration definitions, hook directories, .gitmodules, .gitattributes, .repochatignore); the owner has to change it by hand")
 		}
 	}
-	_ = snap.Policy.Prime(ctx, w.paths) // a failure leaves each check below without an answer: withheld
+	if err := snap.Policy.Prime(ctx, w.paths); err != nil {
+		return refusal("", "the repository owner's policy could not be evaluated for these paths (%s: %v)", ReasonUncertain, err)
+	}
 	for _, p := range w.paths {
 		if reason := snap.Policy.Check(p); reason != "" {
 			return refusal(p, "is withheld by the repository owner's policy (%s); a change set may neither change nor create such a path", reason)
@@ -719,7 +724,11 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 				// Moved unchanged: the syntax gate applies only when the new
 				// name gives the content a format the old one did not.
 				if syntaxKind(p) != syntaxKind(to) {
-					if msg := r.syntaxProblem(to, nil, true, src.data, nil); msg != "" {
+					hidden, err := r.lockedLines(ctx, src.data)
+					if err != nil {
+						return nil, err
+					}
+					if msg := r.syntaxProblem(to, nil, true, src.data, hidden); msg != "" {
 						return nil, refusal(to, "%s", msg)
 					}
 				}
@@ -976,6 +985,11 @@ func (r *Repo) editFile(key []byte, p string, src *source, changes []Change, idx
 					gap = line - 1
 				}
 			}
+			// Between two locked lines the point may lie inside one masked
+			// value (a key block): inserting there would change it.
+			if gap > 0 && gap < n && shown[gap-1].Locked && shown[gap].Locked {
+				return nil, refusal(p, "the insertion point between lines %d and %d lies inside a value you were not shown; the owner has to change it by hand", gap, gap+1)
+			}
 			if j, ok := gaps[gap]; ok {
 				return nil, refusal(p, "operations %d and %d insert at the same point (after line %d)", j+1, i+1, gap)
 			}
@@ -1091,7 +1105,9 @@ func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]
 	if msg := r.syntaxProblem(p, before, gateAsNew || before == nil, after, lockedAfter); msg != "" {
 		return refusal(p, "%s", msg)
 	}
-	if syntaxKind(p) == "go" && goParse(p, after) == nil {
+	// gofmt aligns comments by the length of neighbouring lines, so on a
+	// file holding a masked value the warning would measure the value.
+	if syntaxKind(p) == "go" && len(lockedAfter) == 0 && goParse(p, after) == nil {
 		if formatted, err := format.Source(after); err == nil && !bytes.Equal(formatted, after) {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("%s is not formatted as gofmt would format it; it was left as written", Sanitize(p)))
 		}
@@ -1189,8 +1205,31 @@ func goMessage(msg string) string {
 	return msg[:i] + ", found a literal"
 }
 
+// hideAll, as a key of a lockedAfter map, withholds the parser's message
+// for every line.
+const hideAll = -1
+
+// lockedLines marks the lines of content that hold a value the model was
+// not shown; for content that is not UTF-8 text, all of them (hideAll).
+func (r *Repo) lockedLines(ctx context.Context, content []byte) (map[int]bool, error) {
+	if hasUTF16BOM(content) || bytes.IndexByte(content, 0) >= 0 || !utf8.Valid(content) {
+		return map[int]bool{hideAll: true}, nil
+	}
+	shown, err := r.shownLines(ctx, content)
+	if err != nil {
+		return nil, err
+	}
+	locked := map[int]bool{}
+	for i, l := range shown {
+		if l.Locked {
+			locked[i] = true
+		}
+	}
+	return locked, nil
+}
+
 func (r *Repo) parserMessage(line int, msg string, lockedAfter map[int]bool) string {
-	if lockedAfter[line-1] {
+	if lockedAfter[hideAll] || lockedAfter[line-1] {
 		return fmt.Sprintf("line %d (the parser's message is not shown: the line holds a value you were not shown)", line)
 	}
 	msg, _ = r.red.Line(msg)

@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"regexp"
 	"strconv"
@@ -65,7 +66,7 @@ func (c *changeFixture) refuse(t *testing.T, want string, changes ...Change) *Ch
 	t.Helper()
 	p, err := c.s.Propose(bg, changes)
 	if err == nil {
-		t.Fatalf("Propose accepted %+v: %+v", changes, p)
+		t.Fatalf("Propose accepted %+v (plan %s, %d files)", changes, p.ID, len(p.Files))
 	}
 	var ce *ChangeError
 	if !errors.As(err, &ce) {
@@ -331,6 +332,17 @@ func TestLockedLinesCannotBeReplacedOrDeleted(t *testing.T) {
 		Change{Op: "insert", Path: "s.txt", At: at(2), Where: "before", Text: "x"},
 		Change{Op: "insert", Path: "s.txt", At: at(2), Where: "after", Text: "y"})
 	c.accept(t, Change{Op: "insert", Path: "s.txt", At: at(2), Where: "after", Text: "after key"})
+	// But not between two lines of one masked value: that changes the key.
+	for _, ins := range []Change{
+		{Op: "insert", Path: "s.txt", At: at(4), Where: "after", Text: "x"},
+		{Op: "insert", Path: "s.txt", At: at(5), Where: "after", Text: "x"},
+		{Op: "insert", Path: "s.txt", At: at(6), Where: "before", Text: "x"},
+		{Op: "insert", Path: "s.txt", At: at(8), Where: "before", Text: "x"},
+	} {
+		c.refuse(t, "lies inside a value you were not shown", ins)
+	}
+	c.accept(t, Change{Op: "insert", Path: "s.txt", At: at(4), Where: "before", Text: "before pem"})
+	c.accept(t, Change{Op: "insert", Path: "s.txt", At: at(9), Where: "before", Text: "after pem"})
 	plan := c.accept(t,
 		Change{Op: "insert", Path: "s.txt", At: at(2), Where: "before", Text: "before key"},
 		Change{Op: "insert", Path: "s.txt", At: at(3), Where: "before", Text: "after key"},
@@ -574,6 +586,44 @@ func TestGofmtDifferenceIsAWarning(t *testing.T) {
 	if len(plan.Warnings) != 0 {
 		t.Errorf("warnings for formatted code: %q", plan.Warnings)
 	}
+
+	// gofmt aligns trailing comments by the length of the lines around them,
+	// so on a file with a masked value the warning would measure the value.
+	c2 := newChangeFixture(t, map[string]string{"s.go": "package s\n\nvar k = \"" + fakeAWSKey + "\" // key\n"}, Options{})
+	plan = c2.accept(t, Change{Op: "insert", Path: "s.go", At: "end", Text: "var x = 1 // x"})
+	if len(plan.Warnings) != 0 {
+		t.Errorf("a gofmt warning on a file with a masked value: %q", plan.Warnings)
+	}
+}
+
+// A file moved to a name the syntax gate checks is refused without the
+// parser quoting a line that holds a masked value, or any line of a file
+// that is not text.
+func TestMovedFileSyntaxErrorShowsNoMaskedText(t *testing.T) {
+	c := newChangeFixture(t, map[string]string{
+		"notes.txt": "aws_key = \"" + fakeAWSKey + "\"\n",
+		"plain.txt": "zzz\n",
+		"bin.dat":   "q\x00\n",
+	}, Options{})
+	ce := c.refuse(t, "the parser's message is not shown", Change{Op: "move", Path: "notes.txt", ToPath: "notes.json"})
+	mustNotContain(t, ce.Error(), "'a'", "AKIA")
+	c.refuse(t, "the parser's message is not shown", Change{Op: "move", Path: "bin.dat", ToPath: "bin.json"})
+	c.refuse(t, "line 1: invalid character 'z'", Change{Op: "move", Path: "plain.txt", ToPath: "plain.json"})
+}
+
+// When git cannot judge the paths against .repochatignore, the change set
+// is refused rather than checked path by path.
+func TestPolicyFailureRefusesTheChangeSet(t *testing.T) {
+	c := newChangeFixture(t, map[string]string{"a.txt": "a\n", ".repochatignore": "*.log\n"}, Options{})
+	if _, err := c.ws.Snapshot(bg); err != nil {
+		t.Fatal(err)
+	}
+	real, _ := exec.LookPath("git")
+	bin := t.TempDir()
+	write(t, bin, "git", "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = check-ignore ]; then echo 'fatal: broken' >&2; exit 128; fi; done\nexec "+real+" \"$@\"\n")
+	os.Chmod(filepath.Join(bin, "git"), 0o755)
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+	c.refuse(t, ReasonUncertain, Change{Op: "create", Path: "new.txt", Text: "x"})
 }
 
 func TestLineEndingsAndFinalNewlineSurvive(t *testing.T) {
@@ -732,6 +782,8 @@ func TestChangeShapesAreChecked(t *testing.T) {
 		{"absolute path", Change{Op: "create", Path: "/tmp/n.txt", Text: "x"}},
 		{"parent path", Change{Op: "create", Path: "../n.txt", Text: "x"}},
 		{"create then edit", Change{Op: "create", Path: "a.txt", Text: "x"}},
+		{"bare carriage return at the end", Change{Op: "insert", Path: "a.txt", At: "end", Text: "foo\r"}},
+		{"bare carriage return inside", Change{Op: "create", Path: "n.txt", Text: "a\rb\n"}},
 	}
 	for _, tc := range refused {
 		t.Run(tc.name, func(t *testing.T) { c.refuse(t, "", tc.change) })
