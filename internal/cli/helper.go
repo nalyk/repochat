@@ -70,7 +70,14 @@ func findHelper() (path, source string, err error) {
 		if fi, err := os.Stat(p); err != nil || fi.IsDir() {
 			return "", "", fmt.Errorf("REPOCHAT_TUNNEL_CLIENT=%s is not a file", p)
 		}
-		return p, "REPOCHAT_TUNNEL_CLIENT", nil
+		// One binary, whatever directory it is later started from: the
+		// version check runs here, tunnel-client itself in the repository
+		// root, and a relative path would name two different files.
+		abs, err := filepath.Abs(p)
+		if err != nil {
+			return "", "", fmt.Errorf("REPOCHAT_TUNNEL_CLIENT=%s: %v", p, err)
+		}
+		return abs, "REPOCHAT_TUNNEL_CLIENT", nil
 	}
 	if dir, err := helperInstallDir(); err == nil {
 		p := filepath.Join(dir, helperName)
@@ -265,6 +272,9 @@ func installHelper(ctx context.Context, c *console, version string) (string, err
 	}
 	c.say("  install to %s", filepath.Join(dir, helperName))
 	if !c.confirm("Download and install it now?", true) {
+		if c.interrupted {
+			return "", errInterrupted
+		}
 		if !c.tty && !c.yes {
 			return "", errors.New("tunnel-client is not installed. Run `repochat install-helper --yes`, or install it yourself and put it on PATH")
 		}

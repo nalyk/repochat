@@ -141,6 +141,9 @@ func credentialWizard(ctx context.Context, c *console, cfg *Config, profile, hel
 			c.fail("could not verify the tunnel: %v", err)
 			explainVerify(c, err.Error())
 			if !c.confirm("Save these values anyway?", false) {
+				if c.interrupted {
+					return nil, errInterrupted
+				}
 				return nil, errors.New("nothing was saved")
 			}
 		}
@@ -242,11 +245,8 @@ func cmdSetup(c *console, args []string) int {
 	list := fs.Bool("list", false, "list saved profiles")
 	remove := fs.Bool("remove", false, "delete the profile")
 	fs.BoolVar(&c.yes, "yes", false, "answer yes to confirmations")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	cfg, err := loadConfig()
 	if err != nil {

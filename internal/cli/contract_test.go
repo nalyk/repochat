@@ -165,6 +165,9 @@ func TestRealTunnelClientContract(t *testing.T) {
 	if strings.Contains(responses["req_read"], "NOPE") {
 		t.Error("withheld content crossed the tunnel")
 	}
+	if env := servingEnvironment(t); strings.Contains(env, "present") || !strings.Contains(env, "absent") {
+		t.Errorf("behind the real tunnel-client the MCP server process was serving with the API key in its environment:\n%s", env)
+	}
 	log := errb.String()
 	t.Logf("launcher output with the real tunnel-client:\n%s", log)
 	wantIn(t, log, "is running", "connected to OpenAI", "remote MCP activity detected", "contract-suite", "repo_overview")

@@ -16,11 +16,14 @@ import (
 	"os/exec"
 	"os/signal"
 	"path/filepath"
+	"regexp"
+	"strconv"
 	"strings"
 	"sync"
 	"syscall"
 	"time"
 
+	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 )
 
@@ -66,7 +69,17 @@ func cmdRun(c *console, args []string) int {
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
 	defer stop()
 
-	l := &launcher{c: c, o: o, events: make(chan activity, 256), stopReq: make(chan struct{}, 1), started: time.Now()}
+	// A process that writes to a broken pipe on stderr is killed on the spot
+	// unless it handles SIGPIPE. `repochat 2>&1 | tee log` followed by Ctrl+C
+	// is exactly that: tee is gone when "Stopping…" is printed, and repochat
+	// would die before it had stopped tunnel-client. With the signal ignored
+	// the write merely fails, and a display that has gone away is noticed
+	// (see serve) instead of ending the launcher mid-flight.
+	signal.Ignore(syscall.SIGPIPE)
+	display := &watchedWriter{w: c.errw, gone: make(chan struct{})}
+	c.errw = display
+
+	l := &launcher{c: c, o: o, events: make(chan activity, 256), stopReq: make(chan struct{}, 1), started: time.Now(), displayGone: display.gone}
 	code, err := l.run(ctx)
 	if errors.Is(err, errInterrupted) {
 		return 130
@@ -78,6 +91,19 @@ func cmdRun(c *console, args []string) int {
 		}
 	}
 	return code
+}
+
+// broadRoot refuses a repository root that is the home directory or the
+// file system root: serving it would expose far more than a project.
+func broadRoot(root string) error {
+	home, _ := os.UserHomeDir()
+	if resolved, err := filepath.EvalSymlinks(home); err == nil {
+		home = resolved
+	}
+	if root == "/" || (home != "" && root == home) {
+		return fmt.Errorf("the repository root is %s — serving that would expose far more than a project.\n  cd into a project folder, or pass --allow-broad-root if you really mean it", root)
+	}
+	return nil
 }
 
 type launcher struct {
@@ -101,15 +127,39 @@ type launcher struct {
 
 	events  chan activity
 	stopReq chan struct{}
+	// displayGone is closed when the terminal output can no longer be written.
+	displayGone <-chan struct{}
 
 	mu    sync.Mutex
 	state string
+	lost  bool // tunnel-client cannot reach OpenAI right now
 }
 
 func (l *launcher) setState(s string) {
 	l.mu.Lock()
 	l.state = s
 	l.mu.Unlock()
+}
+
+const stateReconnecting = "reconnecting"
+
+// setTrouble records whether tunnel-client currently fails to reach OpenAI.
+func (l *launcher) setTrouble(lost bool) {
+	l.mu.Lock()
+	l.lost = lost
+	l.mu.Unlock()
+}
+
+// reportedState is the state shown by `repochat status` and `repochat doctor`.
+// How far the share got (authenticated, serving, …) says nothing about now:
+// while the connection is down it is not working, and is reported as such.
+func (l *launcher) reportedState() string {
+	l.mu.Lock()
+	defer l.mu.Unlock()
+	if l.lost {
+		return stateReconnecting
+	}
+	return l.state
 }
 
 func (l *launcher) run(ctx context.Context) (int, error) {
@@ -129,12 +179,8 @@ func (l *launcher) run(ctx context.Context) (int, error) {
 		return 1, err
 	}
 	if !l.o.AllowBroadRoot {
-		home, _ := os.UserHomeDir()
-		if resolved, err := filepath.EvalSymlinks(home); err == nil {
-			home = resolved
-		}
-		if root == "/" || (home != "" && root == home) {
-			return 1, fmt.Errorf("the repository root is %s — serving that would expose far more than a project.\n  cd into a project folder, or pass --allow-broad-root if you really mean it", root)
+		if err := broadRoot(root); err != nil {
+			return 1, err
 		}
 	}
 	if l.cfg, err = loadConfig(); err != nil {
@@ -288,20 +334,15 @@ func (l *launcher) acquire(ctx context.Context) error {
 		return err
 	}
 	l.dir = dir
-	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	lock, got, err := takeOwnership(dir)
 	if err != nil {
-		return err
-	}
-	got, err := tryLock(lock)
-	if err != nil {
-		lock.Close()
 		return err
 	}
 	if !got {
 		owner := readOwner(dir)
 		what := "another repository"
 		if owner.Repo != "" {
-			what = owner.Repo
+			what = repo.SanitizeLine(owner.Repo)
 		}
 		if owner.Repo == l.r.Root {
 			lock.Close()
@@ -311,6 +352,9 @@ func (l *launcher) acquire(ctx context.Context) error {
 		c.say("This tunnel is already in use by another repochat, serving %s.", c.bold(what))
 		if !c.confirm("Stop that one and serve this repository instead?", true) {
 			lock.Close()
+			if c.interrupted {
+				return errInterrupted
+			}
 			if !c.tty && !c.yes {
 				return errors.New("the tunnel is in use. Stop the other repochat, or pass --yes to take over")
 			}
@@ -329,7 +373,7 @@ func (l *launcher) acquire(ctx context.Context) error {
 				return errInterrupted
 			case <-time.After(150 * time.Millisecond):
 			}
-			if got, err = tryLock(lock); err != nil {
+			if got, err = retryOwnership(dir, lock); err != nil {
 				lock.Close()
 				return err
 			}
@@ -395,12 +439,13 @@ func (l *launcher) acceptLoop() {
 
 func (l *launcher) handleConn(conn net.Conn) {
 	defer conn.Close()
-	sc := bufio.NewScanner(conn)
-	sc.Buffer(make([]byte, 16<<10), 1<<20)
-	for sc.Scan() {
+	// An oversized line is skipped, not fatal: the MCP server reports every
+	// call on this connection, and losing it would blind the live view for
+	// the rest of the session.
+	eachLine(conn, maxLogLine, func(line []byte) {
 		var msg ctlMessage
-		if json.Unmarshal(sc.Bytes(), &msg) != nil {
-			continue
+		if json.Unmarshal(line, &msg) != nil {
+			return
 		}
 		switch msg.Op {
 		case "event":
@@ -417,16 +462,13 @@ func (l *launcher) handleConn(conn net.Conn) {
 			case l.stopReq <- struct{}{}:
 			default:
 			}
-			return
+			conn.Close() // one request per connection
 		case "status":
-			l.mu.Lock()
-			state := l.state
-			l.mu.Unlock()
-			reply, _ := json.Marshal(ctlReply{OK: true, Repo: l.r.Root, Since: l.started.UTC().Format(time.RFC3339), State: state, Version: Version})
+			reply, _ := json.Marshal(ctlReply{OK: true, Repo: l.r.Root, Since: l.started.UTC().Format(time.RFC3339), State: l.reportedState(), Version: Version})
 			conn.Write(append(reply, '\n'))
-			return
+			conn.Close()
 		}
-	}
+	})
 }
 
 // ---------------------------------------------------------------------------
@@ -536,7 +578,7 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 	cmd.Stdin = nil
 	var sink io.Writer = logFile
 	if l.o.Verbose {
-		sink = io.MultiWriter(logFile, prefixWriter{w: c.errw, prefix: c.dim("  tunnel-client │ ")})
+		sink = io.MultiWriter(logFile, prefixWriter{w: c.errw, prefix: c.dim("  tunnel-client │ "), secret: l.creds.APIKey})
 	}
 	cmd.Stdout, cmd.Stderr = sink, sink
 	cmd.SysProcAttr = helperProcAttr()
@@ -587,6 +629,7 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 			switch {
 			case st.polled:
 				authOK, troubled = true, false
+				l.setTrouble(false)
 				l.setState("authenticated")
 				c.ok("connected to OpenAI — the tunnel is authenticated and polling")
 				l.afterConnected()
@@ -598,15 +641,18 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 				return 1, true
 			case st.failure != "" && !troubled:
 				troubled = true
+				l.setTrouble(true)
 				c.warn("cannot reach OpenAI yet (%s); tunnel-client keeps retrying…", st.failure)
 			}
 		} else if authOK {
 			switch {
 			case st.failures >= 3 && !troubled:
 				troubled = true
+				l.setTrouble(true)
 				c.warn("lost contact with OpenAI (%s); tunnel-client keeps retrying…", orDefault(st.failure, "no successful poll"))
 			case st.failures == 0 && st.polled && troubled:
 				troubled = false
+				l.setTrouble(false)
 				c.ok("reconnected to OpenAI")
 			}
 		}
@@ -627,6 +673,12 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 			c.say("Another repochat is taking over this tunnel — stopping.")
 			stopHelper()
 			return 0, nil
+
+		case <-l.displayGone:
+			// Nobody can see what is being read any more, and there is no
+			// terminal left to stop it from: do not go on sharing unseen.
+			stopHelper()
+			return 1, nil
 
 		case err := <-exited:
 			code := 1
@@ -696,13 +748,34 @@ func exitNote(err error) string {
 	return ""
 }
 
+// watchedWriter passes output through and reports, once, that its
+// destination is gone (the reader of a pipe has exited).
+type watchedWriter struct {
+	w    io.Writer
+	once sync.Once
+	gone chan struct{}
+}
+
+func (d *watchedWriter) Write(p []byte) (int, error) {
+	n, err := d.w.Write(p)
+	if errors.Is(err, syscall.EPIPE) {
+		d.once.Do(func() { close(d.gone) })
+	}
+	return n, err
+}
+
 type prefixWriter struct {
 	w      io.Writer
 	prefix string
+	secret string // never echoed
 }
 
 func (p prefixWriter) Write(b []byte) (int, error) {
-	for _, line := range strings.Split(strings.TrimRight(string(b), "\n"), "\n") {
+	text := string(b)
+	if p.secret != "" {
+		text = strings.ReplaceAll(text, p.secret, "[api key]")
+	}
+	for _, line := range strings.Split(strings.TrimRight(text, "\n"), "\n") {
 		fmt.Fprintln(p.w, p.prefix+repo.SanitizeLine(line))
 	}
 	return len(b), nil
@@ -712,7 +785,7 @@ func (l *launcher) banner() {
 	c := l.c
 	c.say("")
 	c.say("%s %s · read-only", c.bold("RepoChat"), versionString())
-	c.say("  repository  %s  %s", c.bold(l.r.Name), c.dim(l.r.Root))
+	c.say("  repository  %s  %s", c.bold(l.r.Name), c.dim(repo.SanitizeLine(l.r.Root)))
 	serving := fmt.Sprintf("%d files", l.snap.Visible)
 	if n := l.snap.WithheldTotal(); n > 0 {
 		serving += fmt.Sprintf(" · %d withheld by policy (%s)", n, l.snap.WithheldSummary())
@@ -737,12 +810,12 @@ func (l *launcher) banner() {
 	}
 	c.say("  tunnel      %s · %s", tunnel, source)
 	c.say("  audience    whoever can use this plugin in ChatGPT can read these files while repochat runs")
-	for _, w := range l.snap.Warnings {
+	for _, w := range append(append([]string{}, l.r.Warnings...), l.snap.Warnings...) {
 		c.warn("%s", w)
 	}
 	if l.prof != nil && !l.creds.FromEnv {
 		if last := l.prof.LastRepo; last != "" && last != l.r.Root {
-			c.say("  %s this tunnel last served %s — chats that used it will now see THIS repository", c.amber("note"), last)
+			c.say("  %s this tunnel last served %s — chats that used it will now see THIS repository", c.amber("note"), repo.SanitizeLine(last))
 		}
 		if l.prof.LastRepo != l.r.Root {
 			l.prof.LastRepo = l.r.Root
@@ -797,17 +870,32 @@ func (l *launcher) explainFailure(logPath string) {
 		c.say("    %s", c.dim(clip(repo.SanitizeLine(line), 400)))
 	}
 	c.say("  Full log: %s", logPath)
-	text := strings.ToLower(string(raw))
-	switch {
-	case strings.Contains(text, "401") || strings.Contains(text, "unauthorized"):
-		l.explainAuth(401)
-	case strings.Contains(text, "403") || strings.Contains(text, "forbidden"):
-		l.explainAuth(403)
-	case strings.Contains(text, "404") || strings.Contains(text, "not found"):
-		l.explainAuth(404)
-	default:
+	if status := rejectionInLog(string(raw)); status != 0 {
+		l.explainAuth(status)
+	} else {
 		c.say("  `repochat doctor` checks each part of the setup separately.")
 	}
+}
+
+// A rejection is an HTTP status that is named as one (`status=401`,
+// `"status":403`, `HTTP 404`, `status code 404`) or that comes with its reason
+// phrase (`401 Unauthorized`). Bare digits are not evidence: timestamps and
+// port numbers are full of them, and "not found" is said about files too.
+var rejectionRe = regexp.MustCompile(`(?i)(?:\b(?:http|status|code)\w*\b[^0-9a-z\n]{0,8}(401|403|404)\b)|(?:\b(401)\s+unauthorized\b)|(?:\b(403)\s+forbidden\b)|(?:\b(404)\s+not\s+found\b)`)
+
+// rejectionInLog returns the HTTP status (401, 403 or 404) with which the
+// control plane rejected tunnel-client according to its log, or 0. The last
+// one mentioned wins: it is the one tunnel-client gave up on.
+func rejectionInLog(log string) int {
+	status := 0
+	for _, m := range rejectionRe.FindAllStringSubmatch(log, -1) {
+		for _, group := range m[1:] {
+			if group != "" {
+				status, _ = strconv.Atoi(group)
+			}
+		}
+	}
+	return status
 }
 
 func (l *launcher) explainAuth(status int) {
@@ -967,16 +1055,36 @@ type scriptReply struct {
 	} `json:"error"`
 }
 
-// runScript feeds newline-delimited requests to a fresh in-memory server and
-// returns the replies keyed by request id.
-func runScript(ctx context.Context, r *repo.Repo, script string) (map[string]scriptReply, error) {
-	srv := newServer(r)
+// serveScript feeds newline-delimited requests to srv in memory and returns
+// everything the server wrote.
+//
+// The end of a script is not a client hanging up: its calls are still running
+// when the input runs out. They are waited for as long as a call may take, not
+// for the few seconds the server grants a departing client; otherwise a call
+// slower than that grace (a search over a large working tree with a cold
+// cache) would end without an answer.
+func serveScript(ctx context.Context, srv *mcp.Server, script string) ([]byte, error) {
+	call := srv.CallTimeout
+	if call <= 0 {
+		call = mcp.DefaultCallTimeout
+	}
+	srv.DrainTimeout = call + 5*time.Second
 	var out bytes.Buffer
 	if err := srv.Serve(ctx, strings.NewReader(script), &out); err != nil {
 		return nil, err
 	}
+	return out.Bytes(), nil
+}
+
+// runScript feeds newline-delimited requests to a fresh in-memory server and
+// returns the replies keyed by request id.
+func runScript(ctx context.Context, r *repo.Repo, script string) (map[string]scriptReply, error) {
+	out, err := serveScript(ctx, newServer(r), script)
+	if err != nil {
+		return nil, err
+	}
 	replies := map[string]scriptReply{}
-	for _, line := range bytes.Split(bytes.TrimSpace(out.Bytes()), []byte("\n")) {
+	for _, line := range bytes.Split(bytes.TrimSpace(out), []byte("\n")) {
 		if len(line) == 0 {
 			continue
 		}

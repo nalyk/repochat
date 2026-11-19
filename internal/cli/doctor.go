@@ -1,19 +1,21 @@
 package cli
 
 import (
+	"bufio"
 	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"os/signal"
-	"strings"
 	"syscall"
 	"time"
 
+	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 )
 
@@ -26,25 +28,25 @@ func cmdDoctor(c *console, args []string) int {
 	sessionFlags(fs, &s)
 	profile := fs.String("profile", "", "check this saved tunnel `name`")
 	offline := fs.Bool("offline", false, "skip the check that contacts OpenAI")
-	if err := fs.Parse(args); err != nil {
-		if errors.Is(err, flag.ErrHelp) {
-			return 0
-		}
-		return 2
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM)
 	defer stop()
 
 	failed := 0
-	pass := func(what, detail string) { c.say("%s %-22s %s", c.green("✓"), what, detail) }
+	// Details carry paths and text reported by other programs.
+	pass := func(what, detail string) { c.say("%s %-22s %s", c.green("✓"), what, repo.Sanitize(detail)) }
 	bad := func(what, detail, fix string) {
 		failed++
-		c.say("%s %-22s %s", c.red("✗"), what, detail)
+		c.say("%s %-22s %s", c.red("✗"), what, repo.Sanitize(detail))
 		if fix != "" {
 			c.say("  %-22s → %s", "", fix)
 		}
 	}
-	skip := func(what, detail string) { c.say("%s %-22s %s", c.dim("–"), what, c.dim("not tested: "+detail)) }
+	skip := func(what, detail string) {
+		c.say("%s %-22s %s", c.dim("–"), what, c.dim("not tested: "+repo.Sanitize(detail)))
+	}
 
 	c.say("%s %s", c.bold("repochat doctor"), versionString())
 
@@ -90,7 +92,7 @@ func cmdDoctor(c *console, args []string) int {
 				detail += fmt.Sprintf(", %d withheld (%s)", n, snap.WithheldSummary())
 			}
 			pass("repository", detail)
-			for _, w := range snap.Warnings {
+			for _, w := range append(append([]string{}, r.Warnings...), snap.Warnings...) {
 				c.warn("%s", w)
 			}
 		}
@@ -186,6 +188,8 @@ func cmdDoctor(c *console, args []string) int {
 				switch reply.State {
 				case "authenticated", "remote activity", "serving":
 					pass("OpenAI: tunnel polling", detail)
+				case stateReconnecting:
+					bad("OpenAI: tunnel polling", detail, "tunnel-client cannot reach OpenAI right now and keeps retrying; check the network connection")
 				default:
 					skip("OpenAI: tunnel polling", detail)
 				}
@@ -199,7 +203,9 @@ func cmdDoctor(c *console, args []string) int {
 	}
 	if !running {
 		skip("OpenAI: tunnel polling", "only observable while `repochat` is running")
-		if prof != nil && prof.Onboarded {
+		// The saved profile's history says nothing about a different tunnel
+		// given in the environment.
+		if prof != nil && prof.Onboarded && (!creds.FromEnv || prof.TunnelID == creds.TunnelID) {
 			pass("ChatGPT: tool call", "a tool call was served through this tunnel in an earlier run")
 		} else {
 			skip("ChatGPT: tool call", "start `repochat` and ask @RepoChat something in ChatGPT")
@@ -213,6 +219,43 @@ func cmdDoctor(c *console, args []string) int {
 	}
 	c.say("%s", c.green("Everything that could be tested works."))
 	return 0
+}
+
+// askSubprocess runs cmd as a stdio server: it sends input and returns the
+// first `want` lines the server prints. Like a real client it keeps the
+// server's input open until those answers are in, because closing it starts
+// the server's shutdown while the last call may still be running. A server
+// that stops answering is ended by cmd's own context.
+func askSubprocess(cmd *exec.Cmd, input string, want int) ([][]byte, error) {
+	stdin, err := cmd.StdinPipe()
+	if err != nil {
+		return nil, err
+	}
+	stdout, err := cmd.StdoutPipe()
+	if err != nil {
+		return nil, err
+	}
+	var stderr bytes.Buffer
+	cmd.Stderr = &stderr
+	if err := cmd.Start(); err != nil {
+		return nil, err
+	}
+	go io.WriteString(stdin, input) // the server reads while it answers
+
+	var lines [][]byte
+	sc := bufio.NewScanner(stdout)
+	sc.Buffer(make([]byte, 64<<10), 4<<20)
+	for len(lines) < want && sc.Scan() {
+		if line := bytes.TrimSpace(sc.Bytes()); len(line) > 0 {
+			lines = append(lines, append([]byte(nil), line...))
+		}
+	}
+	stdin.Close()
+	io.Copy(io.Discard, stdout) // let the server finish writing before Wait closes the pipe
+	if err := cmd.Wait(); err != nil {
+		return nil, fmt.Errorf("the server exited with an error: %v %s", err, firstLine(stderr.String()))
+	}
+	return lines, nil
 }
 
 // subprocessSelfTest starts `repochat mcp` exactly as a client would and
@@ -239,18 +282,21 @@ func subprocessSelfTest(ctx context.Context, root string, s *session) error {
 `},
 	}
 	for _, sc := range scripts {
-		cctx, cancel := context.WithTimeout(ctx, 30*time.Second)
+		// One of the three requests is a tool call, which may take as long as
+		// any tool call.
+		patience := mcp.DefaultCallTimeout + 10*time.Second
+		cctx, cancel := context.WithTimeout(ctx, patience)
 		cmd := exec.CommandContext(cctx, exe, "mcp", "--session", frozen.encode())
 		cmd.Dir = root
-		cmd.Stdin = strings.NewReader(sc.input)
-		var stdout, stderr bytes.Buffer
-		cmd.Stdout, cmd.Stderr = &stdout, &stderr
-		err := cmd.Run()
+		lines, err := askSubprocess(cmd, sc.input, 3)
+		timedOut := errors.Is(cctx.Err(), context.DeadlineExceeded)
 		cancel()
-		if err != nil {
-			return fmt.Errorf("%s: the server exited with an error: %v %s", sc.era, err, firstLine(stderr.String()))
+		if timedOut {
+			return fmt.Errorf("%s: the server did not answer within %s", sc.era, patience)
 		}
-		lines := bytes.Split(bytes.TrimSpace(stdout.Bytes()), []byte("\n"))
+		if err != nil {
+			return fmt.Errorf("%s: %w", sc.era, err)
+		}
 		if len(lines) != 3 {
 			return fmt.Errorf("%s: expected 3 replies, got %d", sc.era, len(lines))
 		}

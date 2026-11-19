@@ -20,13 +20,21 @@ import (
 // cmdMCP runs the MCP server on stdin/stdout. It is what tunnel-client (or
 // any other stdio MCP client) starts.
 func cmdMCP(c *console, args []string) int {
+	// stderr belongs to the client, which may never read it. Everything this
+	// command reports goes through a writer that cannot block, so an unread
+	// pipe cannot stall the request loop or the tool workers.
+	errw := newLossyWriter(c.errw)
+	defer errw.Close(2 * time.Second)
+	c.errw = errw
+
 	fs := flag.NewFlagSet("mcp", flag.ContinueOnError)
 	fs.SetOutput(c.errw)
 	var s session
 	sessionFlags(fs, &s)
 	blob := fs.String("session", "", "frozen session passed by the repochat launcher (internal)")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	allowBroad := fs.Bool("allow-broad-root", false, "allow serving your home directory or / when that is the repository root")
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	// The server never needs credentials; make sure nothing it starts can
 	// inherit them either.
@@ -49,6 +57,21 @@ func cmdMCP(c *console, args []string) int {
 			return 1
 		}
 		s.ID = newID()
+		// A client that starts this server itself passes what it reads on to
+		// a model just as ChatGPT does, so the launcher's guard applies here
+		// too. (A session from the launcher has been through it already.)
+		if !*allowBroad {
+			start := s.Root
+			if start == "" {
+				start = "."
+			}
+			if root, err := repo.FindRoot(start); err == nil {
+				if err := broadRoot(root); err != nil {
+					fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
+					return 1
+				}
+			}
+		}
 	}
 
 	ctx, stop := signal.NotifyContext(context.Background(), os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
@@ -60,6 +83,7 @@ func cmdMCP(c *console, args []string) int {
 		return 1
 	}
 	defer r.Close()
+	r.Logf = stderrLogf(c.errw)
 	if _, err := r.Snapshot(ctx); err != nil {
 		fmt.Fprintln(c.errw, "repochat:", err)
 		return 1

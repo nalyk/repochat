@@ -10,6 +10,8 @@ import (
 	"strings"
 	"syscall"
 	"unsafe"
+
+	"github.com/nalyk/repochat/internal/repo"
 )
 
 // console is how commands talk to the person at the terminal. Human-facing
@@ -22,6 +24,9 @@ type console struct {
 	color bool
 	yes   bool // answer yes to confirmations
 	rd    *bufio.Reader
+	// interrupted is set when a question was ended by Ctrl+C (or a
+	// termination signal) instead of an answer.
+	interrupted bool
 }
 
 func newConsole(in *os.File, out, errw io.Writer) *console {
@@ -78,12 +83,33 @@ func (c *console) ok(format string, args ...any) {
 	c.say(c.green("✓")+" "+format, args...)
 }
 
+// warn and fail print what went wrong, which is mostly text that came from
+// somewhere else: a path, an error from the file system or from another
+// process, a value read from the configuration. Their arguments are therefore
+// escaped; styled text (c.bold, …) must not be passed to them.
 func (c *console) warn(format string, args ...any) {
-	c.say(c.amber("!")+" "+format, args...)
+	c.say(c.amber("!")+" "+format, plain(args)...)
 }
 
 func (c *console) fail(format string, args ...any) {
-	c.say(c.red("✗")+" "+format, args...)
+	c.say(c.red("✗")+" "+format, plain(args)...)
+}
+
+// plain escapes control characters in the textual arguments of a message.
+// Line breaks stay: several messages are laid out over more than one line.
+func plain(args []any) []any {
+	out := make([]any, len(args))
+	for i, a := range args {
+		switch t := a.(type) {
+		case string:
+			out[i] = repo.Sanitize(t)
+		case error:
+			out[i] = repo.Sanitize(t.Error())
+		default:
+			out[i] = a
+		}
+	}
+	return out
 }
 
 // readLine reads one line of visible input.
@@ -111,11 +137,35 @@ func (c *console) confirm(question string, def bool) bool {
 	if def {
 		hint = "[Y/n]"
 	}
+	// Ctrl+C at the question means "abort". The commands that ask also turn
+	// the signal into a cancelled context, which nothing looks at while a
+	// read is blocked: without this the process would sit there until Enter
+	// and then take the default answer.
+	sig := make(chan os.Signal, 1)
+	signal.Notify(sig, os.Interrupt, syscall.SIGTERM, syscall.SIGHUP)
+	defer signal.Stop(sig)
 	fmt.Fprintf(c.errw, "%s %s ", question, hint)
-	line, err := c.readLine()
-	if err != nil {
+	type answer struct {
+		line string
+		err  error
+	}
+	got := make(chan answer, 1)
+	go func() {
+		line, err := c.readLine()
+		got <- answer{line, err}
+	}()
+	var line string
+	select {
+	case <-sig:
+		c.interrupted = true
 		fmt.Fprintln(c.errw)
 		return false
+	case a := <-got:
+		if a.err != nil {
+			fmt.Fprintln(c.errw)
+			return false
+		}
+		line = a.line
 	}
 	switch strings.ToLower(strings.TrimSpace(line)) {
 	case "":

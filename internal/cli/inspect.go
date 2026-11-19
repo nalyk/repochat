@@ -1,7 +1,6 @@
 package cli
 
 import (
-	"bytes"
 	"context"
 	"encoding/json"
 	"errors"
@@ -32,8 +31,8 @@ func cmdTools(c *console, args []string) int {
 	var s session
 	sessionFlags(fs, &s)
 	asJSON := fs.Bool("json", false, "print the exact tools/list payload")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -71,6 +70,24 @@ func flagExit(err error) int {
 		return 0
 	}
 	return 2
+}
+
+// parseOptions parses the command line of a command that takes options only.
+// ok is false when the command must end with the returned exit code.
+//
+// The flag package stops at the first word that is not an option and ignores
+// the rest. An unquoted pattern the shell expanded into several words
+// (`--deny *.sql --no-history`) would then lose --no-history without a word
+// and serve more than was asked for, so a stray word is an error.
+func parseOptions(c *console, fs *flag.FlagSet, args []string) (code int, ok bool) {
+	if err := fs.Parse(args); err != nil {
+		return flagExit(err), false
+	}
+	if fs.NArg() > 0 {
+		c.fail("unexpected argument %q: repochat %s takes options only.\n  Quote patterns that contain * or ?, and give each pattern its own --deny or --allow", fs.Arg(0), fs.Name())
+		return 2, false
+	}
+	return 0, true
 }
 
 // cmdCall runs one tool through the real server pipeline and prints exactly
@@ -131,14 +148,13 @@ func cmdCall(c *console, args []string) int {
 		c.fail("--protocol must be legacy or modern")
 		return 2
 	}
-	srv := newServer(r)
-	var out bytes.Buffer
-	if err := srv.Serve(ctx, strings.NewReader(script), &out); err != nil {
+	out, err := serveScript(ctx, newServer(r), script)
+	if err != nil {
 		c.fail("%v", err)
 		return 1
 	}
 	var last string
-	for _, line := range strings.Split(strings.TrimSpace(out.String()), "\n") {
+	for _, line := range strings.Split(strings.TrimSpace(string(out)), "\n") {
 		var envelope struct {
 			ID json.RawMessage `json:"id"`
 		}
@@ -204,8 +220,8 @@ func cmdFiles(c *console, args []string) int {
 	var s session
 	sessionFlags(fs, &s)
 	withheld := fs.Bool("withheld", false, "list the withheld files and why, instead of the served ones")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -237,8 +253,8 @@ func cmdFiles(c *console, args []string) int {
 	if n := snap.WithheldTotal(); n > 0 {
 		summary += fmt.Sprintf(" · %d withheld (%s)", n, snap.WithheldSummary())
 	}
-	c.say(c.dim("%s · %s"), r.Root, summary)
-	for _, w := range snap.Warnings {
+	c.say(c.dim("%s · %s"), repo.SanitizeLine(r.Root), summary)
+	for _, w := range append(append([]string{}, r.Warnings...), snap.Warnings...) {
 		c.warn("%s", w)
 	}
 	if !*withheld && snap.WithheldTotal() > 0 {
@@ -252,8 +268,8 @@ func cmdMCPConfig(c *console, args []string) int {
 	fs := flag.NewFlagSet("mcp-config", flag.ContinueOnError)
 	fs.SetOutput(c.errw)
 	root := fs.String("root", "", "repository to serve (default: the one containing the current directory)")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	start := *root
 	if start == "" {
@@ -278,7 +294,7 @@ func cmdMCPConfig(c *console, args []string) int {
 	enc.SetIndent("", "  ")
 	enc.Encode(snippet)
 	c.say(c.dim("Paste into any stdio MCP client (Claude Desktop, Claude Code .mcp.json, Cursor, VS Code…)."))
-	c.say(c.dim("For Claude Code:  claude mcp add repochat -- %s"), shellJoin([]string{exe, "mcp", "--root", repoRoot}))
+	c.say(c.dim("For Claude Code:  claude mcp add repochat -- %s"), repo.SanitizeLine(shellJoin([]string{exe, "mcp", "--root", repoRoot})))
 	c.say(c.dim("This does not use the ChatGPT tunnel; the client starts repochat itself. No credentials are involved."))
 	return 0
 }
@@ -288,8 +304,8 @@ func cmdInstall(c *console, args []string) int {
 	fs := flag.NewFlagSet("install", flag.ContinueOnError)
 	fs.SetOutput(c.errw)
 	dirFlag := fs.String("dir", "", "target directory (default: ~/.local/bin)")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	exe, err := selfPath()
 	if err != nil {
@@ -374,8 +390,8 @@ func cmdInstallHelper(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	version := fs.String("version", "", "tunnel-client `version` to install (default: "+helperPinnedVersion+", verified against checksums built into repochat)")
 	fs.BoolVar(&c.yes, "yes", false, "do not ask for confirmation")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -386,58 +402,201 @@ func cmdInstallHelper(c *console, args []string) int {
 	return 0
 }
 
-// runningInstances finds live repochat launchers for the saved profiles.
-func runningInstances(cfg *Config, only string) map[string]*ctlReply {
-	found := map[string]*ctlReply{}
-	ids := map[string]string{}
+// instance is one tunnel in use on this machine.
+type instance struct {
+	Profile string    // saved profile name, or a description when there is none
+	Owner   ownerInfo // what the launcher recorded when it took the tunnel
+	Reply   *ctlReply // nil when nothing answers on the control socket
+}
+
+const (
+	profileFromEnv = "(environment)"
+	profileUnsaved = "(not a saved profile)"
+)
+
+// findInstances reports every tunnel that is in use on this machine. It goes
+// by the runtime files, not by the saved profiles: a share started from
+// environment variables in another shell, or from a profile removed since, is
+// still a share, and "nothing is being shared" would be false.
+//
+// A launcher that answers on its control socket is running. When nothing
+// answers but the tunnel's lock is still held, the launcher was killed and its
+// tunnel-client (which inherits the lock) is still serving: that is reported
+// too, with Reply == nil. Files left behind by an instance that is gone are
+// ignored.
+func findInstances(cfg *Config) []instance {
+	base, err := stateDir()
+	if err != nil {
+		return nil
+	}
+	runDir := filepath.Join(base, "run")
+	entries, err := os.ReadDir(runDir)
+	if err != nil {
+		return nil
+	}
+	names := map[string]string{}
 	for name, p := range cfg.Profiles {
-		if only == "" || only == name {
-			ids[name] = p.TunnelID
+		names[tunnelKey(p.TunnelID)] = name
+	}
+	if id := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TUNNEL_ID")); id != "" {
+		if _, saved := names[tunnelKey(id)]; !saved {
+			names[tunnelKey(id)] = profileFromEnv
 		}
 	}
-	if id := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TUNNEL_ID")); id != "" && only == "" {
-		ids["(environment)"] = id
-	}
-	for name, id := range ids {
-		dir, err := tunnelRunDir(id)
+	var found []instance
+	for _, e := range entries {
+		if !e.IsDir() {
+			continue
+		}
+		dir := filepath.Join(runDir, e.Name())
+		raw, err := os.ReadFile(filepath.Join(dir, "owner.json"))
 		if err != nil {
 			continue
 		}
-		if reply, err := ctlRequest(readOwner(dir).Socket, "status", time.Second); err == nil && reply.OK {
-			found[name] = reply
+		inst := instance{Profile: names[e.Name()]}
+		if inst.Profile == "" {
+			inst.Profile = profileUnsaved
 		}
+		if json.Unmarshal(raw, &inst.Owner) != nil {
+			continue
+		}
+		if reply, err := ctlRequest(inst.Owner.Socket, "status", time.Second); err == nil && reply.OK {
+			inst.Reply = reply
+		} else if held, err := lockHeld(dir); err == nil && !held {
+			continue // files left behind by an instance that is gone
+		}
+		// Held, or impossible to tell: reported, never passed over in silence.
+		found = append(found, inst)
 	}
+	sort.Slice(found, func(i, j int) bool {
+		return found[i].Profile+found[i].Owner.Repo < found[j].Profile+found[j].Owner.Repo
+	})
 	return found
 }
+
+// lockHeld reports whether some process holds the tunnel's ownership lock.
+// The probe takes the lock itself for an instant, so it runs under the same
+// coordination lock as a launcher's attempt to take ownership (takeOwnership):
+// otherwise a launcher starting at that instant would find the lock busy and
+// conclude that the tunnel is in use.
+func lockHeld(dir string) (bool, error) {
+	release, err := coordinate(dir)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	f, err := os.Open(filepath.Join(dir, "lock"))
+	if errors.Is(err, os.ErrNotExist) {
+		return false, nil
+	}
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	err = syscall.Flock(int(f.Fd()), syscall.LOCK_SH|syscall.LOCK_NB)
+	switch {
+	case err == nil:
+		syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+		return false, nil
+	case errors.Is(err, syscall.EWOULDBLOCK) || errors.Is(err, syscall.EAGAIN):
+		return true, nil
+	}
+	return false, err
+}
+
+// coordinate serialises looking at a tunnel's ownership lock with taking it.
+// It is held only for the instant either takes, never while waiting for a
+// person or for another process.
+func coordinate(dir string) (release func(), err error) {
+	f, err := os.OpenFile(filepath.Join(dir, "probe.lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, err
+	}
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		f.Close()
+		return nil, err
+	}
+	return func() { f.Close() }, nil
+}
+
+// takeOwnership opens the tunnel's ownership lock and tries to take it. The
+// file is returned either way; got says whether this process now owns the
+// tunnel.
+func takeOwnership(dir string) (lock *os.File, got bool, err error) {
+	lock, err = os.OpenFile(filepath.Join(dir, "lock"), os.O_CREATE|os.O_RDWR, 0o600)
+	if err != nil {
+		return nil, false, err
+	}
+	if got, err = retryOwnership(dir, lock); err != nil {
+		lock.Close()
+		return nil, false, err
+	}
+	return lock, got, nil
+}
+
+// retryOwnership is one attempt to take an ownership lock that is already open.
+func retryOwnership(dir string, lock *os.File) (bool, error) {
+	release, err := coordinate(dir)
+	if err != nil {
+		return false, err
+	}
+	defer release()
+	return tryLock(lock)
+}
+
+// selectInstances applies --profile. An unknown name is an error rather than
+// an empty answer, which would read as "nothing is shared".
+func selectInstances(c *console, cfg *Config, profile string) ([]instance, bool) {
+	all := findInstances(cfg)
+	if profile == "" {
+		return all, true
+	}
+	if cfg.Profiles[profile] == nil {
+		c.fail("no saved profile named %q. `repochat setup --list` shows the saved ones; without --profile every share is listed", profile)
+		return nil, false
+	}
+	var out []instance
+	for _, inst := range all {
+		if inst.Profile == profile {
+			out = append(out, inst)
+		}
+	}
+	return out, true
+}
+
+const leftoverAdvice = "the tunnel may still be active: its lock is held (or could not be examined) although no launcher answers.\n  If a tunnel-client process is left over, end it yourself (repochat never signals a process it did not start)"
 
 // cmdStatus reports whether repochat is currently sharing a repository.
 func cmdStatus(c *console, args []string) int {
 	fs := flag.NewFlagSet("status", flag.ContinueOnError)
 	fs.SetOutput(c.errw)
 	profile := fs.String("profile", "", "only this saved tunnel `name`")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		c.fail("%v", err)
 		return 1
 	}
-	found := runningInstances(cfg, *profile)
+	found, ok := selectInstances(c, cfg, *profile)
+	if !ok {
+		return 1
+	}
 	if len(found) == 0 {
 		c.say("repochat is not running. Nothing is being shared.")
 		return 0
 	}
-	names := make([]string, 0, len(found))
-	for n := range found {
-		names = append(names, n)
+	code := 0
+	for _, inst := range found {
+		if inst.Reply == nil {
+			code = 1
+			c.warn("the share of %s (profile %s) does not answer: %s", repo.SanitizeLine(inst.Owner.Repo), inst.Profile, leftoverAdvice)
+			continue
+		}
+		fmt.Fprintf(c.out, "sharing %s · profile %s · state: %s · since %s\n", repo.SanitizeLine(inst.Reply.Repo), inst.Profile, inst.Reply.State, inst.Reply.Since)
 	}
-	sort.Strings(names)
-	for _, n := range names {
-		r := found[n]
-		fmt.Fprintf(c.out, "sharing %s · profile %s · state: %s · since %s\n", r.Repo, n, r.State, r.Since)
-	}
-	return 0
+	return code
 }
 
 // cmdStop asks running repochat instances to stop sharing.
@@ -445,37 +604,32 @@ func cmdStop(c *console, args []string) int {
 	fs := flag.NewFlagSet("stop", flag.ContinueOnError)
 	fs.SetOutput(c.errw)
 	profile := fs.String("profile", "", "only this saved tunnel `name`")
-	if err := fs.Parse(args); err != nil {
-		return flagExit(err)
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	cfg, err := loadConfig()
 	if err != nil {
 		c.fail("%v", err)
 		return 1
 	}
-	stopped := 0
-	ids := map[string]string{}
-	for name, p := range cfg.Profiles {
-		if *profile == "" || *profile == name {
-			ids[name] = p.TunnelID
-		}
+	found, ok := selectInstances(c, cfg, *profile)
+	if !ok {
+		return 1
 	}
-	if id := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TUNNEL_ID")); id != "" && *profile == "" {
-		ids["(environment)"] = id
-	}
-	for name, id := range ids {
-		dir, err := tunnelRunDir(id)
-		if err != nil {
-			continue
-		}
-		owner := readOwner(dir)
-		if reply, err := ctlRequest(owner.Socket, "stop", 3*time.Second); err == nil && reply.OK {
-			stopped++
-			c.ok("asked the repochat sharing %s (profile %s) to stop", owner.Repo, name)
-		}
-	}
-	if stopped == 0 {
+	if len(found) == 0 {
 		c.say("repochat is not running. Nothing to stop.")
+		return 0
 	}
-	return 0
+	code := 0
+	for _, inst := range found {
+		if inst.Reply != nil {
+			if reply, err := ctlRequest(inst.Owner.Socket, "stop", 3*time.Second); err == nil && reply.OK {
+				c.ok("asked the repochat sharing %s (profile %s) to stop", repo.SanitizeLine(inst.Owner.Repo), inst.Profile)
+				continue
+			}
+		}
+		code = 1
+		c.fail("cannot stop the share of %s (profile %s): %s", repo.SanitizeLine(inst.Owner.Repo), inst.Profile, leftoverAdvice)
+	}
+	return code
 }

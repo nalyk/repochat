@@ -2,10 +2,12 @@ package cli
 
 import (
 	"bufio"
+	"bytes"
 	"encoding/json"
 	"errors"
 	"flag"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"syscall"
@@ -42,30 +44,56 @@ func (a *auditLog) write(rec activity) error {
 	if err != nil {
 		return err
 	}
-	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
-	if err != nil {
-		return err
-	}
-	defer f.Close()
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
-		return err
-	}
-	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
-	if fi, err := f.Stat(); err == nil && fi.Size() > auditMaxBytes {
-		// Rotate, then start a fresh file. The handle we hold now points at
-		// the rotated file; reopen to write to the new one.
-		if err := os.Rename(a.path, a.path+".1"); err == nil {
-			nf, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
-			if err != nil {
-				return err
-			}
-			defer nf.Close()
-			_, err = nf.Write(append(line, '\n'))
+	line = append(line, '\n')
+	// A process that waited for the lock may be holding a file that another
+	// one has just rotated away. Appending to it would be harmless, but
+	// judging "too big, rotate" by it would rename the fresh file over the
+	// history that was just set aside. So the decision is only ever taken on
+	// the file that is at the path now; otherwise open again.
+	for attempt := 0; attempt < 5; attempt++ {
+		done, err := a.appendOnce(line)
+		if done || err != nil {
 			return err
 		}
 	}
-	_, err = f.Write(append(line, '\n'))
-	return err
+	return errors.New("the activity log keeps being rotated by another process")
+}
+
+// appendOnce appends line to the log, rotating it first when it is full.
+// done is false when the file was rotated by someone else while waiting.
+func (a *auditLog) appendOnce(line []byte) (done bool, err error) {
+	f, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+	if err != nil {
+		return false, err
+	}
+	defer f.Close()
+	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+		return false, err
+	}
+	defer syscall.Flock(int(f.Fd()), syscall.LOCK_UN)
+	held, err := f.Stat()
+	if err != nil {
+		return false, err
+	}
+	if current, err := os.Lstat(a.path); err != nil || !os.SameFile(held, current) {
+		return false, nil
+	}
+	if held.Size() > auditMaxBytes {
+		// Whoever opens the path from now on gets the new file and its own
+		// lock; this handle keeps pointing at the rotated one.
+		if err := os.Rename(a.path, a.path+".1"); err != nil {
+			return false, err
+		}
+		nf, err := os.OpenFile(a.path, os.O_CREATE|os.O_WRONLY|os.O_APPEND|syscall.O_NOFOLLOW, 0o600)
+		if err != nil {
+			return false, err
+		}
+		defer nf.Close()
+		_, err = nf.Write(line)
+		return true, err
+	}
+	_, err = f.Write(line)
+	return true, err
 }
 
 // cmdLog prints the most recent activity records.
@@ -74,8 +102,8 @@ func cmdLog(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	n := fs.Int("n", 40, "number of most recent entries to show")
 	asJSON := fs.Bool("json", false, "print the raw JSON lines")
-	if err := fs.Parse(args); err != nil {
-		return 2
+	if code, ok := parseOptions(c, fs, args); !ok {
+		return code
 	}
 	a, err := openAudit()
 	if err != nil {
@@ -83,6 +111,7 @@ func cmdLog(c *console, args []string) int {
 		return 1
 	}
 	var lines []string
+	unreadable := 0
 	for _, p := range []string{a.path + ".1", a.path} {
 		f, err := os.Open(p)
 		if errors.Is(err, os.ErrNotExist) {
@@ -92,12 +121,16 @@ func cmdLog(c *console, args []string) int {
 			c.fail("%v", err)
 			return 1
 		}
-		sc := bufio.NewScanner(f)
-		sc.Buffer(make([]byte, 64<<10), 4<<20)
-		for sc.Scan() {
-			lines = append(lines, sc.Text())
-		}
+		skipped, err := eachLine(f, maxLogLine, func(line []byte) { lines = append(lines, string(line)) })
 		f.Close()
+		unreadable += skipped
+		if err != nil {
+			c.fail("%s: %v", p, err)
+			return 1
+		}
+	}
+	if unreadable > 0 {
+		c.warn("%d entry(ies) larger than %d KB were skipped", unreadable, maxLogLine>>10)
 	}
 	if len(lines) == 0 {
 		c.say("No activity recorded yet (%s).", a.path)
@@ -123,4 +156,42 @@ func cmdLog(c *console, args []string) int {
 	}
 	c.say(c.dim("log file: %s"), a.path)
 	return 0
+}
+
+// maxLogLine bounds one activity record when reading the log back.
+const maxLogLine = 1 << 20
+
+// eachLine calls fn for every line of r (without its line ending). A line
+// longer than max is skipped and counted instead of ending the stream: one
+// oversized record must not hide everything that follows it.
+func eachLine(r io.Reader, max int, fn func(line []byte)) (skipped int, err error) {
+	br := bufio.NewReaderSize(r, 64<<10)
+	var line []byte
+	tooLong := false
+	for {
+		chunk, e := br.ReadSlice('\n')
+		if !tooLong {
+			if len(line)+len(chunk) > max {
+				tooLong, line = true, line[:0]
+			} else {
+				line = append(line, chunk...)
+			}
+		}
+		if errors.Is(e, bufio.ErrBufferFull) {
+			continue
+		}
+		if e != nil && !errors.Is(e, io.EOF) {
+			return skipped, e
+		}
+		switch {
+		case tooLong:
+			skipped++
+		case len(bytes.TrimRight(line, "\r\n")) > 0:
+			fn(bytes.TrimRight(line, "\r\n"))
+		}
+		line, tooLong = line[:0], false
+		if e != nil {
+			return skipped, nil
+		}
+	}
 }

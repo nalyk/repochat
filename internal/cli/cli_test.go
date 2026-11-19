@@ -30,10 +30,48 @@ func TestMain(m *testing.M) {
 	switch {
 	case os.Getenv("REPOCHAT_TEST_ROLE") == "tunnel-client":
 		os.Exit(fakeTunnelClient(os.Args[1:]))
+	case os.Getenv("REPOCHAT_TEST_ROLE") == "repochat":
+		// repochat itself as a separate process, for tests about signals.
+		os.Exit(Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
+	case os.Getenv("REPOCHAT_TEST_ROLE") == "hasty-server":
+		os.Exit(hastyServer())
+	case os.Getenv("REPOCHAT_TEST_ROLE") == "mute-server":
+		os.Exit(muteServer())
 	case len(os.Args) > 1 && os.Args[1] == "mcp":
+		CleanServerStart() // as main does
+		recordServerEnvironment()
 		os.Exit(Main(os.Args[1:], os.Stdin, os.Stdout, os.Stderr))
 	}
 	os.Exit(m.Run())
+}
+
+const serverEnvLog = "server-env.log"
+
+// recordServerEnvironment notes, for the tests, whether the process that is
+// about to serve MCP was started with the API key in its environment.
+func recordServerEnvironment() {
+	dir := os.Getenv("REPOCHAT_STATE_DIR")
+	if dir == "" {
+		return
+	}
+	state := "absent"
+	if os.Getenv("CONTROL_PLANE_API_KEY") != "" {
+		state = "present"
+	}
+	if f, err := os.OpenFile(filepath.Join(dir, serverEnvLog), os.O_CREATE|os.O_WRONLY|os.O_APPEND, 0o600); err == nil {
+		fmt.Fprintf(f, "serving with the key %s\n", state)
+		f.Close()
+	}
+}
+
+// servingEnvironment returns what recordServerEnvironment noted.
+func servingEnvironment(t *testing.T) string {
+	t.Helper()
+	raw, err := os.ReadFile(filepath.Join(os.Getenv("REPOCHAT_STATE_DIR"), serverEnvLog))
+	if err != nil {
+		t.Fatalf("the MCP server left no note about its environment: %v", err)
+	}
+	return string(raw)
 }
 
 const (
@@ -421,6 +459,11 @@ func TestLauncherEndToEnd(t *testing.T) {
 	}
 	if strings.Contains(rec.ChildArgv[3], testKey) || strings.Contains(string(mustDecode(t, rec.ChildArgv[3])), "sk-") {
 		t.Error("the session must not contain credentials")
+	}
+	// tunnel-client hands its environment, key included, to the server it
+	// starts. The process that serves must not be carrying it.
+	if env := servingEnvironment(t); strings.Contains(env, "present") || !strings.Contains(env, "absent") {
+		t.Errorf("the MCP server process was serving with the API key in its environment:\n%s", env)
 	}
 	wantIn(t, rec.Responses["initialize"], `"protocolVersion":"2025-11-25"`, `"name":"repochat"`)
 	wantIn(t, rec.Responses["list"], `"name":"search_code"`, `"readOnlyHint":true`)
@@ -973,6 +1016,26 @@ func TestHelperEnvironmentIsAnAllowlist(t *testing.T) {
 	wantIn(t, env, "CONTROL_PLANE_API_KEY=only-this", "HTTPS_PROXY=http://proxy:8080", "PATH=")
 }
 
+// The server's environment is built from a list of what it needs, like git's
+// and tunnel-client's: a list of what to remove would always be one name
+// short (AWS_SECRET_ACCESS_KEY, PGPASSWORD, DATABASE_URL, …).
+func TestServerEnvironmentIsAnAllowlist(t *testing.T) {
+	clean, removed := serverEnvironment([]string{
+		"PATH=/bin", "HOME=/h", "LANG=C.UTF-8", "LC_ALL=C", "TZ=UTC", "TMPDIR=/t", "NO_COLOR=1",
+		"XDG_CONFIG_HOME=/x", "REPOCHAT_STATE_DIR=/s",
+		"XDG_SESSION_TOKEN=x", "REPOCHAT_ANYTHING_ELSE=y", // a prefix is not a boundary
+		"CONTROL_PLANE_API_KEY=k", "github_token=t", "AWS_SECRET_ACCESS_KEY=a", "PGPASSWORD=p", "DATABASE_URL=postgres://u:p@h/d",
+		"GIT_EXTERNAL_DIFF=/evil", "LD_PRELOAD=/evil.so", "EDITOR=vi",
+	})
+	want := "PATH=/bin HOME=/h LANG=C.UTF-8 LC_ALL=C TZ=UTC TMPDIR=/t NO_COLOR=1 XDG_CONFIG_HOME=/x REPOCHAT_STATE_DIR=/s"
+	if !removed || strings.Join(clean, " ") != want {
+		t.Fatalf("removed=%v\n got %v\nwant %v", removed, strings.Join(clean, " "), want)
+	}
+	if again, removed := serverEnvironment(clean); removed || len(again) != len(clean) {
+		t.Fatal("a clean environment must be reported as such (or the server would restart itself for ever)")
+	}
+}
+
 func TestMCPServerScrubsCredentials(t *testing.T) {
 	for k := range map[string]string{"CONTROL_PLANE_API_KEY": "", "OPENAI_API_KEY": "", "CONTROL_PLANE_TUNNEL_ID": "", "GITHUB_TOKEN": "", "MY_SECRET": ""} {
 		t.Setenv(k, "value")
@@ -1074,6 +1137,31 @@ func TestActivityLineIsSafeToPrint(t *testing.T) {
 	wantIn(t, summary, `src/evil\n12:00:00`, "[REDACTED:github-token]", "(continued)", "limit=5")
 	if len(summary) > 150 {
 		t.Errorf("summary too long: %d", len(summary))
+	}
+}
+
+// Argument names come from the caller as freely as argument values do: the
+// server reports the raw arguments of a call even when it rejects them.
+func TestActivityLineEscapesArgumentNames(t *testing.T) {
+	red := repo.NewRedactor(true)
+	summary := summarizeArgs(map[string]any{
+		"\x1b]0;TITLE\x07\x1b[2J\n12:00:00  read_file FORGED": "x",
+		"ghp_0123456789abcdefghijklmnopqrstuvwxyzAB":          "y",
+		strings.Repeat("k", 500):                              "z",
+	}, red)
+	for _, bad := range []string{"\n", "\x1b", "\x07", "ghp_0123456789"} {
+		if strings.Contains(summary, bad) {
+			t.Errorf("activity summary contains %q: %q", bad, summary)
+		}
+	}
+	if len(summary) > 150 {
+		t.Errorf("summary too long: %d", len(summary))
+	}
+
+	// `repochat log` renders recorded arguments without a redactor.
+	logged := summarizeArgs(map[string]any{"\x1b[2J\nFORGED": "x"}, nil)
+	if strings.ContainsAny(logged, "\x1b\n") {
+		t.Errorf("log summary is not safe to print: %q", logged)
 	}
 }
 
