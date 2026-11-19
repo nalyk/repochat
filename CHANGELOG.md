@@ -16,6 +16,23 @@ Inversează, la cererea proprietarului, regula „doar citire pentru totdeauna�
 - `repochat session` (cu `finish` și `abandon`) arată și închide sesiunea din terminal, fără să-i atingă fișierele.
 - Un test de frontieră trece fiecare instrument de scriere prin căi și valori ostile împotriva unor fișiere-martor (în checkout, în `.git`, în afara repository-ului, în fișierele reținute și protejate) și verifică după fiecare apel că nimic din afara spațiului de lucru nu s-a schimbat. A găsit un defect, reparat cu un test care a picat înainte: `finish_session` lăsa fast-forward-ul lui git să suprascrie un fișier ignorat al proprietarului aflat pe o cale pe care sesiunea o crease; acum refuză.
 
+Corecturi după cele două revizii ale întregii ramuri (una internă, una adversarială externă), fiecare reprodusă întâi printr-un test:
+
+- Directoarele proprii ale repochat aflate în checkout sunt reținute și în spațiul de lucru al sesiunii, nu doar în repository-ul proprietarului.
+- `finish_session` refuză, fără să schimbe ceva, cât timp `branch.<nume>.mergeOptions` este setat pentru ramura de pornire: opțiunile acelea puteau lăsa marcaje de conflict și un stash în checkout (`--autostash`), puteau pregăti un squash fără să mute ramura sau puteau rula programul de semnare. Merge-ul primește și `--no-gpg-sign` și `--no-overwrite-ignore`, deci un fișier ignorat apărut după ultima verificare nu mai este înlocuit.
+- Un refuz curat al lui git la merge este raportat ca refuz, nu ca „checkout posibil actualizat parțial”: comenzile de revenire ar fi suprascris tocmai modificarea proprietarului. Mesajul pentru un merge întrerupt spune acum că revenirea suprascrie o modificare făcută în timpul merge-ului, iar revenirea nu mai șterge niciun fișier ignorat.
+- Fiecare linie a unui bloc de cheie privată este blocată, de la BEGIN la END, inclusiv un marcaj de conflict aflat între liniile cheii; nu se mai poate insera nimic acolo unde blocul e deschis, iar o modificare după care o linie mascată ar fi arătată altfel este refuzată. Înainte, o inserare lângă un asemenea marcaj dezvăluia restul cheii.
+- O înlocuire sau o ștergere de trei sau mai multe linii cere `file_tag`-ul actual al fișierului: ancorele verifică doar capetele intervalului, iar o linie schimbată între ele era suprascrisă nevăzută. `apply_changes` dă noul `file_tag` al fiecărui fișier atins.
+- O regulă adăugată în `.repochatignore`-ul proprietarului în timp ce serverul rulează se aplică la următorul apel: fișierul nou reținut iese din spațiul de lucru și nu mai poate fi scris nici în cele trei secunde în care lista de fișiere era ținută în memorie.
+- Fiecare fișier este recitit chiar înainte de a fi scris sau șters; unul schimbat între verificare și scriere nu mai este suprascris.
+- Spațiul de lucru este șters doar dacă drumul înregistrat este chiar worktree-ul sesiunii (niciun symlink pe drum, iar git îl listează exact acolo): un `session.json` modificat, cu un symlink spre alt worktree, nu mai poate șterge acel worktree.
+- `undo_to_checkpoint` funcționează și peste un fișier devenit director sau invers: ștergerile se fac întâi.
+- Mutarea ramurii sesiunii la `apply_changes` și `update_session` nu mai depinde de anularea apelului: rezultatul se decide din locul în care se află ramura. După o actualizare a cărei sincronizare eșuează, spațiul de lucru este închis și readus la următorul apel.
+- O linie `=======` singură (sublinierea unui titlu) nu mai este refuzată ca marcaj de conflict; este refuzată doar împreună cu un `<<<<<<<` sau `>>>>>>>` nou.
+- Planurile păstrate pentru `apply_changes` rețin un SHA-256 al fiecărui fișier, nu conținutul lui.
+- Jurnalul local numește fișierele fiecărei scrieri (cel mult 20, apoi „+N”), nu doar numărul lor; niciodată conținutul.
+- Documentat: reluarea unei sesiuni readuce copia la ultimul checkpoint și pierde modificările făcute acolo de mână; numele care diferă doar prin normalizarea Unicode nu sunt tratate ca același fișier pe macOS; fereastra rămasă la merge, acum că git nu mai înlocuiește fișiere ignorate.
+
 ## 1.0.0
 
 Rescriere completă a MVP-ului 0.1.0 (păstrat în istoricul git, în primul commit).
