@@ -264,7 +264,7 @@ Ce nu garantează:
 - Dimensiunea implicită de 32 KB a unui răspuns este provizorie și nu a fost măsurată în sesiuni reale ChatGPT.
 - `tunnel-client` deschide un port de diagnoză pe `127.0.0.1`. repochat însuși nu ascultă pe nimic.
 
-Jurnalul local (`repochat log`) reține doar metadate. Argumentele se înregistrează doar cu `--audit-args`. În modul de scriere, fiecare set de modificări aplicat, fiecare undo, actualizare și merge se înregistrează cu checkpointul, numărul de linii și numele fișierelor atinse (primele 20, apoi câte mai sunt), niciodată cu conținutul lor. E un istoric pentru tine și poate fi modificat de oricine are contul tău.
+Jurnalul local (`repochat log`) reține doar metadate. Argumentele se înregistrează doar cu `--audit-args`. În modul de scriere, fiecare set de modificări aplicat, fiecare undo, actualizare și merge se înregistrează cu checkpointul, numărul de linii și numele fișierelor atinse (primele 20, apoi câte mai sunt), niciodată cu conținutul lor. Numele acestor fișiere se înregistrează și fără `--audit-args`. E un istoric pentru tine și poate fi modificat de oricine are contul tău.
 
 ## Depanare
 

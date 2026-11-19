@@ -1687,3 +1687,64 @@ func TestUpdateWhoseSyncFailsClosesTheWorkspace(t *testing.T) {
 		t.Errorf("workspace status:\n%s", got)
 	}
 }
+
+// A git that ends by itself is believed to have written nothing only when
+// what it says is one of its own refusals from before the first write. Any
+// other error (here: a write that failed in the middle of the checkout),
+// with a checkout that no longer is what it was, gets the partly-updated
+// report and the way back.
+func TestUnrecognisedGitErrorAfterPartialWritesIsReportedAsPartlyUpdated(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	c.replaceLine(t, "b.txt", 1, "B")
+	info := c.info(t)
+	tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+	// A git whose merge writes one of the two files and then fails.
+	real, _ := exec.LookPath("git")
+	bin := t.TempDir()
+	write(t, bin, "git", "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = merge ]; then printf 'A\\n' > a.txt; echo \"error: unable to write file 'b.txt': No space left on device\" >&2; exit 128; fi; done\nexec "+real+" \"$@\"\n")
+	os.Chmod(filepath.Join(bin, "git"), 0o755)
+	c.s.beforeOwnerMerge = func() { os.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH")) }
+	t.Setenv("PATH", os.Getenv("PATH")) // restored when the test ends
+	_, err := c.s.Finish(bg, false, "")
+	if err == nil {
+		t.Fatal("Finish succeeded")
+	}
+	mustContain(t, err.Error(), "partly updated", tip, "checkout --no-overlay", "git merge --ff-only")
+	mustNotContain(t, err.Error(), "nothing was changed")
+	if now := c.info(t); now.Head != info.Head || !exists(info.Workspace) {
+		t.Errorf("the session was not kept: %+v", now)
+	}
+
+	// The same unrecognised error over a checkout that is as it was: the
+	// plain refusal stands.
+	c2 := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c2.replaceLine(t, "a.txt", 1, "A")
+	write(t, bin, "git", "#!/bin/sh\nfor a in \"$@\"; do if [ \"$a\" = merge ]; then echo 'fatal: something else' >&2; exit 128; fi; done\nexec "+real+" \"$@\"\n")
+	os.Chmod(filepath.Join(bin, "git"), 0o755)
+	_, err = c2.s.Finish(bg, false, "")
+	if err == nil || !strings.Contains(err.Error(), "nothing was changed") || strings.Contains(err.Error(), "partly updated") {
+		t.Errorf("an unrecognised error over an unchanged checkout: %v", err)
+	}
+}
+
+// What git 2.25 and 2.43 print (LC_MESSAGES=C) when they refuse a merge
+// before writing anything, and what they print otherwise.
+func TestPreWriteRefusalTexts(t *testing.T) {
+	for text, want := range map[string]bool{
+		"error: Your local changes to the following files would be overwritten by merge:\n\ta.txt\nPlease commit your changes or stash them before you merge.\nAborting\n": true,
+		"error: The following untracked working tree files would be overwritten by merge:\n\tn.txt\nPlease move or remove them before you merge.\nAborting\n":              true,
+		"fatal: Not possible to fast-forward, aborting.\n": true,
+		"fatal: refusing to merge unrelated histories\n":   true,
+		"fatal: Unable to create '/r/.git/index.lock': File exists.\n\nAnother git process seems to be running in this repository\n": true,
+		"error: unable to write file 'b.txt': No space left on device\n":                                                             false,
+		"error: unable to create file b.txt: Permission denied\n":                                                                    false,
+		"fatal: unable to write new index file\n":                                                                                    false,
+		"fatal: something else\n": false,
+		"":                        false,
+	} {
+		if got := preWriteRefusal([]byte(text)); got != want {
+			t.Errorf("preWriteRefusal(%q) = %v, want %v", text, got, want)
+		}
+	}
+}

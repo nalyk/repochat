@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"slices"
 	"sort"
 	"strconv"
@@ -759,7 +760,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 			if err == nil {
 				refusal = s.mergeRefusal(wctx, rec, out)
 			}
-			return nil, s.failedMerge(wctx, rec, tip, land, before, refusal)
+			return nil, s.failedMerge(wctx, rec, tip, land, before, refusal, err == nil && preWriteRefusal(out))
 		}
 		notes = append(notes, "git reported an error at the end of the merge, but the branch is at the merged commit; check the checkout with git status.")
 	}
@@ -858,26 +859,48 @@ func ownerWorktreeState(ctx context.Context, owner *Repo) (string, error) {
 	return string(out), err
 }
 
+// preWriteRefusals are the whole lines git prints (git 2.25 to 2.43, with
+// LC_MESSAGES=C, which the runner sets) when it refuses a merge before it
+// writes anything: uncommitted changes or untracked (or ignored) files in
+// the way, a branch that cannot be fast-forwarded, unrelated histories, and
+// an index lock that exists. The paths git lists follow on lines of their
+// own, behind a tab, so a file's name cannot pass for one of these.
+var preWriteRefusals = regexp.MustCompile(`(?m)^(?:` +
+	`error: Your local changes to the following files would be overwritten by merge:` +
+	`|error: The following untracked working tree files would be overwritten by merge:` +
+	`|fatal: Not possible to fast-forward, aborting\.` +
+	`|fatal: refusing to merge unrelated histories` +
+	`|(?:error|fatal): Unable to create '.*index\.lock': File exists\.` +
+	`)$`)
+
+// preWriteRefusal reports whether git's error output is one of its own
+// refusals from before the first write.
+func preWriteRefusal(stderr []byte) bool { return preWriteRefusals.Match(stderr) }
+
 // failedMerge reports a fast-forward that did not land. refusal is git's
 // refusal as mergeRefusal describes it, nil when git did not run to its own
-// end (killed, timed out).
+// end (killed, timed out); preWrite says that what git printed is one of
+// its refusals from before the first write (see preWriteRefusals).
 //
-// git that ends by itself with a refusal has written nothing: it checks
-// every path before it writes the first. With the branch still at tip and no
-// index lock left, that refusal is the answer, whatever the checkout's status
-// says: the owner may have edited files since it was last read, and the
-// recovery commands would put those very files back. A git that was cut off
-// changed nothing only when the branch, the lock and the status all say so.
-// Everything else is a checkout that may be partly updated, with the owner's
-// way back.
-func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, land, before string, refusal error) error {
+// Such a refusal, with the branch still at tip and no index lock left, is
+// the answer whatever the checkout's status says: git has written nothing,
+// the owner may have edited files since the status was last read, and the
+// recovery commands would put those very files back. For anything else, a
+// git that was cut off or one that ended by itself with another error (a
+// write that failed in the middle of the checkout), nothing was changed
+// only when the branch, the lock and the status all say so. Everything else
+// is a checkout that may be partly updated, with the owner's way back.
+func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, land, before string, refusal error, preWrite bool) error {
 	now, nowErr := s.ownerTip(ctx, rec)
 	atTip := nowErr == nil && now == tip && !ownerIndexLocked(s.owner)
-	if atTip && refusal != nil {
+	if atTip && refusal != nil && preWrite {
 		return refusal
 	}
 	status, statusErr := ownerWorktreeState(ctx, s.owner)
 	if atTip && statusErr == nil && status == before {
+		if refusal != nil {
+			return refusal
+		}
 		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
 	}
 	cmds := recoveryCommands(tip, land)

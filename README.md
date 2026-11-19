@@ -264,7 +264,7 @@ What it does not guarantee:
 - The 32 KB default result size is provisional and has not been measured in real ChatGPT sessions.
 - `tunnel-client` opens a diagnostics port on `127.0.0.1`. repochat itself listens on nothing.
 
-The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. In write mode every applied change set, undo, update and merge is recorded with its checkpoint, its line counts and the names of the files it touched (the first 20, then how many more), never their content. It is a history for you and can be edited by anyone with your account.
+The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. In write mode every applied change set, undo, update and merge is recorded with its checkpoint, its line counts and the names of the files it touched (the first 20, then how many more), never their content. Those file names are recorded without `--audit-args` too. It is a history for you and can be edited by anyone with your account.
 
 ## Troubleshooting
 
