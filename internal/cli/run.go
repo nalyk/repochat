@@ -49,6 +49,7 @@ func cmdRun(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	var o runOptions
 	sessionFlags(fs, &o.session)
+	writeFlags(fs, &o.session, true)
 	fs.StringVar(&o.Profile, "profile", "", "use this saved tunnel `name` (default: the default profile)")
 	fs.BoolVar(&c.yes, "yes", false, "answer yes to confirmations (install the helper, take over a running instance)")
 	fs.BoolVar(&o.Verbose, "verbose", false, "show tunnel-client's own log output")
@@ -63,6 +64,10 @@ func cmdRun(c *console, args []string) int {
 	}
 	if fs.NArg() > 0 {
 		c.fail("unexpected argument %q", fs.Arg(0))
+		return 2
+	}
+	if err := o.checkWrite(); err != nil {
+		c.fail("%v", err)
 		return 2
 	}
 
@@ -129,6 +134,12 @@ type launcher struct {
 	stopReq chan struct{}
 	// displayGone is closed when the terminal output can no longer be written.
 	displayGone <-chan struct{}
+
+	// Write mode: the session as it was when sharing started, its
+	// checkpoints, and the engine's notices about starting or resuming it.
+	sess        *repo.SessionInfo
+	checkpoints int
+	notes       []string
 
 	mu    sync.Mutex
 	state string
@@ -232,6 +243,7 @@ func (l *launcher) run(ctx context.Context) (int, error) {
 
 	if l.o.PrintCommand {
 		sess := l.o.session.freeze(l.cfg, l.r.Root)
+		sess.NewSession = false
 		argv, err := l.helperArgs(sess, "<health-url-file>")
 		if err != nil {
 			return 1, err
@@ -554,8 +566,15 @@ func controlPlaneOverride() ([]string, error) {
 
 func (l *launcher) serve(ctx context.Context) (int, error) {
 	c := l.c
+	if l.o.Write {
+		if err := l.openSession(ctx); err != nil {
+			return 1, err
+		}
+	}
 	sess := l.o.session.freeze(l.cfg, l.r.Root)
 	sess.Events = l.sockPath
+	// --new-session has been acted on here; the server resumes that session.
+	sess.NewSession = false
 	healthFile := filepath.Join(l.dir, "health.url")
 	_ = os.Remove(healthFile)
 	argv, err := l.helperArgs(sess, healthFile)
@@ -704,7 +723,7 @@ func (l *launcher) serve(ctx context.Context) (int, error) {
 				l.setState("remote activity")
 				c.ok("remote MCP activity detected — %s is discovering the tools", clientLabel(a.Client))
 			}
-			if !l.o.Quiet {
+			if !l.o.Quiet || a.Kind == "session" {
 				c.say("%s", formatActivity(c, a))
 			}
 			if a.Kind == "call" && a.OK && !served {
@@ -781,10 +800,33 @@ func (p prefixWriter) Write(b []byte) (int, error) {
 	return len(b), nil
 }
 
+// openSession starts or resumes the write-mode session, so that the banner
+// can name it. The serving process opens the same session on its own.
+func (l *launcher) openSession(ctx context.Context) error {
+	ss, err := openSessions(l.r, l.o.repoOptions(l.cfg), func(msg string) { l.notes = append(l.notes, msg) })
+	if err != nil {
+		return err
+	}
+	defer ss.Close()
+	if l.sess, err = ss.Start(ctx, l.o.NewSession); err != nil {
+		return err
+	}
+	st, err := ss.Status(ctx)
+	if err != nil {
+		return err
+	}
+	l.checkpoints = st.Ahead
+	return nil
+}
+
 func (l *launcher) banner() {
 	c := l.c
 	c.say("")
-	c.say("%s %s · read-only", c.bold("RepoChat"), versionString())
+	mode := "read-only"
+	if l.sess != nil {
+		mode = "WRITE MODE (experimental)"
+	}
+	c.say("%s %s · %s", c.bold("RepoChat"), versionString(), mode)
 	c.say("  repository  %s  %s", c.bold(l.r.Name), c.dim(repo.SanitizeLine(l.r.Root)))
 	serving := fmt.Sprintf("%d files", l.snap.Visible)
 	if n := l.snap.WithheldTotal(); n > 0 {
@@ -800,6 +842,10 @@ func (l *launcher) banner() {
 		serving += " · secret masking OFF"
 	}
 	c.say("  serving     %s", serving)
+	if l.sess != nil {
+		c.say("  session     %s · from %s @ %s · %d checkpoint(s)", repo.SanitizeLine(l.sess.Branch),
+			repo.SanitizeLine(l.sess.StartBranch), shortID(l.sess.Base), l.checkpoints)
+	}
 	tunnel := maskID(l.creds.TunnelID)
 	if l.prof != nil && l.prof.TunnelName != "" && !l.creds.FromEnv {
 		tunnel = l.prof.TunnelName + " (" + tunnel + ")"
@@ -809,8 +855,17 @@ func (l *launcher) banner() {
 		source = "from environment"
 	}
 	c.say("  tunnel      %s · %s", tunnel, source)
-	c.say("  audience    whoever can use this plugin in ChatGPT can read these files while repochat runs")
-	for _, w := range append(append([]string{}, l.r.Warnings...), l.snap.Warnings...) {
+	if l.sess == nil {
+		c.say("  audience    whoever can use this plugin in ChatGPT can read these files while repochat runs")
+	} else {
+		c.say("  audience    whoever can use this plugin in ChatGPT can read these files and change them in the session workspace while repochat runs")
+		if l.o.ConfirmMerge {
+			c.say("  merging     nothing reaches %s until you run: repochat session finish", repo.SanitizeLine(l.sess.StartBranch))
+		} else {
+			c.say("  merging     nothing reaches %s until finish_session is called", repo.SanitizeLine(l.sess.StartBranch))
+		}
+	}
+	for _, w := range append(append(append([]string{}, l.r.Warnings...), l.snap.Warnings...), l.notes...) {
 		c.warn("%s", w)
 	}
 	if l.prof != nil && !l.creds.FromEnv {

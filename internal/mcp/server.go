@@ -80,7 +80,7 @@ type Tool struct {
 // Event is reported to Server.OnEvent for the activity log.
 type Event struct {
 	Time       time.Time
-	Kind       string // "hello" (handshake/discovery), "list", "call"
+	Kind       string // "hello" (handshake/discovery), "list", "call"; "session" comes from the program, never the server
 	Client     string
 	Protocol   string
 	Tool       string
@@ -90,6 +90,9 @@ type Event struct {
 	Err        string
 	Redactions int
 	Cancelled  bool
+	// Note is a one-line statement for the owner (Kind "session"): what a
+	// write did, never what it wrote.
+	Note string
 }
 
 // Server is an MCP server. Configure the exported fields, then call Serve once.

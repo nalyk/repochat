@@ -30,9 +30,14 @@ func cmdTools(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	var s session
 	sessionFlags(fs, &s)
+	writeFlags(fs, &s, false)
 	asJSON := fs.Bool("json", false, "print the exact tools/list payload")
 	if code, ok := parseOptions(c, fs, args); !ok {
 		return code
+	}
+	if err := s.checkWrite(); err != nil {
+		c.fail("%v", err)
+		return 2
 	}
 	ctx, stop := signalContext()
 	defer stop()
@@ -48,6 +53,15 @@ func cmdTools(c *console, args []string) int {
 	}
 	defer r.Close()
 	list := tools.New(r)
+	if s.Write {
+		ss, err := openSessions(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
+		if err != nil {
+			c.fail("%v", err)
+			return 1
+		}
+		defer ss.Close()
+		list = writeTools(r, ss, false, nil)
+	}
 	if *asJSON {
 		var payload []any
 		for _, t := range list {
@@ -97,6 +111,7 @@ func cmdCall(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	var s session
 	sessionFlags(fs, &s)
+	writeFlags(fs, &s, false)
 	era := fs.String("protocol", "legacy", "protocol era to use: legacy or modern (2026-07-28)")
 	raw := fs.Bool("raw", false, "print the raw JSON-RPC response instead of the text")
 	fs.Usage = func() {
@@ -109,6 +124,10 @@ func cmdCall(c *console, args []string) int {
 	}
 	if fs.NArg() < 1 || fs.NArg() > 2 {
 		fs.Usage()
+		return 2
+	}
+	if err := s.checkWrite(); err != nil {
+		c.fail("%v", err)
 		return 2
 	}
 	tool := fs.Arg(0)
@@ -148,7 +167,21 @@ func cmdCall(c *console, args []string) int {
 		c.fail("--protocol must be legacy or modern")
 		return 2
 	}
-	out, err := serveScript(ctx, newServer(r), script)
+	srv := newServer(r)
+	if s.Write {
+		ss, err := openSessions(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
+		if err != nil {
+			c.fail("%v", err)
+			return 1
+		}
+		defer ss.Close()
+		record := terminalRecorder(c, &s, r, "")
+		srv = newWriteServer(r, ss, false, func(n sessionNote) {
+			c.say("%s %s", c.amber("session"), repo.SanitizeLine(n.Note))
+			record(n)
+		})
+	}
+	out, err := serveScript(ctx, srv, script)
 	if err != nil {
 		c.fail("%v", err)
 		return 1

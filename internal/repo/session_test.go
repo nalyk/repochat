@@ -456,6 +456,35 @@ func TestResumeWithMissingWorkspaceOrBranchSaysSo(t *testing.T) {
 	})
 }
 
+// A workspace deleted while this process has the session open is noticed on
+// the next call, with the same advice as after a restart, instead of being
+// served or written through the handle that is still open.
+func TestWorkspaceRemovedWhileOpenSaysSo(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, info := f.start(t, Options{})
+	if _, err := s.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(info.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	for name, call := range map[string]func() error{
+		"Serve":  func() error { _, err := s.Serve(bg); return err },
+		"Status": func() error { _, err := s.Status(bg); return err },
+		"Apply": func() error {
+			_, err := s.Apply(bg, "", []Change{{Op: "create", Path: "new.txt", Text: "x"}}, "add")
+			return err
+		},
+	} {
+		if err := call(); err == nil || !strings.Contains(err.Error(), "workspace is missing") || !strings.Contains(err.Error(), "--new-session") {
+			t.Errorf("%s: error %v does not say the workspace is missing and name --new-session", name, err)
+		}
+	}
+	if exists(info.Workspace) {
+		t.Error("the workspace was recreated")
+	}
+}
+
 func TestFreshStartLeavesTheOldBranch(t *testing.T) {
 	f := newSessionFixture(t, nil)
 	s, old := f.start(t, Options{})

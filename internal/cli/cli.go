@@ -44,6 +44,8 @@ func Main(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return cmdTools(c, rest)
 	case "call":
 		return cmdCall(c, rest)
+	case "session":
+		return cmdSession(c, rest)
 	case "files":
 		return cmdFiles(c, rest)
 	case "log":
@@ -71,7 +73,8 @@ func Main(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 }
 
 func printHelp(c *console) {
-	fmt.Fprintf(c.out, `%s — ask ChatGPT about the Git repository on your computer. Read-only.
+	fmt.Fprintf(c.out, `%s — ask ChatGPT about the Git repository on your computer. Read-only
+unless you start it with --write.
 
 %s
   cd ~/projects/my-project
@@ -107,6 +110,18 @@ func printHelp(c *console) {
   A .repochatignore file in the repository (same syntax as .gitignore) holds files back for everyone.
 
 %s
+  --write                  ChatGPT can also change files: in a session workspace on a side branch
+                           (repochat/<date>-<id>), never in your checkout. Nothing reaches your
+                           branch until finish_session (or you) merge it. Not with --no-history.
+  --new-session            with --write: start a new session instead of resuming the open one;
+                           the old session's branch is kept
+  --confirm-merge          with --write: finish_session does not merge; you merge in the terminal
+  repochat session                 the open session: branch, checkpoints, changed files
+  repochat session finish          merge it into your branch, after asking [--squash] [--message TEXT] [--yes]
+  repochat session abandon         remove its workspace; the branch is kept [--delete-branch]
+  repochat tools --write / call --write   the write-mode tools, from the terminal
+
+%s
   repochat mcp             the MCP server itself (stdio); what tunnel-client starts
   repochat mcp-config      configuration snippet for other MCP clients (Claude, Cursor, …)
   repochat install         copy this binary to ~/.local/bin
@@ -115,11 +130,13 @@ func printHelp(c *console) {
 
 What ChatGPT can see: the files git knows about in this repository (not the ones
 ignored by .gitignore), minus files that look like secrets, plus the commit history.
-Whatever it reads is sent to OpenAI. Nothing can be changed through repochat.
+Whatever it reads is sent to OpenAI. Nothing can be changed through repochat
+unless you start it with --write.
 
 Project: https://github.com/nalyk/repochat
 `, c.bold("RepoChat "+versionString()), c.bold("Everyday use"), c.bold("Commands"), c.bold("See what is exposed"),
-		c.bold("Control what is exposed (options for repochat, mcp, files, call)"), c.bold("Plumbing"))
+		c.bold("Control what is exposed (options for repochat, mcp, files, call, session)"),
+		c.bold("Write mode (experimental; options for repochat and mcp)"), c.bold("Plumbing"))
 }
 
 func printChatGPTHelp(c *console) {

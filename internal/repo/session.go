@@ -382,7 +382,12 @@ func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 		return nil, err
 	}
 	if s.ws != nil && s.rec != nil && *s.rec == *rec {
-		return rec, nil
+		// The open handle outlives its directory. A workspace removed
+		// behind this process's back goes through resume like after a
+		// restart, which reports it missing.
+		if fi, err := os.Lstat(rec.Workspace); err == nil && fi.IsDir() {
+			return rec, nil
+		}
 	}
 	s.closeWorkspace()
 	if err := s.resume(ctx, rec); err != nil {
