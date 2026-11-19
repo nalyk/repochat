@@ -151,6 +151,10 @@ func TestApplyWritesCommitsAndReturnsFreshAnchors(t *testing.T) {
 	})
 	f := c.f
 	ownerHead := gitCmd(t, f.dir, "rev-parse", "HEAD")
+	runMode, err := os.Stat(filepath.Join(c.ws.Root, "run.sh"))
+	if err != nil {
+		t.Fatal(err)
+	}
 	ownerStatus := gitCmd(t, f.dir, "status", "--porcelain")
 	base := c.head(t)
 
@@ -196,7 +200,7 @@ func TestApplyWritesCommitsAndReturnsFreshAnchors(t *testing.T) {
 	if got := gitCmd(t, c.ws.Root, "ls-tree", head, "run.sh", "dir/new.txt"); !strings.Contains(got, "100755 blob") || !strings.Contains(got, "100644 blob") {
 		t.Errorf("modes in the commit:\n%s", got)
 	}
-	if fi, err := os.Stat(filepath.Join(c.ws.Root, "run.sh")); err != nil || fi.Mode().Perm() != 0o755 {
+	if fi, err := os.Stat(filepath.Join(c.ws.Root, "run.sh")); err != nil || fi.Mode().Perm() != runMode.Mode().Perm() || fi.Mode()&0o111 == 0 {
 		t.Errorf("run.sh mode on disk: %v %v", fi.Mode(), err)
 	}
 	if fi, err := os.Stat(filepath.Join(c.ws.Root, "dir", "new.txt")); err != nil || fi.Mode().Perm() != 0o644 {
@@ -321,7 +325,12 @@ func TestFailedRollbackIsRestoredOnTheNextCall(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"d/a.txt": "a\n", "e.txt": "e\n"}, nil)
 	before := wsState(t, c.ws.Root)
 	dir := filepath.Join(c.ws.Root, "d")
-	t.Cleanup(func() { os.Chmod(dir, 0o755) })
+	fi, err := os.Stat(dir)
+	if err != nil {
+		t.Fatal(err)
+	}
+	dirMode := fi.Mode().Perm()
+	t.Cleanup(func() { os.Chmod(dir, dirMode) })
 	c.s.applyFault = func(i int) error {
 		if i == 1 {
 			if err := os.Chmod(dir, 0o555); err != nil {
@@ -331,7 +340,7 @@ func TestFailedRollbackIsRestoredOnTheNextCall(t *testing.T) {
 		}
 		return nil
 	}
-	_, err := c.s.Apply(bg, "", []Change{
+	_, err = c.s.Apply(bg, "", []Change{
 		{Op: "replace", Path: "d/a.txt", From: c.anchor(t, "d/a.txt", 1), Text: "A"},
 		{Op: "replace", Path: "e.txt", From: c.anchor(t, "e.txt", 1), Text: "E"},
 	}, "x")
@@ -340,7 +349,7 @@ func TestFailedRollbackIsRestoredOnTheNextCall(t *testing.T) {
 	}
 	t.Logf("refused: %v", err)
 	c.s.applyFault = nil
-	if err := os.Chmod(dir, 0o755); err != nil {
+	if err := os.Chmod(dir, dirMode); err != nil {
 		t.Fatal(err)
 	}
 	if _, err := c.s.Serve(bg); err != nil {
@@ -646,5 +655,222 @@ func TestSymlinkSwappedInDuringApplyIsNotFollowed(t *testing.T) {
 	}
 	if c.head(t) != head {
 		t.Error("the branch moved")
+	}
+}
+
+// An index that does not hold the branch's tree (moved behind the session's
+// back) is refused rather than committed, and the next call restores it.
+func TestIndexOutOfStepWithTheBranchIsRefused(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "other.txt": "other\n"}, nil)
+	head := c.head(t)
+	tampered := hashObject(t, c.ws.Root, "tampered\n")
+	gitCmd(t, c.ws.Root, "update-index", "--cacheinfo", "100644,"+tampered+",other.txt")
+	_, err := c.s.Apply(bg, "", []Change{{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"}}, "x")
+	if err == nil || !strings.Contains(err.Error(), "out of step") {
+		t.Fatalf("Apply: %v", err)
+	}
+	if c.head(t) != head {
+		t.Fatal("a commit was made from an index out of step")
+	}
+	if got := mustRead(t, filepath.Join(c.ws.Root, "a.txt")); got != "a\n" {
+		t.Errorf("a.txt was not rolled back: %q", got)
+	}
+	if _, err := c.s.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, c.ws.Root, "diff", "--cached", "--name-only"); got != "" {
+		t.Errorf("the index was not restored: %s", got)
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status:\n%s", got)
+	}
+}
+
+func hashObject(t *testing.T, dir, content string) string {
+	t.Helper()
+	p := filepath.Join(t.TempDir(), "blob")
+	if err := os.WriteFile(p, []byte(content), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	return gitCmd(t, dir, "hash-object", "-w", p)
+}
+
+// The commit holds the validated bytes, not what is on disk when it is made.
+func TestCommitHoldsTheValidatedContent(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	tampered := false
+	c.s.applyFault = func(i int) error {
+		if i == 2 { // both files written, the commit is next
+			write(t, c.ws.Root, "b.txt", "tampered\n")
+			tampered = true
+		}
+		return nil
+	}
+	c.apply(t, "x",
+		Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+		Change{Op: "replace", Path: "b.txt", From: c.anchor(t, "b.txt", 1), Text: "B"})
+	if !tampered {
+		t.Fatal("the fault hook was not called before the commit")
+	}
+	if got := gitCmd(t, c.ws.Root, "show", "HEAD:b.txt"); got != "B" {
+		t.Errorf("committed b.txt = %q", got)
+	}
+	// The tampered file belongs to no checkpoint: a resume undoes it.
+	c.s.Close()
+	s2 := c.f.sessions(t, Options{})
+	if _, err := s2.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, filepath.Join(c.ws.Root, "b.txt")); got != "B\n" {
+		t.Errorf("b.txt after resume = %q", got)
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status:\n%s", got)
+	}
+}
+
+func TestCommittedModeIsTheWrittenOne(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"run.sh": "#!/bin/sh\necho hi\n", "tool.sh": "#!/bin/sh\n"}, func(dir string) {
+		for _, p := range []string{"run.sh", "tool.sh"} {
+			if err := os.Chmod(filepath.Join(dir, p), 0o755); err != nil {
+				t.Fatal(err)
+			}
+		}
+	})
+	gitCmd(t, c.f.dir, "config", "core.fileMode", "false")
+	c.apply(t, "x",
+		Change{Op: "replace", Path: "run.sh", From: c.anchor(t, "run.sh", 2), Text: "echo bye"},
+		Change{Op: "move", Path: "tool.sh", ToPath: "bin/tool.sh"})
+	got := gitCmd(t, c.ws.Root, "ls-tree", "HEAD", "run.sh", "bin/tool.sh")
+	if strings.Count(got, "100755 blob") != 2 {
+		t.Errorf("modes:\n%s", got)
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status:\n%s", got)
+	}
+}
+
+func TestCheckinConversionApplies(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{
+		".gitattributes": "* text eol=crlf\n",
+		"a.txt":          "one\ntwo\n",
+	}, nil)
+	if got := mustRead(t, filepath.Join(c.ws.Root, "a.txt")); got != "one\r\ntwo\r\n" {
+		t.Fatalf("the workspace a.txt = %q", got)
+	}
+	c.apply(t, "x", Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 2), Text: "TWO"})
+	if got := mustRead(t, filepath.Join(c.ws.Root, "a.txt")); got != "one\r\nTWO\r\n" {
+		t.Errorf("a.txt on disk = %q", got)
+	}
+	blob := gitCmd(t, c.ws.Root, "rev-parse", "HEAD:a.txt")
+	if got := gitCmd(t, c.ws.Root, "cat-file", "blob", blob); got != "one\nTWO" {
+		t.Errorf("committed blob %q", got)
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status:\n%s", got)
+	}
+}
+
+func TestIdentityFallsBackAsAPair(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	gitCmd(t, c.f.dir, "config", "--unset", "user.email")
+	c.apply(t, "", Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"})
+	if got := gitCmd(t, c.ws.Root, "log", "-1", "--format=%an <%ae>"); got != "repochat <repochat@localhost>" {
+		t.Errorf("identity %q", got)
+	}
+}
+
+func indexLock(c *changeFixture, t *testing.T) string {
+	t.Helper()
+	return filepath.Join(gitCmd(t, c.ws.Root, "rev-parse", "--absolute-git-dir"), "index.lock")
+}
+
+func TestStaleIndexLockIsRemoved(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	lock := indexLock(c, t)
+	if err := os.WriteFile(lock, []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	// A fresh lock: another git command is working there.
+	head := c.head(t)
+	_, err := c.s.Apply(bg, "", []Change{{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"}}, "x")
+	if err == nil || !strings.Contains(err.Error(), "another git command is running") {
+		t.Fatalf("Apply with a fresh lock: %v", err)
+	}
+	if c.head(t) != head || mustRead(t, filepath.Join(c.ws.Root, "a.txt")) != "a\n" {
+		t.Error("the refused apply changed something")
+	}
+	// An old one is left by a crash: removed, with a notice.
+	old := time.Now().Add(-2 * time.Minute)
+	os.Chtimes(lock, old, old)
+	c.f.notes = nil
+	c.apply(t, "x", Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"})
+	if exists(lock) {
+		t.Error("the lock is still there")
+	}
+	if !strings.Contains(strings.Join(c.f.notes, "\n"), "index.lock") {
+		t.Errorf("no notice: %q", c.f.notes)
+	}
+
+	// The restore on resume does the same.
+	write(t, c.ws.Root, "b.txt", "dirty\n")
+	if err := os.WriteFile(lock, []byte("junk"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	c.s.Close()
+	s2 := c.f.sessions(t, Options{})
+	if _, err := s2.Serve(bg); err == nil || !strings.Contains(err.Error(), "another git command is running") {
+		t.Fatalf("resume with a fresh lock: %v", err)
+	}
+	os.Chtimes(lock, old, old)
+	if _, err := s2.Serve(bg); err != nil {
+		t.Fatalf("resume with a stale lock: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(c.ws.Root, "b.txt")); got != "b\n" {
+		t.Errorf("b.txt = %q", got)
+	}
+	if exists(lock) {
+		t.Error("the lock is still there after the resume")
+	}
+}
+
+func TestRollbackRemovesANewDirectory(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"z.txt": "z\n"}, nil)
+	before := wsState(t, c.ws.Root)
+	c.s.applyFault = func(i int) error {
+		if i == 1 {
+			if !exists(filepath.Join(c.ws.Root, "new", "deep", "d.txt")) {
+				t.Error("new/deep/d.txt was not written first")
+			}
+			return errors.New("injected failure")
+		}
+		return nil
+	}
+	if _, err := c.s.Apply(bg, "", []Change{
+		{Op: "create", Path: "new/deep/d.txt", Text: "d"},
+		{Op: "replace", Path: "z.txt", From: c.anchor(t, "z.txt", 1), Text: "Z"},
+	}, "x"); err == nil {
+		t.Fatal("Apply succeeded")
+	}
+	if exists(filepath.Join(c.ws.Root, "new")) {
+		t.Error("the new directory is still there")
+	}
+	if after := wsState(t, c.ws.Root); after != before {
+		t.Errorf("the workspace changed:\n%s\nwas:\n%s", after, before)
+	}
+}
+
+func TestNewFileUnderASymlinkSaysSo(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	outside := t.TempDir()
+	if err := os.Symlink(outside, filepath.Join(c.ws.Root, "sub")); err != nil {
+		t.Fatal(err)
+	}
+	_, err := c.s.writeFiles(c.ws, []fileWrite{{Path: "sub/new.txt", After: []byte("x\n")}})
+	if err == nil || !strings.Contains(err.Error(), "passes through a symbolic link") {
+		t.Fatalf("writeFiles: %v", err)
+	}
+	if got := names(t, outside); len(got) != 0 {
+		t.Errorf("outside holds %v", got)
 	}
 }

@@ -686,7 +686,7 @@ func (r *Repo) gitInput(ctx context.Context, input []byte, limit int, args ...st
 		return nil, r.gitFailure(subcommand(args), out)
 	}
 	if truncated {
-		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", args[0], limit)
+		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", subcommand(args), limit)
 	}
 	return out, nil
 }

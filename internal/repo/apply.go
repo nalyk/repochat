@@ -24,9 +24,10 @@ import (
 // failure on the way puts every written file back, and the branch moves
 // only through `update-ref` with its old value, as the very last step.
 //
-// The commit is built with plumbing (update-index, write-tree, commit-tree,
-// update-ref), which runs no hook, and never signs. Only the touched paths
-// are staged, so the tracked files the policy withholds, which are absent
+// The commit is built with plumbing (hash-object, update-index --index-info,
+// write-tree, commit-tree, update-ref), which runs no hook, and never signs.
+// Only the touched paths are staged, from the validated bytes rather than
+// from disk, so the tracked files the policy withholds, which are absent
 // from the workspace and marked skip-worktree in its index, stay in the
 // commit's tree as they were.
 
@@ -279,15 +280,29 @@ func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, mes
 		paths[i] = f.Path
 	}
 
+	if err := s.checkIndexLock(ws); err != nil {
+		return nil, err
+	}
 	undo, err := s.writeFiles(ws, files)
 	if err != nil {
 		return nil, s.rollBack(ctx, err, undo)
 	}
-	id, err := ws.commitPaths(ctx, ident, msg, paths, rec.Branch, old, extraParents, kind)
+	if s.applyFault != nil { // after the last file, before the commit
+		if err := s.applyFault(len(files)); err != nil {
+			return nil, s.rollBack(ctx, err, undo)
+		}
+	}
+	id, err := ws.commitPaths(ctx, ident, msg, files, rec.Branch, old, extraParents, kind)
 	var stale *staleIndexError
 	if errors.As(err, &stale) {
 		// The branch holds the checkpoint and the files match it; only the
 		// index lags behind. Resuming restores it from the branch.
+		s.closeWorkspace()
+		return nil, err
+	}
+	if errors.Is(err, errIndexOutOfStep) {
+		err = s.rollBack(ctx, err, undo)
+		// Resuming restores the index from the branch.
 		s.closeWorkspace()
 		return nil, err
 	}
@@ -333,9 +348,10 @@ func writeErr(p string, err error) error {
 }
 
 // writeFiles writes files in order (sorted by path), each through the no-
-// follow writer, after checking that every one still holds its Before. It
-// returns the function that puts back the files written so far, which is
-// also valid after an error.
+// follow writer, after checking that every one still holds its Before. The
+// mode each file is written with is set in its Mode. It returns the function
+// that puts back the files written so far, which is also valid after an
+// error.
 func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, err error) {
 	op := ws.newOpener()
 	var done []fileWrite
@@ -362,7 +378,14 @@ func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, e
 	// that is also what a rollback writes back.
 	for _, f := range files {
 		if f.Before == nil {
-			if _, err := op.Lstat(f.Path); !errors.Is(err, os.ErrNotExist) {
+			_, err := op.Lstat(f.Path)
+			switch {
+			case errors.Is(err, os.ErrNotExist):
+			case errors.Is(err, errSymlink) || errors.Is(err, syscall.ELOOP):
+				return undo, fmt.Errorf("%s passes through a symbolic link; symbolic links are never followed", SanitizeLine(f.Path))
+			case err != nil:
+				return undo, fmt.Errorf("%s cannot be checked: %v", SanitizeLine(f.Path), pathErrCause(err))
+			default:
 				return undo, fmt.Errorf("%s appeared in the workspace while the change set was being applied", SanitizeLine(f.Path))
 			}
 			continue
@@ -378,7 +401,8 @@ func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, e
 	}
 	op.Close()
 
-	for i, f := range files {
+	for i := range files {
+		f := &files[i]
 		if s.applyFault != nil {
 			if err := s.applyFault(i); err != nil {
 				return undo, writeErr(f.Path, err)
@@ -400,12 +424,13 @@ func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, e
 			if mode == 0 {
 				mode = 0o644
 			}
+			f.Mode = mode
 			err = op.WriteAtomic(f.Path, f.After, mode)
 		}
 		if err != nil {
 			return undo, writeErr(f.Path, err)
 		}
-		done = append(done, f)
+		done = append(done, *f)
 	}
 	return undo, nil
 }
@@ -418,13 +443,20 @@ func (e *staleIndexError) Error() string {
 	return fmt.Sprintf("checkpoint %s was recorded, but the session workspace's git index could not be updated; it is restored from the checkpoint on the next call", e.id[:12])
 }
 
-// commitPaths commits the working-tree content of paths on top of old and
+// errIndexOutOfStep is an index that does not hold the tree of the commit
+// a checkpoint is made on.
+var errIndexOutOfStep = errors.New("the session workspace's git index is out of step with its branch (changed by a git command outside repochat); nothing was committed, and the workspace is restored from the last checkpoint on the next call")
+
+// commitPaths commits files, as written by writeFiles, on top of old and
 // moves branch to the new commit, with git's index lock held throughout.
-// The index is staged in the lock file, a copy of the index, so the index
-// itself changes only once the branch has moved; on any error before that,
-// neither has. cfg are the identity overrides.
-func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, paths []string, branch, old string, extraParents []string, kind string) (string, error) {
-	// update-index reads the files: a clean filter must not run.
+// The index entries are made from the bytes in files, never read back from
+// disk: each blob goes through git's own checkin conversion for its path
+// (hash-object --path), and its mode is the one the file was written with.
+// They are staged in the lock file, a copy of the index that must hold
+// old's tree, so the index itself changes only once the branch has moved;
+// on any error before that, neither has. cfg are the identity overrides.
+func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, files []fileWrite, branch, old string, extraParents []string, kind string) (string, error) {
+	// hash-object --path converts as a checkin would: no clean filter may run.
 	if err := r.refreshFilterArgs(ctx); err != nil {
 		return "", err
 	}
@@ -440,28 +472,66 @@ func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, paths 
 		}
 	}()
 	ictx := context.WithValue(ctx, gitIndexKey{}, lock)
-	var in bytes.Buffer
-	for _, p := range paths {
-		in.WriteString(p)
-		in.WriteByte(0)
+	treeOf := func(c context.Context) (string, error) {
+		out, err := r.git(c, 4096, "write-tree")
+		if err != nil {
+			return "", err
+		}
+		tree := strings.TrimSpace(string(out))
+		if !objectIDRe.MatchString(tree) {
+			return "", errors.New("git write-tree gave no tree id")
+		}
+		return tree, nil
 	}
-	if _, err := r.gitInput(ictx, in.Bytes(), 1<<20, "update-index", "--add", "--remove", "-z", "--stdin"); err != nil {
-		return "", err
-	}
-	out, err := r.git(ictx, 4096, "write-tree")
+
+	// Whatever the index holds besides the touched paths goes into the
+	// commit: it must be exactly old's tree.
+	base, err := treeOf(ictx)
 	if err != nil {
 		return "", err
 	}
-	tree := strings.TrimSpace(string(out))
-	if !objectIDRe.MatchString(tree) {
-		return "", errors.New("git write-tree gave no tree id")
+	if want, code, err := r.gitText(ctx, "rev-parse", "--verify", "-q", old+"^{tree}"); err != nil || code != 0 || want != base {
+		if err != nil {
+			return "", err
+		}
+		return "", errIndexOutOfStep
+	}
+
+	// Removals first, so that a path never meets a directory of its name.
+	var adds, removes bytes.Buffer
+	zero := strings.Repeat("0", len(old))
+	for _, f := range files {
+		if f.After == nil {
+			fmt.Fprintf(&removes, "0 %s\t%s\x00", zero, f.Path)
+			continue
+		}
+		out, err := r.gitInput(ctx, f.After, 4096, "hash-object", "-w", "--stdin", "--path="+f.Path)
+		if err != nil {
+			return "", err
+		}
+		blob := strings.TrimSpace(string(out))
+		if !objectIDRe.MatchString(blob) || len(blob) != len(old) {
+			return "", errors.New("git hash-object gave no blob id")
+		}
+		mode := "100644"
+		if f.Mode&0o111 != 0 {
+			mode = "100755"
+		}
+		fmt.Fprintf(&adds, "%s %s\t%s\x00", mode, blob, f.Path)
+	}
+	if _, err := r.gitInput(ictx, append(removes.Bytes(), adds.Bytes()...), 1<<20, "update-index", "-z", "--index-info"); err != nil {
+		return "", err
+	}
+	tree, err := treeOf(ictx)
+	if err != nil {
+		return "", err
 	}
 	args := append(slices.Clone(cfg), "commit-tree", "-p", old)
 	for _, p := range extraParents {
 		args = append(args, "-p", p)
 	}
 	args = append(args, "--no-gpg-sign", "-F", "-", tree)
-	out, err = r.gitInput(ctx, msg, 4096, args...)
+	out, err := r.gitInput(ctx, msg, 4096, args...)
 	if err != nil {
 		return "", err
 	}
@@ -489,13 +559,42 @@ func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, paths 
 	return id, nil
 }
 
+// errIndexBusy is an index.lock that another git command may still hold.
+var errIndexBusy = errors.New("another git command is running in the session workspace (its git index is locked); retry in a moment")
+
+// staleLockAge is how old an index.lock must be to count as left behind by
+// a git command that crashed. Under the session lock no repochat process can
+// hold it; a git command the owner runs there holds it for far less.
+const staleLockAge = 60 * time.Second
+
+// checkIndexLock removes the workspace's index.lock when it is older than
+// staleLockAge, with a notice for the owner, and refuses when it is
+// fresher. The caller holds the session lock.
+func (s *Sessions) checkIndexLock(ws *Repo) error {
+	lock := filepath.Join(ws.GitDir, "index.lock")
+	fi, err := os.Lstat(lock)
+	switch {
+	case errors.Is(err, os.ErrNotExist):
+		return nil
+	case err != nil:
+		return fmt.Errorf("cannot check the session workspace's git index lock: %v", pathErrCause(err))
+	case time.Since(fi.ModTime()) < staleLockAge:
+		return errIndexBusy
+	}
+	if err := os.Remove(lock); err != nil && !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("cannot remove a stale index.lock from the session workspace: %v", pathErrCause(err))
+	}
+	s.notify("A stale index.lock (older than a minute, left by an interrupted git command) was removed from the session workspace.")
+	return nil
+}
+
 // lockIndex takes git's lock on index by creating index.lock, exclusively,
 // as a copy of index with its modification time, and returns its path.
 func lockIndex(index string) (string, error) {
 	lock := index + ".lock"
 	dst, err := os.OpenFile(lock, os.O_WRONLY|os.O_CREATE|os.O_EXCL|syscall.O_NOFOLLOW, 0o644)
 	if errors.Is(err, os.ErrExist) {
-		return "", errors.New("the session workspace's git index is locked (index.lock exists): another git command is working there, or one was interrupted; try again, or remove the lock if no git command is running")
+		return "", errIndexBusy
 	}
 	if err != nil {
 		return "", fmt.Errorf("cannot lock the session workspace's git index: %v", pathErrCause(err))
@@ -566,8 +665,11 @@ func (s *Sessions) identity(ctx context.Context) []string {
 		}
 		return out
 	}
-	name := cleanIdentity(get("user.name"), fallbackName)
-	email := cleanIdentity(get("user.email"), fallbackEmail)
+	// Either both are the owner's or both are repochat's.
+	name, email := cleanIdentity(get("user.name"), ""), cleanIdentity(get("user.email"), "")
+	if name == "" || email == "" {
+		name, email = fallbackName, fallbackEmail
+	}
 	return []string{
 		"-c", "user.name=" + name, "-c", "user.email=" + email,
 		"-c", "author.name=" + name, "-c", "author.email=" + email,

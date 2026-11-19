@@ -448,6 +448,9 @@ func (s *Sessions) restore(ctx context.Context) error {
 	if err != nil || !d {
 		return err
 	}
+	if err := s.checkIndexLock(ws); err != nil {
+		return err
+	}
 	if _, err := ws.git(ctx, 1<<20, "read-tree", "--reset", "-u", "HEAD"); err != nil {
 		return err
 	}
