@@ -6,6 +6,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"path"
 	"regexp"
 	"strings"
@@ -229,17 +230,22 @@ type ignoreRule struct {
 //
 // Precedence (first match wins):
 //  1. unsupported name            → withheld
-//  2. .repochatignore             → withheld (the repository can only tighten)
+//  2. .repochatignore             → withheld (the repository can only tighten);
+//     so is a path the second rules source withholds (see AddIgnore)
 //  3. --deny                      → withheld
 //  4. --allow                     → served (overrides rule 5 only)
 //  5. built-in secret-file rules  → withheld
 type Policy struct {
 	ignore []ignoreRule
 	oracle *ignoreOracle // git's reading of the same rules; nil when there are none
-	deny   []*Glob
-	allow  []*Glob
-	hash   string
-	own    []string // see Options.Own
+	// A second source of ignore rules (see AddIgnore), judged on its own.
+	extraIgnore []ignoreRule
+	extraOracle *ignoreOracle
+	hasExtra    bool
+	deny        []*Glob
+	allow       []*Glob
+	hash        string
+	own         []string // see Options.Own
 }
 
 // NewPolicy builds a policy. ignoreFile is the content of .repochatignore
@@ -248,15 +254,35 @@ type Policy struct {
 func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, error) {
 	p := &Policy{deny: deny, allow: allow}
 	h := sha256.New()
+	var err error
+	if p.ignore, p.oracle, err = parseIgnore(".repochatignore", ignoreFile, h, "i"); err != nil {
+		return nil, err
+	}
+	for _, g := range deny {
+		fmt.Fprintf(h, "d:%s\n", g.src)
+	}
+	for _, g := range allow {
+		fmt.Fprintf(h, "a:%s\n", g.src)
+	}
+	p.hash = hex.EncodeToString(h.Sum(nil))[:16]
+	return p, nil
+}
+
+// parseIgnore reads the text of an ignore file, named name in errors, into
+// rules and the oracle that asks git about them (nil when there are none).
+// Every rule, and the git that will judge it, is written to h with the given
+// tag, so that the policy's hash changes with them.
+func parseIgnore(name, text string, h io.Writer, tag string) ([]ignoreRule, *ignoreOracle, error) {
 	// git skips a UTF-8 byte order mark at the start of an ignore file; kept,
 	// it would become part of the first pattern, which then matches nothing.
-	ignoreFile = strings.TrimPrefix(ignoreFile, "\xef\xbb\xbf")
+	text = strings.TrimPrefix(text, "\xef\xbb\xbf")
 	// Anything that is not UTF-8 text (UTF-16, binary data) would parse as
 	// patterns that match nothing, i.e. as no rules at all.
-	if strings.IndexByte(ignoreFile, 0) >= 0 || !utf8.ValidString(ignoreFile) {
-		return nil, errors.New(".repochatignore is not UTF-8 text (it contains NUL bytes or invalid UTF-8; is it saved as UTF-16?). Save it as UTF-8; repochat will not guess what it should withhold")
+	if strings.IndexByte(text, 0) >= 0 || !utf8.ValidString(text) {
+		return nil, nil, fmt.Errorf("%s is not UTF-8 text (it contains NUL bytes or invalid UTF-8; is it saved as UTF-16?). Save it as UTF-8; repochat will not guess what it should withhold", name)
 	}
-	for n, raw := range strings.Split(ignoreFile, "\n") {
+	var rules []ignoreRule
+	for n, raw := range strings.Split(text, "\n") {
 		raw = strings.TrimSuffix(raw, "\r")
 		line := strings.TrimRight(raw, "\r \t")
 		if line == "" || strings.HasPrefix(line, "#") {
@@ -270,26 +296,40 @@ func NewPolicy(ignoreFile string, deny, allow []*Glob) (*Policy, error) {
 		}
 		g, err := CompileGlob(line)
 		if err != nil {
-			return nil, fmt.Errorf(".repochatignore line %d cannot be understood (%v). Fix or remove that line; repochat will not guess what it should withhold", n+1, err)
+			return nil, nil, fmt.Errorf("%s line %d cannot be understood (%v). Fix or remove that line; repochat will not guess what it should withhold", name, n+1, err)
 		}
-		p.ignore = append(p.ignore, ignoreRule{glob: g, negate: negate})
-		fmt.Fprintf(h, "i:%v:%s\n", negate, raw)
+		rules = append(rules, ignoreRule{glob: g, negate: negate})
+		fmt.Fprintf(h, "%s:%v:%s\n", tag, negate, raw)
 	}
-	if len(p.ignore) > 0 {
-		p.oracle = newIgnoreOracle(ignoreFile)
-		// Answers depend on the git that gives them.
-		if _, id, err := gitIdentity(); err == nil {
-			fmt.Fprintf(h, "git:%s\n", id)
-		}
+	if len(rules) == 0 {
+		return nil, nil, nil
 	}
-	for _, g := range deny {
-		fmt.Fprintf(h, "d:%s\n", g.src)
+	// Answers depend on the git that gives them.
+	if _, id, err := gitIdentity(); err == nil {
+		fmt.Fprintf(h, "git:%s\n", id)
 	}
-	for _, g := range allow {
-		fmt.Fprintf(h, "a:%s\n", g.src)
+	return rules, newIgnoreOracle(text), nil
+}
+
+// AddIgnore gives the policy a second source of ignore rules, in the syntax
+// of .repochatignore. A path that either source withholds is withheld: each
+// is judged on its own, so a negation in one never re-includes a path the
+// other withholds. It may be called once, before the policy is used.
+func (p *Policy) AddIgnore(rules string) error {
+	if p.hasExtra {
+		return errors.New("the policy already has a second ignore source")
 	}
-	p.hash = hex.EncodeToString(h.Sum(nil))[:16]
-	return p, nil
+	h := sha256.New()
+	fmt.Fprintf(h, "%s\n", p.hash)
+	ignore, oracle, err := parseIgnore("the repository owner's .repochatignore", rules, h, "x")
+	if err != nil {
+		return err
+	}
+	p.extraIgnore, p.extraOracle, p.hasExtra = ignore, oracle, true
+	if len(ignore) > 0 {
+		p.hash = hex.EncodeToString(h.Sum(nil))[:16]
+	}
+	return nil
 }
 
 // Check returns "" when the path may be served, otherwise the withholding reason.
@@ -325,11 +365,16 @@ func (p *Policy) Check(rel string) string {
 	return ""
 }
 
-// lenient is the package's own reading of the rules: the last pattern that
-// matches the file or a directory above it decides.
+// lenient is the package's own reading of the rules: in each source, the
+// last pattern that matches the file or a directory above it decides, and a
+// path either source withholds is withheld.
 func (p *Policy) lenient(rel string) bool {
+	return lenientRules(p.ignore, rel) || lenientRules(p.extraIgnore, rel)
+}
+
+func lenientRules(rules []ignoreRule, rel string) bool {
 	withheld := false
-	for _, r := range p.ignore {
+	for _, r := range rules {
 		if r.glob.Match(rel) {
 			withheld = !r.negate
 		}
@@ -337,17 +382,42 @@ func (p *Policy) lenient(rel string) bool {
 	return withheld
 }
 
-// decide reports whether .repochatignore withholds the path: when git says
-// so under these rules, or when the lenient reading does. An error means
-// that git could not be asked; the path is then not known to be served.
+// oracles returns git's readings of the sources that have rules.
+func (p *Policy) oracles() []*ignoreOracle {
+	var out []*ignoreOracle
+	if len(p.ignore) > 0 {
+		out = append(out, p.oracle)
+	}
+	if len(p.extraIgnore) > 0 {
+		out = append(out, p.extraOracle)
+	}
+	return out
+}
+
+// decide reports whether the ignore rules withhold the path: when git says
+// so under either source's rules, or when the lenient reading does. An error
+// means that git could not be asked about a source that does not withhold
+// the path; the path is then not known to be served.
 func (p *Policy) decide(ctx context.Context, rel string) (bool, error) {
-	if len(p.ignore) == 0 {
+	oracles := p.oracles()
+	if len(oracles) == 0 {
 		return false, nil
 	}
 	if p.lenient(rel) {
 		return true, nil
 	}
-	return p.oracle.ignored(ctx, rel)
+	var failed error
+	for _, o := range oracles {
+		ignored, err := o.ignored(ctx, rel)
+		if err != nil {
+			failed = err
+			continue
+		}
+		if ignored {
+			return true, nil
+		}
+	}
+	return false, failed
 }
 
 // ignored is decide for callers that only need to know whether the path is
@@ -363,7 +433,8 @@ func (p *Policy) ignored(rel string) bool {
 // verdicts) are left out. An error means the answers are not available;
 // every check of those paths then reports them as withheld.
 func (p *Policy) Prime(ctx context.Context, paths []string) error {
-	if len(p.ignore) == 0 {
+	oracles := p.oracles()
+	if len(oracles) == 0 {
 		return nil
 	}
 	ask := make([]string, 0, len(paths))
@@ -372,7 +443,12 @@ func (p *Policy) Prime(ctx context.Context, paths []string) error {
 			ask = append(ask, rel)
 		}
 	}
-	return p.oracle.decide(ctx, ask)
+	for _, o := range oracles {
+		if err := o.decide(ctx, ask); err != nil {
+			return err
+		}
+	}
+	return nil
 }
 
 // SupportedName reports whether a path can be represented safely: valid

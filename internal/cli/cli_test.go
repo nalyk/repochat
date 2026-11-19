@@ -269,6 +269,11 @@ func fakeTunnelClient(args []string) int {
 		ask("call", `{"jsonrpc":"2.0","id":"c","method":"tools/call","params":{"name":"repo_overview","arguments":{}}}`)
 		ask("read", `{"jsonrpc":"2.0","id":"r","method":"tools/call","params":{"name":"read_file","arguments":{"path":"README.md"}}}`)
 		save()
+		if mode == "drive" {
+			// Further requests come from the test, one file at a time
+			// (see driver in write_test.go).
+			go driveFromFiles(filepath.Join(filepath.Dir(os.Getenv("FAKE_RECORD")), "drive"), stdin, reader)
+		}
 		defer func() {
 			stdin.Close()
 			child.Process.Signal(syscall.SIGTERM)

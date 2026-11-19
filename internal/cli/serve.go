@@ -31,6 +31,7 @@ func cmdMCP(c *console, args []string) int {
 	fs.SetOutput(c.errw)
 	var s session
 	sessionFlags(fs, &s)
+	writeFlags(fs, &s, true)
 	blob := fs.String("session", "", "frozen session passed by the repochat launcher (internal)")
 	allowBroad := fs.Bool("allow-broad-root", false, "allow serving your home directory or / when that is the repository root")
 	if code, ok := parseOptions(c, fs, args); !ok {
@@ -48,7 +49,14 @@ func cmdMCP(c *console, args []string) int {
 			return 2
 		}
 		s = *decoded
+		// The launcher has started or resumed the session already; this
+		// process resumes that one and never starts another.
+		s.NewSession = false
 	} else {
+		if err := s.checkWrite(); err != nil {
+			fmt.Fprintln(c.errw, "repochat:", err)
+			return 2
+		}
 		// User-level allow/deny patterns are part of the exposure policy: if
 		// they cannot be read, refuse to serve rather than serve more.
 		var err error
@@ -89,10 +97,31 @@ func cmdMCP(c *console, args []string) int {
 		return 1
 	}
 
-	srv := newServer(r)
-	srv.Logf = stderrLogf(c.errw)
 	sink := newEventSink(c, &s, r)
 	defer sink.close()
+	srv := newServer(r)
+	if s.Write {
+		ss, err := openSessions(r, s.repoOptions(cfg), sink.notice)
+		if err != nil {
+			fmt.Fprintln(c.errw, "repochat:", err)
+			return 1
+		}
+		defer ss.Close()
+		if *blob == "" {
+			// Started by a client directly: like the launcher, start or
+			// resume the session before serving, and say which it is.
+			info, note, err := startSession(ctx, ss, s.NewSession)
+			if err != nil {
+				fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
+				return 1
+			}
+			fmt.Fprintf(c.errw, "repochat: WRITE MODE (experimental): session %s, from %s @ %s\n",
+				repo.SanitizeLine(info.Branch), repo.SanitizeLine(info.StartBranch), shortID(info.Base))
+			sink.session(note)
+		}
+		srv = newWriteServer(r, ss, s.ConfirmMerge, sink.session)
+	}
+	srv.Logf = stderrLogf(c.errw)
 	srv.OnEvent = sink.handle
 
 	err = srv.Serve(ctx, c.in, c.out)
@@ -141,7 +170,23 @@ func (e *eventSink) close() {
 }
 
 func (e *eventSink) handle(ev mcp.Event) {
-	a := activityFrom(ev, e.s, e.r)
+	e.deliver(activityFrom(ev, e.s, e.r))
+}
+
+// notice passes on a notice from the session engine.
+func (e *eventSink) notice(msg string) {
+	e.session(sessionNote{Note: msg})
+}
+
+// session reports what a write did.
+func (e *eventSink) session(n sessionNote) {
+	e.deliver(sessionActivity(n, n.Tool, e.s, e.r))
+}
+
+// deliver sends one activity to the launcher, or prints it when there is
+// none, and writes it to the activity log. Notes about writes are printed
+// even with --quiet: they are what the owner has to know.
+func (e *eventSink) deliver(a activity) {
 	e.mu.Lock()
 	defer e.mu.Unlock()
 	if e.conn != nil {
@@ -151,10 +196,10 @@ func (e *eventSink) handle(ev mcp.Event) {
 			e.conn.Close()
 			e.conn = nil
 		}
-	} else if !e.s.Quiet {
+	} else if !e.s.Quiet || a.Kind == "session" {
 		fmt.Fprintln(e.c.errw, formatActivity(e.c, a))
 	}
-	if e.audit != nil && (a.Kind == "call" || a.Kind == "hello") {
+	if e.audit != nil && (a.Kind == "call" || a.Kind == "hello" || a.Kind == "session") {
 		if err := e.audit.write(a); err != nil {
 			e.warn.Do(func() { fmt.Fprintln(e.c.errw, "repochat: cannot write the activity log:", err) })
 		}

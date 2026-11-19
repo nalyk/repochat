@@ -1,0 +1,543 @@
+[
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Repository overview"
+    },
+    "description": "Start here. Shows the repository name, current branch and HEAD, uncommitted change counts, number of files, top-level layout, file types, key files, and what this session can and cannot see.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "repo_overview",
+    "title": "Repository overview"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "List files"
+    },
+    "description": "List files under a directory. Subtrees deeper than `depth` are summarised as one line with a file count. Shows sizes and marks untracked files, symlinks and submodules. Files ignored by .gitignore never appear.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "cursor": {
+          "description": "Continuation token from the @meta line of the previous result of the SAME call (same other arguments).",
+          "maxLength": 512,
+          "type": "string"
+        },
+        "depth": {
+          "description": "Directory levels listed individually (default 2).",
+          "maximum": 12,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "glob": {
+          "description": "Optional filter in .gitignore syntax: `*.go` matches at any depth, `src/**/*.ts` is anchored at the root, `*` does not cross `/`.",
+          "maxLength": 512,
+          "type": "string"
+        },
+        "limit": {
+          "description": "Maximum entries per call (default 300).",
+          "maximum": 1000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Directory to list, repository-relative (default: repository root).",
+          "maxLength": 1024,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "list_files",
+    "title": "List files"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Find files by name"
+    },
+    "description": "Find files by path. A plain query is a case-insensitive substring of the path, best matches first (exact file name, then prefix, then anywhere). A query containing * ? or [ is a .gitignore-style pattern (e.g. `**/*_test.go`). Searches names only; use search_code for contents.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "limit": {
+          "description": "Maximum results (default 50).",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "description": "File name fragment or pattern.",
+          "maxLength": 512,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "find_files",
+    "title": "Find files by name"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Read a file"
+    },
+    "description": "Read a text file with line numbers. The header states the total number of lines; when more remain the result says which start_line continues. With `rev`, reads the file as it was at that commit. Binary files are reported, not dumped.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_lines": {
+          "description": "Lines to return (default 500, maximum 2000).",
+          "maximum": 2000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Repository-relative file path, e.g. src/app/main.go.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "rev": {
+          "description": "Optional branch, tag or commit: read the file as of that revision instead of the working tree.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "start_line": {
+          "description": "First line to return (1-based, default 1).",
+          "maximum": 100000000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "read_file",
+    "title": "Read a file"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Read several files"
+    },
+    "description": "Read up to 10 files in one call (from their first line). The size budget is shared; files that do not fit are listed so they can be requested again. Prefer this over many read_file calls when you need several small files.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "max_lines_each": {
+          "description": "Lines per file (default 400).",
+          "maximum": 2000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Repository-relative file paths.",
+          "items": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "maxItems": 10,
+          "type": "array"
+        }
+      },
+      "required": [
+        "paths"
+      ],
+      "type": "object"
+    },
+    "name": "read_files",
+    "title": "Read several files"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Search file contents"
+    },
+    "description": "Search the contents of the repository's files. Literal and case-insensitive by default; set regex=true for RE2 regular expressions (no look-around or backreferences). Results are grouped by file with line numbers. The footer says whether the search was complete; when it is INCOMPLETE, continue with the cursor before concluding that something does not exist.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "case_sensitive": {
+          "description": "Match case exactly (default false).",
+          "type": "boolean"
+        },
+        "context_lines": {
+          "description": "Lines of context around each match (default 0).",
+          "maximum": 5,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "cursor": {
+          "description": "Continuation token from the @meta line of the previous result of the SAME call (same other arguments).",
+          "maxLength": 512,
+          "type": "string"
+        },
+        "exclude": {
+          "description": "Skip paths matching one of these patterns, e.g. [\"*_test.go\", \"docs/\"].",
+          "items": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "include": {
+          "description": "Only search paths matching one of these .gitignore-style patterns, e.g. [\"*.go\", \"src/\"].",
+          "items": {
+            "maxLength": 512,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "max_results": {
+          "description": "Maximum matching lines per call (default 50).",
+          "maximum": 200,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "query": {
+          "description": "Text or regular expression to find.",
+          "maxLength": 500,
+          "minLength": 1,
+          "type": "string"
+        },
+        "regex": {
+          "description": "Treat query as an RE2 regular expression (default false).",
+          "type": "boolean"
+        },
+        "whole_word": {
+          "description": "Match whole words only (default false).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "query"
+      ],
+      "type": "object"
+    },
+    "name": "search_code",
+    "title": "Search file contents"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Outline of a file"
+    },
+    "description": "List the definitions in a file (functions, types, classes, headings) with line numbers, to jump to the right range with read_file. Go files are parsed exactly; other languages use line patterns and are labelled as heuristic.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "path": {
+          "description": "Repository-relative file path.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "file_outline",
+    "title": "Outline of a file"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Working tree status"
+    },
+    "description": "Current branch, upstream ahead/behind, and the lists of staged, unstaged, untracked and conflicted paths. Shows names only; use git_diff for the changes themselves.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {},
+      "type": "object"
+    },
+    "name": "git_status",
+    "title": "Working tree status"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Commit history"
+    },
+    "description": "List commits, newest first: hash, date, author, refs, subject. Filter by path, author, dates or message text. `range` \"a..b\" selects the commits reachable from b and not from a (a commit set, not a comparison). with_stats adds the changed files per commit. Use git_show for one commit's full message and patch.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "author": {
+          "description": "Only commits whose author name or e-mail contains this text.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "grep": {
+          "description": "Only commits whose message contains this text (case-insensitive, literal).",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "limit": {
+          "description": "Commits to return (default 20; maximum 30 with with_stats).",
+          "maximum": 100,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Only commits that touch this file or directory.",
+          "maxLength": 1024,
+          "type": "string"
+        },
+        "pickaxe": {
+          "description": "Only commits that add or remove this exact string in a file. Unavailable while secret masking is on.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "range": {
+          "description": "Commit set \"a..b\", e.g. \"main..feature\" or \"v1.0..HEAD\". Do not combine with rev.",
+          "maxLength": 400,
+          "type": "string"
+        },
+        "rev": {
+          "description": "Start from this branch, tag or commit (default HEAD).",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "since": {
+          "description": "Only commits after this date, e.g. 2026-01-31 or \"2 weeks ago\".",
+          "maxLength": 40,
+          "type": "string"
+        },
+        "skip": {
+          "description": "Skip this many commits (for paging; the result gives the next value).",
+          "maximum": 10000000,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "until": {
+          "description": "Only commits before this date.",
+          "maxLength": 40,
+          "type": "string"
+        },
+        "with_stats": {
+          "description": "Also list the files each commit changed with line counts (default false).",
+          "type": "boolean"
+        }
+      },
+      "type": "object"
+    },
+    "name": "git_log",
+    "title": "Commit history"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Compare changes"
+    },
+    "description": "Show changes as a file summary plus unified patches. mode=head (default): all uncommitted changes (HEAD → working tree). mode=staged: HEAD → index. mode=worktree: index → working tree. mode=range: changes from `base` to `target` (two endpoints compared directly); merge_base=true compares the merge base of base and target with target — what a branch added since it forked. Untracked files are not part of a diff (see git_status, read_file). Large patches are cut with an explicit notice naming the files left out.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "base": {
+          "description": "range mode: the older side (branch, tag or commit).",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "context_lines": {
+          "description": "Unchanged lines shown around each change (default 3).",
+          "maximum": 10,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "merge_base": {
+          "description": "range mode: compare merge-base(base, target) → target instead of base → target (default false).",
+          "type": "boolean"
+        },
+        "mode": {
+          "description": "What to compare (default head; range when base is given).",
+          "enum": [
+            "head",
+            "staged",
+            "worktree",
+            "range"
+          ],
+          "type": "string"
+        },
+        "paths": {
+          "description": "Limit to these files or directories (repository-relative).",
+          "items": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "stat_only": {
+          "description": "Only the list of changed files with line counts, no patches (default false).",
+          "type": "boolean"
+        },
+        "target": {
+          "description": "range mode: the newer side (default HEAD).",
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "git_diff",
+    "title": "Compare changes"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Show a commit"
+    },
+    "description": "Show one commit: full message, author, parents, changed files and patch. Changes are relative to the first parent (stated for merge commits) or to the empty tree for a root commit.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "context_lines": {
+          "description": "Unchanged lines shown around each change (default 3).",
+          "maximum": 10,
+          "minimum": 0,
+          "type": "integer"
+        },
+        "paths": {
+          "description": "Limit to these files or directories (repository-relative).",
+          "items": {
+            "maxLength": 1024,
+            "type": "string"
+          },
+          "maxItems": 20,
+          "type": "array"
+        },
+        "rev": {
+          "description": "Commit hash, branch or tag.",
+          "maxLength": 200,
+          "minLength": 1,
+          "type": "string"
+        },
+        "stat_only": {
+          "description": "Only the changed-file summary, no patch (default false).",
+          "type": "boolean"
+        }
+      },
+      "required": [
+        "rev"
+      ],
+      "type": "object"
+    },
+    "name": "git_show",
+    "title": "Show a commit"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Who changed these lines"
+    },
+    "description": "For a range of lines (up to 200 per call), show which commit last changed each line, with author and date. Without `rev` it blames the working file (uncommitted lines are marked); with `rev` it blames the file as of that commit.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "end_line": {
+          "description": "Last line (default start_line + 49).",
+          "maximum": 100000000,
+          "minimum": 1,
+          "type": "integer"
+        },
+        "path": {
+          "description": "Repository-relative file path.",
+          "maxLength": 1024,
+          "minLength": 1,
+          "type": "string"
+        },
+        "rev": {
+          "description": "Optional branch, tag or commit to blame at.",
+          "maxLength": 200,
+          "type": "string"
+        },
+        "start_line": {
+          "description": "First line (default 1).",
+          "maximum": 100000000,
+          "minimum": 1,
+          "type": "integer"
+        }
+      },
+      "required": [
+        "path"
+      ],
+      "type": "object"
+    },
+    "name": "git_blame",
+    "title": "Who changed these lines"
+  },
+  {
+    "annotations": {
+      "destructiveHint": false,
+      "idempotentHint": true,
+      "openWorldHint": false,
+      "readOnlyHint": true,
+      "title": "Branches and tags"
+    },
+    "description": "List local branches, remote branches and tags with their latest commit, newest first. Any listed name can be used as rev, base or target in the other git tools.",
+    "inputSchema": {
+      "additionalProperties": false,
+      "properties": {
+        "filter": {
+          "description": "Only names containing this text.",
+          "maxLength": 200,
+          "type": "string"
+        }
+      },
+      "type": "object"
+    },
+    "name": "git_refs",
+    "title": "Branches and tags"
+  }
+]

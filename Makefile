@@ -1,4 +1,4 @@
-# RepoChat — build, test and release targets. Requires Go 1.24+ and git.
+# RepoChat — build, test and release targets. Requires Go 1.25+ and git.
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)
@@ -18,11 +18,13 @@ vet:
 	go vet ./...
 	@test -z "$$(gofmt -l .)" || { echo "gofmt needed:"; gofmt -l .; exit 1; }
 
+# -timeout: go test's default of 10 minutes per package is too short for
+# internal/repo under the race detector on slower runners (macOS).
 test: ## unit and integration tests (stand-in tunnel-client)
-	go test -count=1 ./...
+	go test -count=1 -timeout 30m ./...
 
 test-race:
-	go test -race -count=1 ./...
+	go test -race -count=1 -timeout 30m ./...
 
 test-onboarding: build ## first-run flow through a real pseudo-terminal
 	go test -c -o internal/cli/cli.test ./internal/cli/
@@ -40,6 +42,7 @@ fuzz: ## short fuzzing pass over the input validators
 	go test -run '^$$' -fuzz '^FuzzCheckPath$$' -fuzztime 20s ./internal/repo/
 	go test -run '^$$' -fuzz '^FuzzGlob$$' -fuzztime 20s ./internal/repo/
 	go test -run '^$$' -fuzz '^FuzzRevision$$' -fuzztime 20s ./internal/repo/
+	go test -run '^$$' -fuzz '^FuzzParseChanges$$' -fuzztime 20s ./internal/repo/
 
 check: vet test-race test-onboarding ## everything CI runs
 

@@ -6,10 +6,12 @@ import (
 	"encoding/base64"
 	"encoding/hex"
 	"encoding/json"
+	"errors"
 	"flag"
 	"fmt"
 	"io"
 	"os"
+	"path/filepath"
 	"sort"
 	"strconv"
 	"strings"
@@ -56,6 +58,11 @@ type session struct {
 	// there instead of printing it.
 	Events string `json:"events,omitempty"`
 	ID     string `json:"id,omitempty"`
+	// Write mode. NewSession is the launcher's alone: it starts the session
+	// before the banner and never passes the flag on to the server.
+	Write        bool `json:"write,omitempty"`
+	NewSession   bool `json:"new_session,omitempty"`
+	ConfirmMerge bool `json:"confirm_merge,omitempty"`
 }
 
 type listFlag []string
@@ -84,6 +91,90 @@ func sessionFlags(fs *flag.FlagSet, s *session) {
 	fs.BoolVar(&s.Quiet, "quiet", false, "do not print live activity")
 	fs.BoolVar(&s.NoAudit, "no-audit-log", false, "do not write the local activity log")
 	fs.BoolVar(&s.AuditArgs, "audit-args", false, "record tool arguments (paths, queries) in the local activity log")
+}
+
+// writeFlags registers the write-mode options. Only the commands that serve
+// (repochat and mcp) take --new-session and --confirm-merge.
+func writeFlags(fs *flag.FlagSet, s *session, serving bool) {
+	fs.BoolVar(&s.Write, "write", false, "write mode (experimental): ChatGPT can change files in a session workspace on a side branch")
+	if serving {
+		fs.BoolVar(&s.NewSession, "new-session", false, "with --write: start a new session instead of resuming the open one (the old branch is kept)")
+		fs.BoolVar(&s.ConfirmMerge, "confirm-merge", false, "with --write: finish_session does not merge; you merge with `repochat session finish`")
+	}
+}
+
+// checkWrite refuses combinations of options that cannot mean anything.
+func (s *session) checkWrite() error {
+	switch {
+	case !s.Write && s.NewSession:
+		return errors.New("--new-session only means something with --write")
+	case !s.Write && s.ConfirmMerge:
+		return errors.New("--confirm-merge only means something with --write")
+	case s.Write && s.NoHistory:
+		return errors.New("--write and --no-history cannot be used together: every change is a checkpoint, and checkpoints are history")
+	}
+	return nil
+}
+
+// sessionsDir is where write-mode sessions live: <state dir>/sessions.
+func sessionsDir() (string, error) {
+	base, err := stateDir()
+	if err != nil {
+		return "", err
+	}
+	if base, err = filepath.Abs(base); err != nil {
+		return "", err
+	}
+	if err := privateDir(base); err != nil {
+		return "", err
+	}
+	dir := filepath.Join(base, "sessions")
+	if err := privateDir(dir); err != nil {
+		return "", err
+	}
+	return dir, nil
+}
+
+// openSessions prepares the sessions of r with the exposure options of this
+// run. notify receives the engine's notices.
+func openSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*repo.Sessions, error) {
+	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify})
+}
+
+// observeSessions prepares the sessions of r for a command that only shows,
+// finishes or abandons the session: it never changes the workspace's files,
+// so it cannot bring them in line with options other than the server's.
+func observeSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*repo.Sessions, error) {
+	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify, Observe: true})
+}
+
+func newSessions(r *repo.Repo, o repo.SessionOptions) (*repo.Sessions, error) {
+	dir, err := sessionsDir()
+	if err != nil {
+		return nil, err
+	}
+	o.StateDir = dir
+	return repo.NewSessions(r, o)
+}
+
+// startNote describes a session just started or resumed.
+func startNote(info *repo.SessionInfo, resumed bool) sessionNote {
+	verb := "started"
+	if resumed {
+		verb = "resumed"
+	}
+	return sessionNote{Tool: "start", Note: fmt.Sprintf("session %s: %s, from %s @ %s", verb, info.Branch, info.StartBranch, shortID(info.Base))}
+}
+
+// startSession starts or resumes the session as the command line asks, and
+// says which it did.
+func startSession(ctx context.Context, ss *repo.Sessions, fresh bool) (*repo.SessionInfo, sessionNote, error) {
+	prev, perr := ss.Current(ctx)
+	info, err := ss.Start(ctx, fresh)
+	if err != nil {
+		return nil, sessionNote{}, err
+	}
+	return info, startNote(info, perr == nil && !fresh && prev.ID == info.ID), nil
 }
 
 func (s *session) repoOptions(cfg *Config) repo.Options {
@@ -177,6 +268,243 @@ func newServer(r *repo.Repo) *mcp.Server {
 	}
 }
 
+// sessionNote is what one write did, for the owner: shown live and kept in
+// the activity log. It never holds file content.
+type sessionNote struct {
+	Tool       string
+	Note       string
+	Checkpoint string
+	Files      int
+	Added      int
+	Removed    int
+	// Paths names the files of the write, at most maxNotePaths of them, and
+	// More counts the rest. They are paths the policy serves: the engine
+	// never reports a withheld one.
+	Paths []string
+	More  int
+}
+
+const (
+	maxNotePaths = 20  // files one note names
+	maxNotePath  = 120 // bytes of one of them
+)
+
+// notePaths prepares the names of a write's files for a note: the first
+// maxNotePaths, masked, on one line each and cut, with the number left out.
+// total is how many files there were when that is more than the list holds.
+func notePaths(files []string, total int, red *repo.Redactor) (paths []string, more int) {
+	total = max(total, len(files))
+	for i, f := range files {
+		if i == maxNotePaths {
+			break
+		}
+		if red != nil {
+			f, _ = red.Line(f)
+		}
+		paths = append(paths, clip(repo.SanitizeLine(f), maxNotePath))
+	}
+	return paths, total - len(paths)
+}
+
+// withPaths appends the files to a note's text: ": a.txt, b.txt, +3 more".
+func withPaths(note string, paths []string, more int) string {
+	if len(paths) == 0 {
+		return note
+	}
+	note += ": " + strings.Join(paths, ", ")
+	if more > 0 {
+		note += fmt.Sprintf(", +%d more", more)
+	}
+	return note
+}
+
+// Reply of finish_session with --confirm-merge.
+const confirmMergeReply = "The session is ready to merge. The user chose to confirm merges in the terminal: ask them to run `repochat session finish`."
+
+// newWriteServer builds the MCP server of write mode. report receives a note
+// for every start, apply, undo, update, finish and abandon that succeeded;
+// it may be nil. With confirmMerge, finish_session does not merge.
+func newWriteServer(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote)) *mcp.Server {
+	return &mcp.Server{
+		Name:         "repochat",
+		Title:        "RepoChat",
+		Version:      Version,
+		Instructions: tools.WriteModeInstructions,
+		Tools:        writeTools(r, ss, confirmMerge, report),
+	}
+}
+
+func writeTools(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote)) []mcp.Tool {
+	if report == nil {
+		report = func(sessionNote) {}
+	}
+	list := tools.NewWrite(r, ss)
+	for i := range list {
+		t := &list[i]
+		inner, name := t.Handler, t.Name
+		switch name {
+		case "start_session", "apply_changes", "undo_to_checkpoint", "update_session", "abandon_session":
+		case "finish_session":
+			if confirmMerge {
+				t.Handler = func(ctx context.Context, _ mcp.Args) (mcp.Result, error) {
+					return confirmMergeHandler(ctx, r, ss, report)
+				}
+				continue
+			}
+		default:
+			continue
+		}
+		t.Handler = func(ctx context.Context, a mcp.Args) (mcp.Result, error) {
+			// The branch names in the notes of finish and abandon are those
+			// of the session as it was before the call.
+			var before *repo.SessionInfo
+			if name == "finish_session" || name == "abandon_session" {
+				before, _ = ss.Current(ctx)
+			}
+			res, err := inner(ctx, a)
+			if err == nil {
+				if n, ok := noteFor(name, resultMeta(res.Text), before); ok {
+					report(n)
+				}
+			}
+			return res, err
+		}
+	}
+	return list
+}
+
+// confirmMergeHandler is finish_session when the owner merges in the
+// terminal: it merges nothing. A session that cannot be merged as it stands
+// is said so; otherwise the model is told to ask the user.
+func confirmMergeHandler(ctx context.Context, r *repo.Repo, ss *repo.Sessions, report func(sessionNote)) (mcp.Result, error) {
+	st, err := ss.Status(ctx)
+	if err != nil {
+		msg, _ := r.Redactor().Text(err.Error(), false)
+		msg = repo.Sanitize(msg)
+		if strings.Contains(msg, "--new-session") {
+			msg += "\nFrom here: call start_session with fresh=true."
+		}
+		return mcp.Result{}, errors.New(msg)
+	}
+	switch {
+	case st.Ahead == 0:
+		return mcp.Result{}, errors.New("the session has no checkpoints: there is nothing to merge (nothing was changed)")
+	case st.OwnerMoved:
+		return mcp.Result{}, fmt.Errorf("%s has commits the session lacks: call update_session first (nothing was changed)", repo.SanitizeLine(st.Info.StartBranch))
+	}
+	report(sessionNote{Tool: "finish_session", Note: "ChatGPT asks to merge " + st.Info.Branch + " into " + st.Info.StartBranch + ": run `repochat session finish` to confirm"})
+	return mcp.Result{Text: confirmMergeReply}, nil
+}
+
+// shortID is the 7-character form of a commit id.
+func shortID(id string) string {
+	if len(id) > 7 {
+		return id[:7]
+	}
+	return id
+}
+
+// resultMeta reads the @meta footer the tools end every result with.
+func resultMeta(text string) map[string]any {
+	text = strings.TrimRight(text, "\n")
+	i := strings.LastIndex(text, "\n@meta ")
+	if i < 0 {
+		if !strings.HasPrefix(text, "@meta ") {
+			return nil
+		}
+		i = -1
+	}
+	var m map[string]any
+	if json.Unmarshal([]byte(text[i+len("\n@meta "):]), &m) != nil {
+		return nil
+	}
+	return m
+}
+
+// noteFor describes a successful write from its result's footer.
+func noteFor(tool string, m map[string]any, before *repo.SessionInfo) (sessionNote, bool) {
+	if m == nil {
+		return sessionNote{}, false
+	}
+	str := func(k string) string { v, _ := m[k].(string); return v }
+	num := func(k string) int { v, _ := m[k].(float64); return int(v) }
+	files := func() int {
+		if n := num("files_count"); n > 0 {
+			return n
+		}
+		if list, ok := m["files"].([]any); ok {
+			return len(list)
+		}
+		return num("files")
+	}
+	n := sessionNote{Tool: tool}
+	// The footer's list of names (masked and escaped by the tools already),
+	// which a tight budget may have shortened: total says how many there were.
+	named := func(key string, total int) {
+		var list []string
+		if raw, ok := m[key].([]any); ok {
+			for _, v := range raw {
+				if p, ok := v.(string); ok {
+					list = append(list, p)
+				}
+			}
+		}
+		n.Paths, n.More = notePaths(list, total, nil)
+	}
+	counts := func() {
+		n.Checkpoint, n.Files, n.Added, n.Removed = str("checkpoint"), files(), num("added"), num("removed")
+		named("files", n.Files)
+	}
+	switch tool {
+	case "start_session":
+		verb := "started"
+		if resumed, _ := m["resumed"].(bool); resumed {
+			verb = "resumed"
+		}
+		n.Note = fmt.Sprintf("session %s: %s, from %s @ %s", verb, str("branch"), str("start_branch"), shortID(str("base")))
+	case "apply_changes":
+		counts()
+		n.Note = withPaths(fmt.Sprintf("applied checkpoint %s: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
+	case "undo_to_checkpoint":
+		counts()
+		n.Note = withPaths(fmt.Sprintf("undo: checkpoint %s restores earlier files: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
+	case "update_session":
+		counts()
+		if str("kind") == "update" {
+			n.Note = withPaths(fmt.Sprintf("updated from your branch: checkpoint %s, %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
+		} else {
+			n.Note = fmt.Sprintf("update: already up to date (checkpoint %s)", n.Checkpoint)
+			n.Paths, n.More = nil, 0 // nothing was written
+		}
+	case "finish_session":
+		into := "your branch"
+		if before != nil {
+			into = before.StartBranch
+		}
+		n.Checkpoint, n.Files = str("commit"), num("files")
+		named("file_list", n.Files)
+		n.Note = withPaths(fmt.Sprintf("merged into %s: now at %s, %d file(s) changed", into, shortID(n.Checkpoint), n.Files), n.Paths, n.More)
+		if later := num("runs_later_count"); later > 0 {
+			n.Note += fmt.Sprintf(" · %d of them run on this machine later: review before building", later)
+		} else if list, ok := m["runs_later"].([]any); ok && len(list) > 0 {
+			n.Note += fmt.Sprintf(" · %d of them run on this machine later: review before building", len(list))
+		}
+		if num("warnings") > 0 {
+			n.Note += " · WARNING: the merge did not end cleanly"
+		}
+	case "abandon_session":
+		branch := str("branch")
+		if deleted, _ := m["branch_deleted"].(bool); deleted {
+			n.Note = fmt.Sprintf("session abandoned: workspace removed, branch %s deleted", branch)
+		} else {
+			n.Note = fmt.Sprintf("session abandoned: workspace removed, branch %s kept", branch)
+		}
+	default:
+		return n, false
+	}
+	return n, true
+}
+
 // ---------------------------------------------------------------------------
 // Activity rendering
 // ---------------------------------------------------------------------------
@@ -197,9 +525,30 @@ type activity struct {
 	Redactions int            `json:"redactions,omitempty"`
 	Error      string         `json:"error,omitempty"`
 	Args       map[string]any `json:"args,omitempty"`
+	// A write (kind "session"): what it did, the checkpoint (or the merged
+	// commit), the counts, and the names of its files (at most maxNotePaths,
+	// then how many more). Never content.
+	Note       string   `json:"note,omitempty"`
+	Checkpoint string   `json:"checkpoint,omitempty"`
+	Files      int      `json:"files,omitempty"`
+	Added      int      `json:"added,omitempty"`
+	Removed    int      `json:"removed,omitempty"`
+	Paths      []string `json:"paths,omitempty"`
+	PathsMore  int      `json:"paths_more,omitempty"`
 	// Summary is a short, masked, single-line rendering of the arguments for
 	// the live display. It is never written to the audit log.
 	Summary string `json:"summary,omitempty"`
+}
+
+// maxNoteBytes bounds a note: a sentence and the names of maxNotePaths files.
+const maxNoteBytes = 400 + maxNotePaths*(maxNotePath+2)
+
+// sessionActivity is the activity record of a write.
+func sessionActivity(n sessionNote, tool string, s *session, r *repo.Repo) activity {
+	a := activityFrom(mcp.Event{Time: time.Now(), Kind: "session", Tool: tool, Note: n.Note}, s, r)
+	a.Checkpoint, a.Files, a.Added, a.Removed = repo.SanitizeLine(n.Checkpoint), n.Files, n.Added, n.Removed
+	a.Paths, a.PathsMore = notePaths(n.Paths, len(n.Paths)+n.More, r.Redactor())
+	return a
 }
 
 func activityFrom(e mcp.Event, s *session, r *repo.Repo) activity {
@@ -211,6 +560,10 @@ func activityFrom(e mcp.Event, s *session, r *repo.Repo) activity {
 	if e.Err != "" {
 		msg, _ := r.Redactor().Line(firstLine(e.Err))
 		a.Error = clip(repo.SanitizeLine(msg), 200)
+	}
+	if e.Note != "" {
+		msg, _ := r.Redactor().Line(e.Note)
+		a.Note = clip(repo.SanitizeLine(msg), maxNoteBytes)
 	}
 	if e.Kind == "call" {
 		a.Summary = summarizeArgs(e.Args, r.Redactor())
@@ -390,6 +743,8 @@ func formatActivity(c *console, a activity) string {
 		return fmt.Sprintf("%s  %s connected (MCP %s)", c.dim(ts), who, a.Protocol)
 	case "list":
 		return fmt.Sprintf("%s  %s", c.dim(ts), c.dim("tool list requested"))
+	case "session":
+		return fmt.Sprintf("%s  %-13s %s", c.dim(ts), c.amber("session"), repo.SanitizeLine(a.Note))
 	}
 	status := c.green("→")
 	tail := fmt.Sprintf("%s  %dms", humanBytes(a.Bytes), a.Millis)

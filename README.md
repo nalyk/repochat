@@ -2,7 +2,7 @@
 
 [Română](README.ro.md) · Project: <https://github.com/nalyk/repochat>
 
-Talk to ChatGPT about the Git repository on your computer, without uploading it anywhere and without opening a port. repochat is read-only: nothing can be changed through it.
+Talk to ChatGPT about the Git repository on your computer, without uploading it anywhere and without opening a port. repochat is read-only: nothing can be changed through it, unless you start it with `--write` ([write mode](#write-mode-experimental), experimental and off by default).
 
 ```bash
 cd ~/projects/my-project
@@ -39,7 +39,7 @@ If you already live in Codex or Claude Code and never hit a limit, you probably 
 
 ### 1. Install
 
-From source (Go 1.24+ and git 2.25+):
+From source (Go 1.25+ and git 2.25+):
 
 ```bash
 git clone https://github.com/nalyk/repochat.git
@@ -98,6 +98,75 @@ How a single conversation behaves with two plugins that expose the same tool nam
 
 A design for one plugin serving several repositories exists in [`docs/superpowers/`](docs/superpowers/). None of it is built.
 
+## Write mode (experimental)
+
+Write mode is off by default. Without `--write`, repochat serves the 13 read-only tools described below and nothing in this section applies. Write mode passes its automated tests, but it has not yet been used from a real ChatGPT session.
+
+```bash
+repochat --write                    # share, and let ChatGPT edit files in a session
+repochat --write --new-session      # start a new session instead of resuming the open one
+repochat --write --confirm-merge    # finish_session does not merge; you do, with repochat session finish
+repochat session                    # from any terminal: the open session, its checkpoints, the changed files
+repochat session finish             # merge it yourself, after a question [--squash] [--message TEXT] [--yes]
+repochat session abandon            # remove its workspace; the branch is kept [--delete-branch]
+```
+
+ChatGPT keeps the tool list it loaded earlier. After you start with `--write` for the first time, and again after you go back to plain `repochat`, open the plugin's settings in ChatGPT and press Refresh tools. Otherwise the nine write tools do not appear, or stay listed after they are gone. ChatGPT asks for confirmation before it calls a tool that is not read-only, and it can remember your answer for the rest of the conversation, separately for each tool.
+
+`--write` cannot be combined with `--no-history`. `repochat mcp --write` does the same for other MCP clients, and `repochat tools --write` and `repochat call --write` show and run the write tools from the terminal.
+
+### What a session is
+
+A session is a second copy of the repository, made with `git worktree` from the commit your checkout is on, on a new branch named `repochat/<date>-<id>`. It lives under repochat's state directory (`~/.local/state/repochat/sessions/`), not inside your repository. Your uncommitted changes are not in it; the banner says so when you have some.
+
+While a session is open, every tool works on that copy, the 13 read tools included. ChatGPT sees its own edits, and does not see your checkout. Files the exposure policy withholds are not written into the copy at all.
+
+Each change ChatGPT applies becomes a commit on the session branch, called a checkpoint. Nothing reaches your branch until `finish_session` merges the session, as a fast-forward or as one squashed commit. You can look at the session branch with ordinary git at any time, and merge it by hand instead. There is one open session per repository: starting `repochat --write` again resumes it. Resuming puts the session copy back to its last checkpoint: whatever was changed in that directory by hand and is not a commit on the session branch is discarded. Work in your own checkout, not in the copy.
+
+In a session, every line the model reads carries its number and a short hash, like `12:abc|`. An edit names those anchors instead of quoting the old text. If the file changed after the model read it, the anchor no longer matches and the edit is refused. The anchors of a range check its first and its last line only, so a replace or delete of three or more lines must also carry the file's `file_tag`: a short hash of the whole file as the model was shown it, given by `read_file` and by every `apply_changes` result. Removing a file needs it too.
+
+### The nine tools
+
+| Tool | Role |
+|---|---|
+| `start_session` | open a session, or resume the open one; `fresh` starts another and keeps the old branch |
+| `session_status` | branch, start, checkpoints, changed files, whether your branch has moved, changed files that run on your machine later (read-only) |
+| `propose_changes` | check a change set and show the diff it would make, writing nothing (read-only) |
+| `apply_changes` | apply a change set over any number of files, completely or not at all, as one checkpoint |
+| `list_checkpoints` | the checkpoints, newest first (read-only) |
+| `undo_to_checkpoint` | restore the files of an earlier checkpoint as a new checkpoint; history keeps everything |
+| `update_session` | merge the commits your branch gained into the session; a conflict changes nothing |
+| `finish_session` | merge the session into your branch, in your checkout, then close it (marked destructive) |
+| `abandon_session` | close the session without merging; the branch is kept unless asked otherwise (marked destructive) |
+
+A change set is a list of operations: replace, insert or delete lines by anchor; create, remove or move a whole file. Only UTF-8 text files can be edited. Go and JSON files must still parse after the change; other languages are not checked.
+
+### What it guarantees
+
+Each point is covered by automated tests. One of them drives every write tool with hostile paths and values (`..`, absolute paths, `.git` in any letter case, protected and withheld paths, symbolic links committed in the repository or planted in the session copy) against canary files in every place a write must not reach, and checks after each call that every canary is unchanged.
+
+- Writes happen only inside the session copy and the git bookkeeping of its branch. The one exception is the merge into your branch, in your checkout, when `finish_session` is called.
+- Apart from that merge, no write reaches a protected path, a withheld file, or anything outside the session copy, including through symbolic links replaced while the call runs. The merge itself brings your branch whatever the session changed, and a session cannot change a protected or withheld path. Protected paths are `.git` and everything in it, continuous-integration definitions (`.github/workflows`, `.gitlab-ci.yml` and the equivalents of other services), hook directories (`.husky`, `.githooks`), `.gitmodules`, `.gitattributes` and `.repochatignore`. Withheld files are those of [What ChatGPT can see](#what-chatgpt-can-see); the `.repochatignore` in your checkout counts as it is on disk, committed or not.
+- A change set is applied completely or not at all.
+- A change made against outdated content is refused: the anchors vouch for the lines an edit names, and `file_tag` for the lines between the two ends of a longer range and for a file that is removed. Each file is read again right before it is written: one found changed since the check is not overwritten, and the change set is taken back.
+- A line that holds a masked value cannot be changed or deleted. Every line of a private-key block counts, from its BEGIN line to its END line, and nothing can be inserted inside one; an edit after which a masked line would be shown differently is refused as a whole. The model is told that you have to edit it by hand. With `--no-redact` nothing is masked and nothing is locked.
+- No program configured by the repository runs at any step, the final merge included: no hook, filter, merge driver or signing program. Session commits are therefore unsigned. If your git configuration asks for signed commits, `finish_session` refuses and says how to merge by hand. It refuses in the same way while `branch.<name>.mergeOptions` is set for your branch: git adds those options to every merge into it, and they can turn a fast-forward into a stash, a squash or a signed merge commit.
+- `finish_session` refuses, changing nothing, when your checkout is on another branch, when your branch has moved (then `update_session` comes first), and when the merge would overwrite your uncommitted changes, ignored files included. repochat checks this before the merge, and git checks again while it merges, told not to replace ignored files either. What is left is the moment between git's own check of a file and its write: a file you create or save in that moment can be replaced.
+- Without `--write`, the tools, their descriptions and their results are exactly those of read mode.
+
+### What it does not guarantee
+
+- That an edit is correct or harmless. ChatGPT can remember your approval for the whole conversation. After that, text in the repository (a comment, a README, a pasted issue) can steer the model into changes nobody reviewed. Until something is merged the damage stays on the session branch, so read the diff before you merge: `repochat session` lists the files, and `git diff <your branch>...<session branch>` shows them.
+- That merged code is safe to run. Build files, package scripts, shell scripts and container files run later on your machine. `finish_session` and `repochat session` list the ones the session changed; that is all repochat can do about them.
+- That a session belongs to one conversation. Every chat that can use the plugin works on the same open session.
+- That a merge cut off halfway leaves your checkout clean. The merge is not stopped when the call is cancelled or times out, but a merge that has not finished after ten minutes is stopped, and if git fails or is stopped in the middle, the result says the checkout may be partly updated and prints the commands that put it back, or complete the merge. Run them as printed, in that order. Going back restores every file of the merge to what it was before: if you edited one of them while the merge was running, save a copy first.
+- That a command repochat prints for you to run yourself behaves like repochat's own. When it tells you how to merge the session branch by hand, or how to put a checkout back after a cut-off merge, those `git` commands run under your git configuration, with whatever it adds: a setting such as `pull.twohead`, `branch.<name>.mergeOptions` or a hook applies to them as it does to anything else you type.
+- That hooks your repository relies on still happen. `post-merge` and the others do not run; the result names the ones the repository has, so you can run them by hand.
+- That two names which differ only in Unicode normalisation are treated as one file. On macOS `é` written as one character and as `e` followed by an accent name the same file; repochat compares names by letter case, not by normalisation, so a rule that withholds or protects one spelling does not cover the other.
+- Binary files, file modes, symbolic links and submodules cannot be edited.
+
+Building needs Go 1.25 or newer, as for the rest of repochat.
+
 ## What ChatGPT can see
 
 | Sees | Does not see |
@@ -150,6 +219,7 @@ Quote your patterns and give each its own `--deny` or `--allow`. An unquoted pat
 | `repochat setup` | enter or change the tunnel and key; `--list`, `--remove`, `--bind` |
 | `repochat files`, `tools`, `call` | what is served, which tools the model gets, run a tool yourself |
 | `repochat log` | recent activity (which tool, when, how long) |
+| `repochat session` | the open write-mode session; `finish`, `abandon` |
 | `repochat mcp` | the MCP server itself (stdio) |
 | `repochat mcp-config` | configuration for other MCP clients |
 | `repochat install`, `install-helper` | install the binary, or `tunnel-client` |
@@ -157,7 +227,7 @@ Quote your patterns and give each its own `--deny` or `--allow`. An unquoted pat
 
 ## Tools the model gets
 
-All 13 are marked `readOnlyHint`, so ChatGPT does not ask for confirmation on every call.
+All 13 are marked `readOnlyHint`, so ChatGPT does not ask for confirmation on every call. Write mode adds nine more, listed under [write mode](#write-mode-experimental).
 
 | Tool | Role |
 |---|---|
@@ -174,7 +244,7 @@ Every result ends with an `@meta {json}` line: whether it is complete, the curso
 
 What repochat guarantees, each point covered by automated tests:
 
-- No tool writes and none runs arbitrary commands. The model never supplies raw git arguments.
+- Without `--write`, no tool writes. No tool runs arbitrary commands, and the model never supplies raw git arguments. What write mode adds is under [write mode](#write-mode-experimental).
 - A file is served only if git lists it and the policy allows it. Symlinks are never followed, even if a directory is swapped for one during access.
 - A diff or commit that touches only withheld files produces no content. Git never enters a submodule.
 - A revision is a branch, tag or commit name followed at most by parent steps. Forms that search commit messages are refused, and a missing revision and an unreachable one get the same answer.
@@ -195,7 +265,7 @@ What it does not guarantee:
 - The 32 KB default result size is provisional and has not been measured in real ChatGPT sessions.
 - `tunnel-client` opens a diagnostics port on `127.0.0.1`. repochat itself listens on nothing.
 
-The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. It is a history for you and can be edited by anyone with your account.
+The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. In write mode every applied change set, undo, update and merge is recorded with its checkpoint, its line counts and the names of the files it touched (the first 20, then how many more), never their content. Those file names are recorded without `--audit-args` too. It is a history for you and can be edited by anyone with your account.
 
 ## Troubleshooting
 
@@ -233,6 +303,7 @@ Still not done:
 1. A real ChatGPT session on the fixed build. It needs a tunnel and key from your account; the mock control plane follows the documented protocol, and OpenAI's servers may have rules it lacks.
 2. A measurement of result sizes in real conversations.
 3. Interactive use on macOS. CI passes there, but nobody has sat in front of it.
+4. Write mode from a real ChatGPT session. Whether a ChatGPT Plus account may call a tool that is not read-only at all is still being checked.
 
 ## License
 

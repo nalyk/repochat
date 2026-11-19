@@ -1,6 +1,7 @@
 package mcp
 
 import (
+	"encoding/json"
 	"fmt"
 	"math"
 	"sort"
@@ -17,6 +18,7 @@ const (
 	Integer
 	Boolean
 	StringList
+	Object // any JSON value; Param.Raw is its JSON Schema, advertised as is
 )
 
 // Param describes one tool argument. The same description produces the JSON
@@ -31,7 +33,17 @@ type Param struct {
 	Min, Max int      // Integer only; applied (by clamping) when Max > Min
 	MaxLen   int      // String: max length; StringList: max length per item
 	MaxItems int      // StringList only
+
+	// Object only: Raw is the JSON Schema of the value, advertised as is (a
+	// "description" is added to a copy). MaxBytes caps the encoded value
+	// (default defaultObjectBytes). The server checks presence and size; the
+	// handler owns the structure.
+	Raw      map[string]any
+	MaxBytes int
 }
+
+// defaultObjectBytes is the size cap of an Object argument without MaxBytes.
+const defaultObjectBytes = 1 << 20
 
 // Schema is the ordered list of parameters a tool accepts.
 type Schema []Param
@@ -63,6 +75,11 @@ func (s Schema) JSON() map[string]any {
 			}
 		case Boolean:
 			prop["type"] = "boolean"
+		case Object:
+			for k, v := range p.Raw {
+				prop[k] = v
+			}
+			prop["description"] = p.Desc
 		case StringList:
 			prop["type"] = "array"
 			item := map[string]any{"type": "string"}
@@ -97,7 +114,7 @@ func (s Schema) Signature() string {
 	}
 	parts := make([]string, 0, len(s))
 	for _, p := range s {
-		t := map[Kind]string{String: "string", Integer: "integer", Boolean: "boolean", StringList: "string[]"}[p.Kind]
+		t := map[Kind]string{String: "string", Integer: "integer", Boolean: "boolean", StringList: "string[]", Object: "object"}[p.Kind]
 		name := p.Name
 		if !p.Required {
 			name += "?"
@@ -107,7 +124,7 @@ func (s Schema) Signature() string {
 	return "{" + strings.Join(parts, ", ") + "}"
 }
 
-// Args holds validated, normalised arguments: string, int, bool or []string.
+// Args holds validated, normalised arguments: string, int, bool, []string or json.RawMessage.
 type Args map[string]any
 
 func (a Args) Has(k string) bool { _, ok := a[k]; return ok }
@@ -127,6 +144,12 @@ func (a Args) Int(k string, def int) int {
 func (a Args) Bool(k string) bool {
 	b, _ := a[k].(bool)
 	return b
+}
+
+// Raw returns an Object argument as validated JSON; nil when absent.
+func (a Args) Raw(k string) json.RawMessage {
+	r, _ := a[k].(json.RawMessage)
+	return r
 }
 
 func (a Args) Strings(k string) []string {
@@ -207,6 +230,19 @@ func (s Schema) Validate(raw map[string]any) (Args, error) {
 			default:
 				return nil, fmt.Errorf("argument %q must be a boolean", p.Name)
 			}
+		case Object:
+			enc, err := json.Marshal(v)
+			if err != nil {
+				return nil, fmt.Errorf("argument %q is not valid JSON", p.Name)
+			}
+			limit := p.MaxBytes
+			if limit <= 0 {
+				limit = defaultObjectBytes
+			}
+			if len(enc) > limit {
+				return nil, fmt.Errorf("%s: too large (%d bytes, max %d)", p.Name, len(enc), limit)
+			}
+			out[p.Name] = json.RawMessage(enc)
 		case StringList:
 			var list []string
 			switch l := v.(type) {

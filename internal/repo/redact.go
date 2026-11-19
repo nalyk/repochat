@@ -133,6 +133,10 @@ func (r *Redactor) NewState() *RedactState { return &RedactState{r: r} }
 // Count is the number of values masked so far.
 func (st *RedactState) Count() int { return st.count }
 
+// Open reports whether a private-key block is open after the lines given so
+// far: the next line is judged as part of it.
+func (st *RedactState) Open() bool { return st.inPEM }
+
 // Force sets the key-block state from evidence the caller found in text it
 // did not pass to Line (the cut-off tail of a very long line): open > 0 means
 // a key block begins there, open < 0 that one ends there.

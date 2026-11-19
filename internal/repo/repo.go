@@ -34,6 +34,15 @@ type Options struct {
 	// repository (its configuration with the API key, its state, its helper).
 	// Whatever lies under them is withheld before any pattern is consulted.
 	Own []string
+	// ExtraIgnoreFile is the absolute path of a second rules file in the
+	// syntax of .repochatignore, read at every snapshot build: a path that it
+	// or the served tree's .repochatignore withholds is withheld. A missing
+	// file is no extra rules; one that cannot be read fails the snapshot.
+	ExtraIgnoreFile string
+	// AnchorKey, when not empty, makes working-tree reads and searches show
+	// each line as <line>:<anchor>|, the anchor being a keyed hash of the
+	// line as shown (see anchorOf). Reads from history never carry anchors.
+	AnchorKey []byte
 }
 
 const (
@@ -79,7 +88,15 @@ type Repo struct {
 	deny     []*Glob
 	own      []string      // Options.Own as repository-relative prefixes, lower case
 	oracle   *ignoreOracle // git's answers about .repochatignore, kept while the rules stay the same
+	extra    *ignoreOracle // the same for Options.ExtraIgnoreFile
 	version  [3]int
+	// Set once, before first use, for a session workspace (see Sessions):
+	// options every git command carries, and where .repochatignore is read.
+	extraPre        []string
+	ignoreFromIndex bool
+	// A test seam, nil in production: called right before a checkpoint's or
+	// an update's commit is put on the session branch.
+	beforeRefMove func()
 
 	mu         sync.Mutex
 	snap       *Snapshot
@@ -163,6 +180,9 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 		return nil, fmt.Errorf("--deny %w", err)
 	}
 	r.own = ownPrefixes(root, opts.Own)
+	if opts.ExtraIgnoreFile != "" && !filepath.IsAbs(opts.ExtraIgnoreFile) {
+		return nil, errors.New("the extra ignore file must be given by an absolute path")
+	}
 
 	if out, _, code, err := runGit(ctx, root, nil, 1024, "version"); err != nil || code != 0 {
 		return nil, fmt.Errorf("cannot run git: %v", firstErr(err, out))
@@ -478,6 +498,10 @@ func gitEnv() []string {
 // path of the index file that git must use instead of the repository's own.
 type gitIndexKey struct{}
 
+// gitTimeoutKey is the context key under which a time.Duration replaces
+// gitTimeout for the git commands run with that context.
+type gitTimeoutKey struct{}
+
 // withPrivateIndex returns a context whose git commands work on a private
 // copy of the index, and a function that removes the copy.
 //
@@ -543,7 +567,16 @@ func copyIndex(from, to string) error {
 // exit is reported through code with stderr as out; err is reserved for
 // failures to run git at all and for timeouts/cancellation.
 func runGit(ctx context.Context, dir string, pre []string, limit int, args ...string) (out []byte, truncated bool, code int, err error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	return runGitInput(ctx, dir, pre, nil, limit, args...)
+}
+
+// runGitInput is runGit with input on git's standard input (none when nil).
+func runGitInput(ctx context.Context, dir string, pre []string, input []byte, limit int, args ...string) (out []byte, truncated bool, code int, err error) {
+	timeout := gitTimeout
+	if d, ok := ctx.Value(gitTimeoutKey{}).(time.Duration); ok && d > 0 {
+		timeout = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	full := append([]string{"--no-pager"}, pre...)
@@ -556,6 +589,9 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
 	}
 	cmd.Stdin = nil
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second
@@ -585,7 +621,7 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 	}
 	werr := cmd.Wait()
 	if ctx.Err() != nil && !truncated {
-		return nil, false, -1, fmt.Errorf("git %s: %w", args[0], ctx.Err())
+		return nil, false, -1, fmt.Errorf("git %s: %w", subcommand(args), ctx.Err())
 	}
 	if truncated {
 		return buf, true, 0, nil
@@ -598,6 +634,18 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 		return nil, false, -1, werr
 	}
 	return buf, false, 0, nil
+}
+
+// subcommand names the git command in args, past any leading
+// "-c name=value" options.
+func subcommand(args []string) string {
+	for len(args) >= 2 && args[0] == "-c" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return "git"
+	}
+	return args[0]
 }
 
 type cappedBuffer struct {
@@ -618,7 +666,7 @@ func (r *Repo) gitPre() []string {
 	r.mu.Lock()
 	pre = append(pre, r.filterArgs...)
 	r.mu.Unlock()
-	return pre
+	return append(pre, r.extraPre...)
 }
 
 // gitRaw runs a git command in this repository (see runGit for the contract).
@@ -633,15 +681,23 @@ func (r *Repo) gitRaw(ctx context.Context, limit int, args ...string) ([]byte, b
 
 // git runs a command that must succeed and whose output must be complete.
 func (r *Repo) git(ctx context.Context, limit int, args ...string) ([]byte, error) {
-	out, truncated, code, err := r.gitRaw(ctx, limit, args...)
+	return r.gitInput(ctx, nil, limit, args...)
+}
+
+// gitInput is git with input on git's standard input.
+func (r *Repo) gitInput(ctx context.Context, input []byte, limit int, args ...string) ([]byte, error) {
+	if err := r.checkRoot(); err != nil {
+		return nil, err
+	}
+	out, truncated, code, err := runGitInput(ctx, r.Root, r.gitPre(), input, limit, args...)
 	if err != nil {
 		return nil, err
 	}
 	if code != 0 {
-		return nil, r.gitFailure(args[0], out)
+		return nil, r.gitFailure(subcommand(args), out)
 	}
 	if truncated {
-		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", args[0], limit)
+		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", subcommand(args), limit)
 	}
 	return out, nil
 }

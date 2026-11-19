@@ -69,12 +69,18 @@ type Tool struct {
 	Description string
 	Schema      Schema
 	Handler     Handler
+
+	// Write marks a tool that changes state: it is advertised as not
+	// read-only and not idempotent. Destructive further marks it as
+	// destructive. Neither set: read-only, as every tool has been so far.
+	Write       bool
+	Destructive bool
 }
 
 // Event is reported to Server.OnEvent for the activity log.
 type Event struct {
 	Time       time.Time
-	Kind       string // "hello" (handshake/discovery), "list", "call"
+	Kind       string // "hello" (handshake/discovery), "list", "call"; "session" comes from the program, never the server
 	Client     string
 	Protocol   string
 	Tool       string
@@ -84,6 +90,9 @@ type Event struct {
 	Err        string
 	Redactions int
 	Cancelled  bool
+	// Note is a one-line statement for the owner (Kind "session"): what a
+	// write did, never what it wrote.
+	Note string
 }
 
 // Server is an MCP server. Configure the exported fields, then call Serve once.
@@ -219,9 +228,9 @@ func ToolJSON(t Tool) map[string]any {
 		"inputSchema": t.Schema.JSON(),
 		"annotations": map[string]any{
 			"title":           title,
-			"readOnlyHint":    true,
-			"destructiveHint": false,
-			"idempotentHint":  true,
+			"readOnlyHint":    !t.Write,
+			"destructiveHint": t.Write && t.Destructive,
+			"idempotentHint":  !t.Write,
 			"openWorldHint":   false,
 		},
 	}
@@ -769,7 +778,13 @@ func (s *Server) runTool(ctx context.Context, tool *Tool, rawArgs map[string]any
 	if err != nil {
 		msg := err.Error()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg = fmt.Sprintf("%s timed out after %s; narrow the request (smaller range, path filter, fewer results)", tool.Name, s.CallTimeout)
+			if tool.Write {
+				// A write may have changed state on the way, and its own
+				// message says what (and how to recover): it is kept.
+				msg = fmt.Sprintf("%s timed out after %s. It reported: %s", tool.Name, s.CallTimeout, msg)
+			} else {
+				msg = fmt.Sprintf("%s timed out after %s; narrow the request (smaller range, path filter, fewer results)", tool.Name, s.CallTimeout)
+			}
 		}
 		ev.Err = msg
 		return msg, true

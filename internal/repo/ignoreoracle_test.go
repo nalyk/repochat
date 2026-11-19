@@ -1,11 +1,13 @@
 package repo
 
 import (
+	"errors"
 	"os"
 	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 )
 
 // What git prints for a path takes three forms, and the exit status two that
@@ -286,5 +288,69 @@ func TestHistoryOnlyPathsAreJudgedInBatches(t *testing.T) {
 	}
 	if n := oracle.runs - before; n > 1 {
 		t.Errorf("two single lookups started %d git processes", n)
+	}
+}
+
+// Two sources of rules, and git can be asked about only one of them: a path
+// the answering source does not withhold is not known to be served, so it is
+// withheld; a path the answering source withholds stays withheld as ignored.
+func TestOneOfTwoOraclesFailingFailsClosed(t *testing.T) {
+	for _, failing := range []string{"the tree's rules", "the owner's rules"} {
+		t.Run(failing, func(t *testing.T) {
+			pol, err := NewPolicy("*.log\n!keep.log\n", nil, nil)
+			if err != nil {
+				t.Fatal(err)
+			}
+			if err := pol.AddIgnore("*.tmp\n!keep.tmp\n"); err != nil {
+				t.Fatal(err)
+			}
+			// While git answers for both: the positive control.
+			if err := pol.Prime(bg, []string{"main.go"}); err != nil {
+				t.Fatal(err)
+			}
+			if got := pol.Check("main.go"); got != "" {
+				t.Fatalf("main.go with both sources answering: %q", got)
+			}
+			broken, working := pol.oracle, pol.extraOracle
+			if failing == "the owner's rules" {
+				broken, working = working, broken
+			}
+			broken.mu.Lock()
+			broken.failed, broken.failedAt = errors.New("git cannot be asked"), time.Now()
+			broken.mu.Unlock()
+			// The working source is asked first, so that its answers are there.
+			if err := working.decide(bg, []string{"other.go", "keep.log", "keep.tmp"}); err != nil {
+				t.Fatal(err)
+			}
+
+			if err := pol.Prime(bg, []string{"other.go"}); err == nil {
+				t.Error("Prime reported no error with one source unanswered")
+			}
+			if ignored, err := pol.decide(bg, "other.go"); ignored || err == nil {
+				t.Errorf("decide(other.go) = %v, %v; want not known", ignored, err)
+			}
+			if got := pol.Check("other.go"); got != ReasonUncertain {
+				t.Errorf("other.go with one source unanswered: %q, want %q", got, ReasonUncertain)
+			}
+			if !pol.ignored("other.go") {
+				t.Error("ignored(other.go) is false with one source unanswered")
+			}
+			// The lenient reading still withholds what either source names.
+			for _, p := range []string{"a.log", "a.tmp"} {
+				if got := pol.Check(p); got != ReasonIgnoreFile {
+					t.Errorf("%s: %q, want %q", p, got, ReasonIgnoreFile)
+				}
+			}
+			// A negation in one source cannot stand in for the other's answer.
+			for _, p := range []string{"keep.log", "keep.tmp"} {
+				if got := pol.Check(p); got != ReasonUncertain {
+					t.Errorf("%s with one source unanswered: %q, want %q", p, got, ReasonUncertain)
+				}
+			}
+			// Answers known from before the failure are kept.
+			if got := pol.Check("main.go"); got != "" {
+				t.Errorf("main.go, judged before the failure: %q", got)
+			}
+		})
 	}
 }
