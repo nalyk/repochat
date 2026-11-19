@@ -186,6 +186,63 @@ func TestOwnStateDirDoesNotHideTheWorkspace(t *testing.T) {
 	}
 }
 
+// F1: repochat's own directories are named by absolute path, inside the
+// owner's checkout. A tracked file under one is withheld in the workspace as
+// it is in the owner's repository: not on disk, not readable, not editable.
+func TestOwnDirectoriesAreWithheldInTheWorkspace(t *testing.T) {
+	f := newSessionFixture(t, map[string]string{
+		"cfg/config.toml": "api_key = 1\n",
+		"notes.txt":       "hello\n",
+	})
+	own := Options{Own: []string{filepath.Join(f.dir, "cfg")}}
+	s, info := f.start(t, own)
+	if exists(filepath.Join(info.Workspace, "cfg")) {
+		t.Error("cfg exists in the workspace")
+	}
+	ws, err := s.Serve(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := ws.ReadFile(bg, "cfg/config.toml", 1, 10, "", 1<<20); err == nil || !strings.Contains(err.Error(), ReasonOwnFiles) {
+		t.Errorf("read cfg/config.toml in the workspace: %v", err)
+	}
+	if _, err := ws.ReadFile(bg, "cfg/config.toml", 1, 10, "HEAD", 1<<20); err == nil {
+		t.Error("cfg/config.toml readable from history in the workspace")
+	}
+	for _, c := range []Change{
+		{Op: "insert", Path: "cfg/config.toml", At: "end", Text: "x = 1"},
+		{Op: "create", Path: "cfg/new.toml", Text: "x = 1"},
+		{Op: "move", Path: "notes.txt", ToPath: "cfg/notes.txt"},
+	} {
+		if _, err := s.Apply(bg, "", []Change{c}, ""); err == nil || !strings.Contains(err.Error(), "withheld") {
+			t.Errorf("%s %s: %v", c.Op, c.Path, err)
+		}
+	}
+	if got := gitCmd(t, info.Workspace, "status", "--porcelain"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+	if got := mustRead(t, filepath.Join(f.dir, "cfg", "config.toml")); got != "api_key = 1\n" {
+		t.Errorf("the owner's cfg/config.toml = %q", got)
+	}
+	s.Close()
+
+	// A workspace synced without the directory is brought in line by the
+	// next run that names it.
+	f2 := newSessionFixture(t, map[string]string{"cfg/config.toml": "api_key = 1\n", "notes.txt": "hello\n"})
+	s1, info2 := f2.start(t, Options{})
+	if !exists(filepath.Join(info2.Workspace, "cfg", "config.toml")) {
+		t.Fatal("cfg/config.toml missing without the option")
+	}
+	s1.Close()
+	s2 := f2.sessions(t, Options{Own: []string{filepath.Join(f2.dir, "cfg")}})
+	if _, err := s2.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if exists(filepath.Join(info2.Workspace, "cfg")) {
+		t.Error("cfg is still in the workspace after a resume that names it")
+	}
+}
+
 func TestWithheldTrackedFilesAreAbsentFromTheWorkspace(t *testing.T) {
 	f := newSessionFixture(t, map[string]string{
 		".env":            "TOKEN=x\n",

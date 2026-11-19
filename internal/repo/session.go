@@ -554,6 +554,10 @@ func (s *Sessions) openWorkspace(ctx context.Context, rec *sessionRecord) (*Repo
 		return nil, errors.New("the session workspace does not belong to this repository; start a new session with --new-session")
 	}
 	ws.Logf = s.owner.Logf
+	// The program's own directories are named by absolute path and lie, if
+	// anywhere, in the owner's checkout: the workspace withholds the same
+	// repository-relative paths, not those relative to its own directory.
+	ws.own = s.ownPrefixes(ws.own)
 	ws.extraPre = sparseConfig
 	ws.ignoreFromIndex = true
 	// Results name the repository, not the workspace directory.
@@ -885,6 +889,24 @@ func writeFileAtomic(dir, name string, data []byte) error {
 // change the workspace.
 var errObserving = errors.New("this command does not change the workspace: it can show the session, finish it or abandon it")
 
+// ownPrefixes are the repository-relative prefixes of the program's own
+// directories (Options.Own) as the owner's checkout has them: those of the
+// owner's repository and those of this run's options against its root, then
+// extra, each once.
+func (s *Sessions) ownPrefixes(extra []string) []string {
+	seen := map[string]bool{}
+	var out []string
+	for _, l := range [][]string{s.owner.own, ownPrefixes(s.owner.Root, s.opts.Repo.Own), extra} {
+		for _, p := range l {
+			if !seen[p] {
+				seen[p] = true
+				out = append(out, p)
+			}
+		}
+	}
+	return out
+}
+
 // optionsDigest identifies the exposure options that decide which files
 // sync leaves out of the workspace. The record keeps the digest of the
 // options the workspace was last synced with.
@@ -894,7 +916,8 @@ func (s *Sessions) optionsDigest() string {
 		TrackedOnly        bool
 		Allow, Deny, Own   []string
 		ExtraIgnore, Owner string
-	}{o.TrackedOnly, o.Allow, o.Deny, o.Own, filepath.Join(s.owner.Root, ownerIgnore), s.owner.Root})
+		OwnPrefixes        []string
+	}{o.TrackedOnly, o.Allow, o.Deny, o.Own, filepath.Join(s.owner.Root, ownerIgnore), s.owner.Root, s.ownPrefixes(nil)})
 	sum := sha256.Sum256(raw)
 	return hex.EncodeToString(sum[:])
 }
@@ -947,6 +970,7 @@ func (s *Sessions) policy(ctx context.Context, rec *sessionRecord) (*Policy, err
 	if err != nil {
 		return nil, err
 	}
+	pol.own = s.ownPrefixes(nil)
 	extra, found, err := readExtraIgnore(filepath.Join(s.owner.Root, ownerIgnore))
 	if err != nil {
 		return nil, err
