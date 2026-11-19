@@ -744,6 +744,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 			s.owner.Logf("finish: git merge --ff-only: %v", err)
 		}
 		if now, _ := s.ownerTip(wctx, rec); now != land {
+			// err == nil: git ran to its own end and said no.
 			var refusal error
 			if err == nil {
 				refusal = s.mergeRefusal(wctx, rec, out)
@@ -847,18 +848,26 @@ func ownerWorktreeState(ctx context.Context, owner *Repo) (string, error) {
 	return string(out), err
 }
 
-// failedMerge reports a fast-forward that did not land: as a refusal that
-// changed nothing when the branch, git's index lock and the checkout's
-// status are all as they were before the merge, and otherwise as a checkout
-// that may be partly updated, with the owner's way back. refusal is git's
-// refusal as mergeRefusal describes it, nil when git did not finish.
+// failedMerge reports a fast-forward that did not land. refusal is git's
+// refusal as mergeRefusal describes it, nil when git did not run to its own
+// end (killed, timed out).
+//
+// git that ends by itself with a refusal has written nothing: it checks
+// every path before it writes the first. With the branch still at tip and no
+// index lock left, that refusal is the answer, whatever the checkout's status
+// says: the owner may have edited files since it was last read, and the
+// recovery commands would put those very files back. A git that was cut off
+// changed nothing only when the branch, the lock and the status all say so.
+// Everything else is a checkout that may be partly updated, with the owner's
+// way back.
 func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, land, before string, refusal error) error {
 	now, nowErr := s.ownerTip(ctx, rec)
+	atTip := nowErr == nil && now == tip && !ownerIndexLocked(s.owner)
+	if atTip && refusal != nil {
+		return refusal
+	}
 	status, statusErr := ownerWorktreeState(ctx, s.owner)
-	if nowErr == nil && statusErr == nil && now == tip && !ownerIndexLocked(s.owner) && status == before {
-		if refusal != nil {
-			return refusal
-		}
+	if atTip && statusErr == nil && status == before {
 		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
 	}
 	cmds := recoveryCommands(tip, land)
@@ -866,8 +875,9 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 		"To recover, first, if no git command is running, remove the lock file %s. "+
 		"Then, to go back to %s, run these two commands in order, from any directory of the checkout: `%s`, then `%s`. "+
 		"To complete the merge instead, run the same two and then `%s`. "+
-		"The two do nothing unless the checkout is at %s, and touch only the paths the merge changes, putting each back to that commit's content: git refuses a fast-forward over uncommitted changes to one of them, so the merge's own writing is all they undo. "+
-		"The one exception they leave alone and name: a path whose staged content already was the landed commit's while the file was edited further. Other uncommitted changes are kept",
+		"The two do nothing unless the checkout is at %s, and touch only the paths the merge changes, putting each back to that commit's content. "+
+		"If one of those files was edited by hand while the merge ran, going back overwrites that edit: save a copy first (git status and git diff show what differs). "+
+		"Two kinds of path they leave as they are: one whose staged content already was the landed commit's while the file was edited further, which they name, and a file the merge adds under a name git ignores, which stays on disk",
 		rec.StartBranch, tip, land, SanitizeLine(ownerIndexLock(s.owner)),
 		tip, cmds[0], cmds[1], cmds[2], tip)
 }
@@ -883,10 +893,12 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 // alone, whatever is in it). It writes every file before it writes the index.
 // So a path whose index entry is land's while its file differs from the index
 // holds the owner's own edit, in every state: it is left alone and named.
-// Every other path of the diff held exactly tip's content, and is put back:
-// the paths land adds are taken out of the index and off the disk, the others
-// checked out from tip, whether git was cut off before, while or after it
-// wrote the files or the index.
+// Every other path of the diff held exactly tip's content when the merge
+// began, and is put back: the paths land adds are taken out of the index and
+// off the disk, the others checked out from tip, whether git was cut off
+// before, while or after it wrote the files or the index. An edit made to
+// such a file while the merge ran is overwritten with it, which the message
+// says.
 //
 // Each line works from any directory of the checkout (the paths git diff
 // prints are relative to its top) and does nothing outside a checkout that is
@@ -895,9 +907,11 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 // xargs runs its command once even without input. Paths are literal, never
 // patterns, and are handled one at a time, so that a file where the other
 // commit has a directory is no obstacle. A path land adds is deleted from the
-// disk only when git lists it as an untracked file there: not while tip's
-// directory still stands in its place, and never through a link that tip has
-// in its place, behind which the owner's own files lie.
+// disk only when git lists it as an untracked file there that no ignore rule
+// covers: not while tip's directory still stands in its place, never through
+// a link that tip has in its place, behind which the owner's own files lie,
+// and never a file git ignores, which may be the owner's own (git's
+// fast-forward was told not to replace those, see --no-overwrite-ignore).
 func recoveryCommands(tip, land string) []string {
 	const top = `cd "$(git rev-parse --show-toplevel)" && `
 	own := `if git --literal-pathspecs diff-index --cached --quiet ` + land + ` -- "$p" && ! git --literal-pathspecs diff --no-ext-diff --quiet -- "$p"; then printf "%s\n" "left as it is, with your own uncommitted changes: $p"; continue; fi; `
@@ -907,7 +921,7 @@ func recoveryCommands(tip, land string) []string {
 			` | xargs -0 sh -c 'test $# -gt 0 || exit 0; for p do ` + own + restore + ` || exit 255; done' sh`
 	}
 	return []string{
-		step("A", `git update-index --force-remove -- "$p" || exit 255; if { test -L "$p" || test -f "$p"; } && test -n "$(git --literal-pathspecs ls-files -o -- "$p")"; then rm -f -- "$p"; fi`),
+		step("A", `git update-index --force-remove -- "$p" || exit 255; if { test -L "$p" || test -f "$p"; } && test -n "$(git --literal-pathspecs ls-files -o --exclude-standard -- "$p")"; then rm -f -- "$p"; fi`),
 		step("DMT", `git --literal-pathspecs checkout --no-overlay `+tip+` -- "$p"`),
 		top + "git merge --ff-only " + land,
 	}

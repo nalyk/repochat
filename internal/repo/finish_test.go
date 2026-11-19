@@ -1565,3 +1565,90 @@ func TestFinishDoesNotReplaceAnIgnoredFileThatAppearsLate(t *testing.T) {
 		t.Fatalf("Finish: %v", err)
 	}
 }
+
+// F2: git refuses the fast-forward by itself, cleanly, because the owner
+// edited one of the merge's files after the last check. Nothing was written,
+// so the answer is the refusal, never the recovery commands: "go back" would
+// overwrite that very edit.
+func TestCleanGitRefusalIsNeverReportedAsPartlyUpdated(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	info := c.info(t)
+	tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+	c.s.beforeOwnerMerge = func() {
+		write(t, c.f.dir, "a.txt", "owner's late edit\n")
+		write(t, c.f.dir, "b.txt", "owner's other late edit\n")
+	}
+	_, err := c.s.Finish(bg, false, "")
+	if err == nil {
+		t.Fatal("Finish succeeded over the owner's edit")
+	}
+	t.Logf("refused: %v", err)
+	mustContain(t, err.Error(), "finish refused", "a.txt", "nothing was changed")
+	mustNotContain(t, err.Error(), "partly updated", "checkout --no-overlay", "`")
+	if got := mustRead(t, filepath.Join(c.f.dir, "a.txt")); got != "owner's late edit\n" {
+		t.Errorf("the owner's a.txt = %q", got)
+	}
+	if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != tip {
+		t.Errorf("main moved to %s", got)
+	}
+	if now := c.info(t); now.Head != info.Head || !exists(info.Workspace) {
+		t.Errorf("the session was not kept: %+v", now)
+	}
+}
+
+// T8(c): the partly-updated message says what "go back" does to an edit made
+// while the merge ran, and promises nothing it cannot keep.
+func TestPartlyUpdatedMessageWarnsAboutEditsMadeDuringTheMerge(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	lock := filepath.Join(c.f.dir, ".git", "index.lock")
+	c.s.beforeOwnerMerge = func() { write(t, c.f.dir, ".git/index.lock", "") }
+	_, err := c.s.Finish(bg, false, "")
+	os.Remove(lock)
+	if err == nil {
+		t.Fatal("Finish succeeded")
+	}
+	mustContain(t, err.Error(), "partly updated", "edited by hand while the merge ran", "overwrites that edit", "save a copy first")
+	mustNotContain(t, err.Error(), "is all they undo", "Other uncommitted changes are kept")
+}
+
+// T8(b): going back never deletes a file git ignores, even at a path the
+// landed commit adds: it may be the owner's own.
+func TestGoingBackNeverDeletesAnIgnoredFile(t *testing.T) {
+	dir := newDir(t)
+	gitCmd(t, dir, "config", "user.name", "Ada")
+	gitCmd(t, dir, "config", "user.email", "ada@example.com")
+	write(t, dir, ".gitignore", "build/\n*.log\n")
+	write(t, dir, "a.txt", "a\n")
+	tip := commit(t, dir, "tip")
+	gitCmd(t, dir, "checkout", "-q", "-b", "work")
+	write(t, dir, "a.txt", "A\n")
+	write(t, dir, "plain.txt", "p\n")
+	write(t, dir, "build/out.txt", "landed\n")
+	write(t, dir, "run.log", "landed\n")
+	gitCmd(t, dir, "add", "-f", "build/out.txt", "run.log")
+	land := commit(t, dir, "land")
+	gitCmd(t, dir, "checkout", "-q", "main")
+	// git was cut off after writing a.txt and plain.txt; the ignored files at
+	// the paths the commit adds are the owner's own.
+	write(t, dir, "a.txt", "A\n")
+	write(t, dir, "plain.txt", "p\n")
+	write(t, dir, "build/out.txt", "owner's ignored\n")
+	write(t, dir, "run.log", "owner's ignored\n")
+	cmds := recoveryCommands(tip, land)
+	for _, line := range cmds[:len(cmds)-1] {
+		shCmd(t, dir, line)
+	}
+	for _, p := range []string{"build/out.txt", "run.log"} {
+		if got, _ := os.ReadFile(filepath.Join(dir, p)); string(got) != "owner's ignored\n" {
+			t.Errorf("the owner's ignored %s is now %q", p, got)
+		}
+	}
+	if exists(filepath.Join(dir, "plain.txt")) || mustRead(t, filepath.Join(dir, "a.txt")) != "a\n" {
+		t.Error("the merge's own writing was not undone")
+	}
+	if got := gitCmd(t, dir, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("status after going back:\n%s", got)
+	}
+}
