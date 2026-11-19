@@ -137,36 +137,13 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 
 	s := &Snapshot{Withheld: map[string]int{}, index: map[string]int{}}
 
-	// .repochatignore is read through the same no-follow path as every file.
-	ignoreText := ""
-	op := r.newOpener()
-	data, _, truncated, err := op.ReadAll(ignoreFileName, 256<<10)
-	op.Close()
-	switch {
-	case err == nil && truncated:
-		return nil, errors.New(".repochatignore is larger than 256 KB; refusing to guess at the policy")
-	case err == nil:
-		ignoreText = string(data)
-	case errors.Is(err, os.ErrNotExist):
-	default:
-		return nil, fmt.Errorf("cannot read .repochatignore (%v); refusing to run without the policy it defines", describeErr(ignoreFileName, err))
-	}
-	if s.Policy, err = NewPolicy(ignoreText, r.deny, r.allow); err != nil {
+	ignoreText, err := r.readIgnoreFile(ctx)
+	if err != nil {
 		return nil, err
 	}
-	if r.Opts.ExtraIgnoreFile != "" {
-		extra, found, err := readExtraIgnore(r.Opts.ExtraIgnoreFile)
-		if err != nil {
-			return nil, err
-		}
-		if found {
-			if err := s.Policy.AddIgnore(extra); err != nil {
-				return nil, err
-			}
-		}
+	if s.Policy, err = r.newPolicy(ignoreText); err != nil {
+		return nil, err
 	}
-	s.Policy.own = r.own
-	s.Policy.hash += "+" + strings.Join(r.own, "|")
 	// The answers git gave for these rules are kept from one snapshot to the
 	// next; new rules start with none.
 	r.mu.Lock()
@@ -264,6 +241,91 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	s.Generation = hex.EncodeToString(h.Sum(nil))[:12]
 	return s, nil
+}
+
+const maxIgnoreFile = 256 << 10
+
+// readIgnoreFile returns the text of the served tree's .repochatignore, ""
+// when there is none. It is read through the same no-follow path as every
+// file; a session workspace reads it from its index instead (see
+// ignoreFromIndex), because the file can be one the policy keeps out of the
+// workspace while its rules must still apply there.
+func (r *Repo) readIgnoreFile(ctx context.Context) (string, error) {
+	if r.ignoreFromIndex {
+		out, err := r.git(ctx, 64<<10, "ls-files", "-s", "-z", "--", ignoreFileName)
+		if err != nil {
+			return "", fmt.Errorf("cannot read .repochatignore: %w", err)
+		}
+		recs := bytes.Split(bytes.TrimSuffix(out, []byte{0}), []byte{0})
+		if len(out) == 0 {
+			return "", nil
+		}
+		if len(recs) != 1 {
+			return "", errors.New(".repochatignore has unresolved merge conflicts; refusing to guess at the policy")
+		}
+		meta, path, _ := strings.Cut(string(recs[0]), "\t")
+		f := strings.Fields(meta)
+		if path != ignoreFileName || len(f) != 3 || f[2] != "0" {
+			return "", errors.New("unexpected output from git ls-files; refusing to guess at the policy")
+		}
+		return r.ignoreBlob(ctx, f[0], f[1])
+	}
+	op := r.newOpener()
+	data, _, truncated, err := op.ReadAll(ignoreFileName, maxIgnoreFile)
+	op.Close()
+	switch {
+	case err == nil && truncated:
+		return "", errors.New(".repochatignore is larger than 256 KB; refusing to guess at the policy")
+	case err == nil:
+		return string(data), nil
+	case errors.Is(err, os.ErrNotExist):
+		return "", nil
+	default:
+		return "", fmt.Errorf("cannot read .repochatignore (%v); refusing to run without the policy it defines", describeErr(ignoreFileName, err))
+	}
+}
+
+// ignoreBlob returns the content of the .repochatignore that git records
+// with the given mode and object id. Anything but a regular file fails, as a
+// symbolic link in the working tree does.
+func (r *Repo) ignoreBlob(ctx context.Context, mode, oid string) (string, error) {
+	if mode != "100644" && mode != "100755" {
+		return "", fmt.Errorf(".repochatignore %v; refusing to run without the policy it defines", errNotRegular)
+	}
+	out, truncated, code, err := r.gitRaw(ctx, maxIgnoreFile, "cat-file", "blob", oid)
+	switch {
+	case err != nil:
+		return "", err
+	case code != 0:
+		return "", r.gitFailure("cat-file", out)
+	case truncated:
+		return "", errors.New(".repochatignore is larger than 256 KB; refusing to guess at the policy")
+	}
+	return string(out), nil
+}
+
+// newPolicy builds the policy of this run around the given .repochatignore
+// text: the --deny and --allow patterns, the second rules file, and the
+// program's own directories.
+func (r *Repo) newPolicy(ignoreText string) (*Policy, error) {
+	p, err := NewPolicy(ignoreText, r.deny, r.allow)
+	if err != nil {
+		return nil, err
+	}
+	if r.Opts.ExtraIgnoreFile != "" {
+		extra, found, err := readExtraIgnore(r.Opts.ExtraIgnoreFile)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if err := p.AddIgnore(extra); err != nil {
+				return nil, err
+			}
+		}
+	}
+	p.own = r.own
+	p.hash += "+" + strings.Join(r.own, "|")
+	return p, nil
 }
 
 // adoptOracle keeps the oracle *kept while *fresh asks about the same rules,

@@ -39,7 +39,7 @@ Dacă lucrezi deja doar în Codex sau în Claude Code și nu dai niciodată de l
 
 ### 1. Instalare
 
-Din surse (Go 1.24+ și git 2.25+):
+Din surse (Go 1.25+ și git 2.25+):
 
 ```bash
 git clone https://github.com/nalyk/repochat.git

@@ -1,4 +1,4 @@
-# RepoChat — build, test and release targets. Requires Go 1.24+ and git.
+# RepoChat — build, test and release targets. Requires Go 1.25+ and git.
 
 VERSION ?= $(shell git describe --tags --always --dirty 2>/dev/null || echo dev)
 COMMIT  ?= $(shell git rev-parse --short HEAD 2>/dev/null)

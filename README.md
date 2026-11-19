@@ -39,7 +39,7 @@ If you already live in Codex or Claude Code and never hit a limit, you probably 
 
 ### 1. Install
 
-From source (Go 1.24+ and git 2.25+):
+From source (Go 1.25+ and git 2.25+):
 
 ```bash
 git clone https://github.com/nalyk/repochat.git

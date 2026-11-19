@@ -90,6 +90,10 @@ type Repo struct {
 	oracle   *ignoreOracle // git's answers about .repochatignore, kept while the rules stay the same
 	extra    *ignoreOracle // the same for Options.ExtraIgnoreFile
 	version  [3]int
+	// Set once, before first use, for a session workspace (see Sessions):
+	// options every git command carries, and where .repochatignore is read.
+	extraPre        []string
+	ignoreFromIndex bool
 
 	mu         sync.Mutex
 	snap       *Snapshot
@@ -631,7 +635,7 @@ func (r *Repo) gitPre() []string {
 	r.mu.Lock()
 	pre = append(pre, r.filterArgs...)
 	r.mu.Unlock()
-	return pre
+	return append(pre, r.extraPre...)
 }
 
 // gitRaw runs a git command in this repository (see runGit for the contract).
