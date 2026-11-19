@@ -636,7 +636,12 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 	}
 	snap, err := r.Snapshot(ctx)
 	if err != nil {
-		return nil, err
+		if ctx.Err() != nil {
+			return nil, err
+		}
+		// Without the list of files and the policy nothing is known to be
+		// allowed: the change set is refused like any other it cannot vouch for.
+		return nil, refusal("", "the session's files and the repository owner's policy could not be read for these paths (%s: %v)", ReasonUncertain, err)
 	}
 	op := r.newOpener()
 	defer op.Close()
