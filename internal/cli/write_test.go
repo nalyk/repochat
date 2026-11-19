@@ -301,6 +301,13 @@ func TestSessionCommandShowsAndFinishes(t *testing.T) {
 	if raw, err := os.ReadFile(filepath.Join(e.repo, "notes.md")); err != nil || !strings.Contains(string(raw), "xyzzy") {
 		t.Errorf("the merged file is not in the checkout: %v", err)
 	}
+	// The merge made in the terminal is recorded with its files.
+	st, _ := stateDir()
+	log, _ := os.ReadFile(filepath.Join(st, auditFile))
+	wantIn(t, string(log), `merged into main in the terminal`, `1 file(s) changed: notes.md"`, `"paths":["notes.md"]`)
+	if strings.Contains(string(log), "xyzzy") {
+		t.Errorf("the activity log holds what was written:\n%s", log)
+	}
 	if out, _, code := runCLI("session", "--root", e.repo); code != 0 || !strings.Contains(out, "No session is open") {
 		t.Errorf("session after finish: %d %s", code, out)
 	}
@@ -362,8 +369,13 @@ func TestWritesAreRecordedWithoutContent(t *testing.T) {
 		return false
 	})
 	wantIn(t, line, `"checkpoint":"`+cp[1]+`"`, `"files":1`, `"added":1`, `"note":"applied checkpoint`)
+	// F10: the record names the files (the spec's "the checkpoint, the files
+	// and the line counts"), in the note and as a list; never what was
+	// written into them.
+	wantIn(t, line, `"paths":["notes.md"]`, `lines: notes.md"`)
+	wantIn(t, errb.String(), "1 file(s), +1 -0 lines: notes.md")
 	raw, _ := os.ReadFile(filepath.Join(st, auditFile))
-	if strings.Contains(string(raw), "xyzzy") || strings.Contains(string(raw), "notes.md") {
+	if strings.Contains(string(raw), "xyzzy") {
 		t.Errorf("the activity log holds what was written:\n%s", raw)
 	}
 	if out, _, _ := runCLI("log"); !strings.Contains(out, "applied checkpoint "+cp[1]) {
@@ -628,6 +640,9 @@ func TestNotesFromRealToolResults(t *testing.T) {
 	if n.Checkpoint == "" || n.Files != 1 || n.Added != 2 || n.Removed != 0 {
 		t.Errorf("apply: %+v", n)
 	}
+	if strings.Join(n.Paths, ",") != "a.txt" || n.More != 0 || !strings.HasSuffix(n.Note, "lines: a.txt") {
+		t.Errorf("apply does not name its file: %+v", n)
+	}
 	cps, err := ss.Checkpoints(ctx)
 	if err != nil {
 		t.Fatal(err)
@@ -635,6 +650,9 @@ func TestNotesFromRealToolResults(t *testing.T) {
 	n = call("undo_to_checkpoint", mcp.Args{"checkpoint": cps[len(cps)-1].ID})
 	if n.Checkpoint == "" || n.Files != 1 || n.Added != 0 || n.Removed != 2 || !strings.HasPrefix(n.Note, "undo: checkpoint ") {
 		t.Errorf("undo: %+v", n)
+	}
+	if strings.Join(n.Paths, ",") != "a.txt" || !strings.HasSuffix(n.Note, ": a.txt") {
+		t.Errorf("undo does not name its file: %+v", n)
 	}
 	n = call("update_session", mcp.Args{})
 	if !strings.Contains(n.Note, "already up to date") {
@@ -647,12 +665,33 @@ func TestNotesFromRealToolResults(t *testing.T) {
 	if !strings.HasPrefix(n.Note, "updated from your branch") || n.Files != 1 || n.Added != 1 {
 		t.Errorf("update: %+v", n)
 	}
+	if strings.Join(n.Paths, ",") != "owner.txt" || !strings.HasSuffix(n.Note, ": owner.txt") {
+		t.Errorf("update does not name its file: %+v", n)
+	}
 	changes = json.RawMessage(`[{"op":"create","path":"build.sh","text":"echo hi\n"},{"op":"create","path":"b.txt","text":"b\n"}]`)
 	call("apply_changes", mcp.Args{"changes": changes})
 	n = call("finish_session", mcp.Args{})
 	if n.Files != 2 || n.Checkpoint != gitOut(t, dir, "rev-parse", "HEAD") || !strings.Contains(n.Note, "merged into main") ||
 		!strings.Contains(n.Note, "1 of them run on this machine later") {
 		t.Errorf("finish: %+v", n)
+	}
+	if strings.Join(n.Paths, ",") != "b.txt,build.sh" || !strings.Contains(n.Note, "2 file(s) changed: b.txt, build.sh") {
+		t.Errorf("finish does not name its files: %+v", n)
+	}
+
+	// More than twenty: the first twenty, then how many more. A withheld
+	// file is never among them.
+	call("start_session", mcp.Args{})
+	var ops []string
+	for i := 0; i < 23; i++ {
+		ops = append(ops, fmt.Sprintf(`{"op":"create","path":"many/f%02d.txt","text":"x\n"}`, i))
+	}
+	n = call("apply_changes", mcp.Args{"changes": json.RawMessage("[" + strings.Join(ops, ",") + "]")})
+	if len(n.Paths) != 20 || n.More != 3 || n.Paths[0] != "many/f00.txt" || n.Paths[19] != "many/f19.txt" || !strings.HasSuffix(n.Note, "many/f19.txt, +3 more") {
+		t.Errorf("an apply of 23 files: %d paths, %d more, note %q", len(n.Paths), n.More, n.Note)
+	}
+	if n = call("abandon_session", mcp.Args{"delete_branch": true}); len(n.Paths) != 0 {
+		t.Errorf("abandon names files: %+v", n)
 	}
 	call("start_session", mcp.Args{})
 	if n = call("abandon_session", mcp.Args{}); !strings.Contains(n.Note, "kept") {

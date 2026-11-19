@@ -471,6 +471,7 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 		m["session_state"] = "unknown"
 	}
 	footerList(m, "runs_later", fin.RunsLater)
+	footerList(m, "file_list", fin.Files) // "files" is their number here
 	return c.finish("finish_session", finishText(branch, fin, open, known), 0, m), nil
 }
 

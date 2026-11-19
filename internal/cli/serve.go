@@ -180,9 +180,7 @@ func (e *eventSink) notice(msg string) {
 
 // session reports what a write did.
 func (e *eventSink) session(n sessionNote) {
-	a := activityFrom(mcp.Event{Time: time.Now(), Kind: "session", Tool: n.Tool, Note: n.Note}, e.s, e.r)
-	a.Checkpoint, a.Files, a.Added, a.Removed = repo.SanitizeLine(n.Checkpoint), n.Files, n.Added, n.Removed
-	e.deliver(a)
+	e.deliver(sessionActivity(n, n.Tool, e.s, e.r))
 }
 
 // deliver sends one activity to the launcher, or prints it when there is

@@ -277,6 +277,45 @@ type sessionNote struct {
 	Files      int
 	Added      int
 	Removed    int
+	// Paths names the files of the write, at most maxNotePaths of them, and
+	// More counts the rest. They are paths the policy serves: the engine
+	// never reports a withheld one.
+	Paths []string
+	More  int
+}
+
+const (
+	maxNotePaths = 20  // files one note names
+	maxNotePath  = 120 // bytes of one of them
+)
+
+// notePaths prepares the names of a write's files for a note: the first
+// maxNotePaths, masked, on one line each and cut, with the number left out.
+// total is how many files there were when that is more than the list holds.
+func notePaths(files []string, total int, red *repo.Redactor) (paths []string, more int) {
+	total = max(total, len(files))
+	for i, f := range files {
+		if i == maxNotePaths {
+			break
+		}
+		if red != nil {
+			f, _ = red.Line(f)
+		}
+		paths = append(paths, clip(repo.SanitizeLine(f), maxNotePath))
+	}
+	return paths, total - len(paths)
+}
+
+// withPaths appends the files to a note's text: ": a.txt, b.txt, +3 more".
+func withPaths(note string, paths []string, more int) string {
+	if len(paths) == 0 {
+		return note
+	}
+	note += ": " + strings.Join(paths, ", ")
+	if more > 0 {
+		note += fmt.Sprintf(", +%d more", more)
+	}
+	return note
 }
 
 // Reply of finish_session with --confirm-merge.
@@ -399,8 +438,22 @@ func noteFor(tool string, m map[string]any, before *repo.SessionInfo) (sessionNo
 		return num("files")
 	}
 	n := sessionNote{Tool: tool}
+	// The footer's list of names (masked and escaped by the tools already),
+	// which a tight budget may have shortened: total says how many there were.
+	named := func(key string, total int) {
+		var list []string
+		if raw, ok := m[key].([]any); ok {
+			for _, v := range raw {
+				if p, ok := v.(string); ok {
+					list = append(list, p)
+				}
+			}
+		}
+		n.Paths, n.More = notePaths(list, total, nil)
+	}
 	counts := func() {
 		n.Checkpoint, n.Files, n.Added, n.Removed = str("checkpoint"), files(), num("added"), num("removed")
+		named("files", n.Files)
 	}
 	switch tool {
 	case "start_session":
@@ -411,16 +464,17 @@ func noteFor(tool string, m map[string]any, before *repo.SessionInfo) (sessionNo
 		n.Note = fmt.Sprintf("session %s: %s, from %s @ %s", verb, str("branch"), str("start_branch"), shortID(str("base")))
 	case "apply_changes":
 		counts()
-		n.Note = fmt.Sprintf("applied checkpoint %s: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed)
+		n.Note = withPaths(fmt.Sprintf("applied checkpoint %s: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
 	case "undo_to_checkpoint":
 		counts()
-		n.Note = fmt.Sprintf("undo: checkpoint %s restores earlier files: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed)
+		n.Note = withPaths(fmt.Sprintf("undo: checkpoint %s restores earlier files: %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
 	case "update_session":
 		counts()
 		if str("kind") == "update" {
-			n.Note = fmt.Sprintf("updated from your branch: checkpoint %s, %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed)
+			n.Note = withPaths(fmt.Sprintf("updated from your branch: checkpoint %s, %d file(s), +%d -%d lines", n.Checkpoint, n.Files, n.Added, n.Removed), n.Paths, n.More)
 		} else {
 			n.Note = fmt.Sprintf("update: already up to date (checkpoint %s)", n.Checkpoint)
+			n.Paths, n.More = nil, 0 // nothing was written
 		}
 	case "finish_session":
 		into := "your branch"
@@ -428,7 +482,8 @@ func noteFor(tool string, m map[string]any, before *repo.SessionInfo) (sessionNo
 			into = before.StartBranch
 		}
 		n.Checkpoint, n.Files = str("commit"), num("files")
-		n.Note = fmt.Sprintf("merged into %s: now at %s, %d file(s) changed", into, shortID(n.Checkpoint), n.Files)
+		named("file_list", n.Files)
+		n.Note = withPaths(fmt.Sprintf("merged into %s: now at %s, %d file(s) changed", into, shortID(n.Checkpoint), n.Files), n.Paths, n.More)
 		if later := num("runs_later_count"); later > 0 {
 			n.Note += fmt.Sprintf(" · %d of them run on this machine later: review before building", later)
 		} else if list, ok := m["runs_later"].([]any); ok && len(list) > 0 {
@@ -471,15 +526,29 @@ type activity struct {
 	Error      string         `json:"error,omitempty"`
 	Args       map[string]any `json:"args,omitempty"`
 	// A write (kind "session"): what it did, the checkpoint (or the merged
-	// commit) and the counts. Never content.
-	Note       string `json:"note,omitempty"`
-	Checkpoint string `json:"checkpoint,omitempty"`
-	Files      int    `json:"files,omitempty"`
-	Added      int    `json:"added,omitempty"`
-	Removed    int    `json:"removed,omitempty"`
+	// commit), the counts, and the names of its files (at most maxNotePaths,
+	// then how many more). Never content.
+	Note       string   `json:"note,omitempty"`
+	Checkpoint string   `json:"checkpoint,omitempty"`
+	Files      int      `json:"files,omitempty"`
+	Added      int      `json:"added,omitempty"`
+	Removed    int      `json:"removed,omitempty"`
+	Paths      []string `json:"paths,omitempty"`
+	PathsMore  int      `json:"paths_more,omitempty"`
 	// Summary is a short, masked, single-line rendering of the arguments for
 	// the live display. It is never written to the audit log.
 	Summary string `json:"summary,omitempty"`
+}
+
+// maxNoteBytes bounds a note: a sentence and the names of maxNotePaths files.
+const maxNoteBytes = 400 + maxNotePaths*(maxNotePath+2)
+
+// sessionActivity is the activity record of a write.
+func sessionActivity(n sessionNote, tool string, s *session, r *repo.Repo) activity {
+	a := activityFrom(mcp.Event{Time: time.Now(), Kind: "session", Tool: tool, Note: n.Note}, s, r)
+	a.Checkpoint, a.Files, a.Added, a.Removed = repo.SanitizeLine(n.Checkpoint), n.Files, n.Added, n.Removed
+	a.Paths, a.PathsMore = notePaths(n.Paths, len(n.Paths)+n.More, r.Redactor())
+	return a
 }
 
 func activityFrom(e mcp.Event, s *session, r *repo.Repo) activity {
@@ -494,7 +563,7 @@ func activityFrom(e mcp.Event, s *session, r *repo.Repo) activity {
 	}
 	if e.Note != "" {
 		msg, _ := r.Redactor().Line(e.Note)
-		a.Note = clip(repo.SanitizeLine(msg), 300)
+		a.Note = clip(repo.SanitizeLine(msg), maxNoteBytes)
 	}
 	if e.Kind == "call" {
 		a.Summary = summarizeArgs(e.Args, r.Redactor())

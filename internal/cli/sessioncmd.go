@@ -5,9 +5,7 @@ import (
 	"flag"
 	"fmt"
 	"strings"
-	"time"
 
-	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 )
 
@@ -173,11 +171,12 @@ func cmdSession(c *console, args []string) int {
 		c.say("  Files changed:")
 		listLines(c, fin.Files)
 	}
-	note := fmt.Sprintf("merged into %s in the terminal: now at %s, %d file(s) changed", into, shortID(fin.Commit), len(fin.Files))
+	paths, more := notePaths(fin.Files, len(fin.Files), r.Redactor())
+	note := withPaths(fmt.Sprintf("merged into %s in the terminal: now at %s, %d file(s) changed", into, shortID(fin.Commit), len(fin.Files)), paths, more)
 	if len(warnings) > 0 {
 		note += " · WARNING: the merge did not end cleanly"
 	}
-	record(sessionNote{Note: note, Checkpoint: fin.Commit, Files: len(fin.Files)})
+	record(sessionNote{Note: note, Checkpoint: fin.Commit, Files: len(fin.Files), Paths: paths, More: more})
 	return 0
 }
 
@@ -232,8 +231,7 @@ func terminalRecorder(c *console, s *session, r *repo.Repo, tool string) func(se
 		s.ID = newID()
 	}
 	return func(n sessionNote) {
-		a := activityFrom(mcp.Event{Time: time.Now(), Kind: "session", Tool: orDefault(n.Tool, tool), Note: n.Note}, s, r)
-		a.Checkpoint, a.Files, a.Added, a.Removed = repo.SanitizeLine(n.Checkpoint), n.Files, n.Added, n.Removed
+		a := sessionActivity(n, orDefault(n.Tool, tool), s, r)
 		log, err := openAudit()
 		if err == nil {
 			err = log.write(a)
