@@ -187,6 +187,7 @@ func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, m
 	if rec == nil {
 		return nil, ErrNoSession
 	}
+	s.freshPolicy()
 	if sp != nil {
 		if sp.session != rec.ID {
 			return nil, refusal("", "the plan belongs to an earlier session; propose the change set again")

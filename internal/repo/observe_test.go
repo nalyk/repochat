@@ -125,6 +125,15 @@ func TestEachServerSyncsTheWorkspaceToItsOwnPolicy(t *testing.T) {
 		return rec
 	}
 
+	digest := func(s *Sessions) string {
+		rec := record()
+		d, err := s.optionsDigest(bg, &rec)
+		if err != nil {
+			t.Fatal(err)
+		}
+		return d
+	}
+
 	if _, err := a.Serve(bg); err != nil || exists(secret) {
 		t.Fatalf("A: %v, secret on disk: %v", err, exists(secret))
 	}
@@ -135,14 +144,14 @@ func TestEachServerSyncsTheWorkspaceToItsOwnPolicy(t *testing.T) {
 	if _, err := b.Serve(bg); err != nil || !exists(secret) {
 		t.Fatalf("B: %v, secret on disk: %v", err, exists(secret))
 	}
-	if got := record().SyncedWith; got == "" || got != b.optionsDigest() || got == a.optionsDigest() {
-		t.Errorf("the record's digest is %q, want B's %q", got, b.optionsDigest())
+	if got := record().SyncedWith; got == "" || got != digest(b) || got == digest(a) {
+		t.Errorf("the record's digest is %q, want B's %q", got, digest(b))
 	}
 	if _, err := a.Serve(bg); err != nil || exists(secret) {
 		t.Fatalf("A again: %v, secret on disk: %v", err, exists(secret))
 	}
-	if got := record().SyncedWith; got != a.optionsDigest() {
-		t.Errorf("the record's digest is %q, want A's %q", got, a.optionsDigest())
+	if got := record().SyncedWith; got != digest(a) {
+		t.Errorf("the record's digest is %q, want A's %q", got, digest(a))
 	}
 	if _, err := a.Apply(bg, plan.ID, nil, "m"); err == nil || !strings.Contains(err.Error(), "unknown or has expired") {
 		t.Errorf("A's plan survived a re-sync: %v", err)

@@ -337,7 +337,6 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		Base:        base,
 		Created:     time.Now().UTC().Truncate(time.Second),
 		AnchorKey:   base64.StdEncoding.EncodeToString(key),
-		SyncedWith:  s.optionsDigest(),
 	}
 	rec.Branch = "repochat/" + time.Now().Format("2006-01-02") + "-" + rec.ID
 	rec.Workspace = filepath.Join(s.dir, rec.ID, "w")
@@ -368,6 +367,11 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		return nil, err
 	}
 	s.ws, s.rec = ws, rec
+	// The digest of what the sync below works from, taken before it: a rule
+	// that changes while it runs is then seen by the next call.
+	if rec.SyncedWith, err = s.optionsDigest(ctx, rec); err != nil {
+		return nil, err
+	}
 	if err := s.sync(ctx); err != nil {
 		return nil, err
 	}
@@ -380,8 +384,9 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 
 // ensure makes the open workspace match session.json: none when there is no
 // session, and otherwise the recorded one, resumed if this process has not
-// opened it yet, and synced with this process's exposure options when the
-// record says it was last synced with others. An observer only checks that
+// opened it yet, and synced with this process's exposure options and the
+// rules files as they are now when the record says it was last synced with
+// others (see optionsDigest). An observer only checks that
 // the workspace and the branch are there. The caller holds the locks.
 func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 	rec, err := s.readRecord()
@@ -401,7 +406,11 @@ func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 		}
 		return rec, nil
 	}
-	mine := s.optionsDigest()
+	mine, err := s.optionsDigest(ctx, rec)
+	if err != nil {
+		s.closeWorkspace()
+		return nil, err
+	}
 	// The open handle outlives its directory. A workspace removed behind
 	// this process's back goes through resume like after a restart, which
 	// reports it missing.
@@ -436,6 +445,18 @@ func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 	}
 	s.rec = rec
 	return rec, nil
+}
+
+// freshPolicy makes the next look at the workspace build its file list and
+// policy anew, rules files re-read, instead of using a snapshot of a few
+// seconds ago: whatever validates a write judges it by the rules as they
+// are now. The caller holds the locks.
+func (s *Sessions) freshPolicy() {
+	if ws := s.ws; ws != nil {
+		ws.mu.Lock()
+		ws.snap = nil
+		ws.mu.Unlock()
+	}
 }
 
 // missing is the error for a session whose workspace or branch is gone.
@@ -907,19 +928,41 @@ func (s *Sessions) ownPrefixes(extra []string) []string {
 	return out
 }
 
-// optionsDigest identifies the exposure options that decide which files
-// sync leaves out of the workspace. The record keeps the digest of the
-// options the workspace was last synced with.
-func (s *Sessions) optionsDigest() string {
+// optionsDigest identifies everything that decides which files sync leaves
+// out of the workspace: the exposure options of this run, the content of the
+// owner's .repochatignore as it is on disk now, and the .repochatignore the
+// session branch holds. The record keeps the digest the workspace was last
+// synced with, so a change to any of them, an edit of the owner's rules file
+// while a server runs among them, brings the workspace in line at the next
+// call. What cannot be read makes a digest of its own: the sync that follows
+// then fails on it, closed.
+func (s *Sessions) optionsDigest(ctx context.Context, rec *sessionRecord) (string, error) {
 	o := s.opts.Repo
+	ownerRules := "absent"
+	switch text, found, err := readExtraIgnore(filepath.Join(s.owner.Root, ownerIgnore)); {
+	case err != nil:
+		ownerRules = "unreadable"
+	case found:
+		sum := sha256.Sum256([]byte(text))
+		ownerRules = hex.EncodeToString(sum[:])
+	}
+	// The blob the session branch has at .repochatignore, "" for none.
+	sessionRules, code, err := s.owner.gitText(ctx, "rev-parse", "--verify", "-q", "refs/heads/"+rec.Branch+":"+ignoreFileName)
+	if err != nil {
+		return "", err
+	}
+	if code != 0 {
+		sessionRules = ""
+	}
 	raw, _ := json.Marshal(struct {
-		TrackedOnly        bool
-		Allow, Deny, Own   []string
-		ExtraIgnore, Owner string
-		OwnPrefixes        []string
-	}{o.TrackedOnly, o.Allow, o.Deny, o.Own, filepath.Join(s.owner.Root, ownerIgnore), s.owner.Root, s.ownPrefixes(nil)})
+		TrackedOnly              bool
+		Allow, Deny, Own         []string
+		ExtraIgnore, Owner       string
+		OwnPrefixes              []string
+		OwnerRules, SessionRules string
+	}{o.TrackedOnly, o.Allow, o.Deny, o.Own, filepath.Join(s.owner.Root, ownerIgnore), s.owner.Root, s.ownPrefixes(nil), ownerRules, sessionRules})
 	sum := sha256.Sum256(raw)
-	return hex.EncodeToString(sum[:])
+	return hex.EncodeToString(sum[:]), nil
 }
 
 // sameSession reports whether two records describe the same session in the

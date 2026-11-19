@@ -334,6 +334,7 @@ func (s *Sessions) Propose(ctx context.Context, changes []Change) (*Plan, error)
 	if rec == nil {
 		return nil, ErrNoSession
 	}
+	s.freshPolicy()
 	plan, err := s.ws.planChanges(ctx, changes)
 	if err != nil {
 		return nil, err

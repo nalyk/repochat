@@ -762,3 +762,92 @@ func TestSparseEscape(t *testing.T) {
 		}
 	}
 }
+
+// C4: the owner adds a rule to .repochatignore, uncommitted, while a server
+// runs. The next call takes the newly withheld file out of the workspace,
+// and no write reaches it, not even right after a read that cached the
+// earlier policy.
+func TestOwnerIgnoreEditedWhileServingIsAppliedAtOnce(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"notes.txt": "hello\nworld\n", "open.txt": "fine\n"}, nil)
+	ws := c.ws.Root
+	anchor := c.anchor(t, "notes.txt", 1) // a read: the snapshot is cached now
+	plan := c.accept(t, Change{Op: "replace", Path: "notes.txt", From: anchor, Text: "HELLO"})
+	head := c.head(t)
+
+	write(t, c.f.dir, ".repochatignore", "notes.txt\n")
+
+	// The write half: within the snapshot's lifetime, directly and by plan.
+	for _, try := range []struct {
+		name  string
+		apply func() error
+	}{
+		{"direct", func() error {
+			_, err := c.s.Apply(bg, "", []Change{{Op: "replace", Path: "notes.txt", From: anchor, Text: "HELLO"}}, "")
+			return err
+		}},
+		{"plan", func() error { _, err := c.s.Apply(bg, plan.ID, nil, ""); return err }},
+		{"propose", func() error {
+			_, err := c.s.Propose(bg, []Change{{Op: "insert", Path: "notes.txt", At: "end", Text: "x"}})
+			return err
+		}},
+		{"move onto it", func() error {
+			_, err := c.s.Apply(bg, "", []Change{{Op: "move", Path: "open.txt", ToPath: "notes.txt"}}, "")
+			return err
+		}},
+	} {
+		if err := try.apply(); err == nil {
+			t.Errorf("%s: a change to the newly withheld notes.txt was accepted", try.name)
+		} else {
+			t.Logf("%s refused: %v", try.name, err)
+		}
+	}
+	if got := c.head(t); got != head {
+		t.Errorf("the session branch moved to %s", got)
+	}
+	if got := gitCmd(t, ws, "show", "HEAD:notes.txt"); got != "hello\nworld" {
+		t.Errorf("notes.txt at the session's head = %q", got)
+	}
+
+	// The on-disk half: the file is gone from the workspace, and unreadable.
+	if exists(filepath.Join(ws, "notes.txt")) {
+		t.Error("notes.txt is still in the workspace")
+	}
+	if !exists(filepath.Join(ws, "open.txt")) {
+		t.Error("open.txt left the workspace")
+	}
+	now, err := c.s.Serve(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := now.ReadFile(bg, "notes.txt", 1, 10, "", 1<<20); err == nil || !strings.Contains(err.Error(), "withheld") {
+		t.Errorf("read notes.txt: %v", err)
+	}
+	if got := gitCmd(t, ws, "status", "--porcelain"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+
+	// The rule goes again: the file comes back.
+	if err := os.Remove(filepath.Join(c.f.dir, ".repochatignore")); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.s.Start(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, filepath.Join(ws, "notes.txt")); got != "hello\nworld\n" {
+		t.Errorf("notes.txt after the rule went: %q", got)
+	}
+}
+
+// The same with only a resume in between (Codex's call: start_session again
+// in the same server process).
+func TestOwnerIgnoreEditedWhileServingResyncsOnStart(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"notes.txt": "hello\n"}, nil)
+	c.anchor(t, "notes.txt", 1)
+	write(t, c.f.dir, ".repochatignore", "notes.txt\n")
+	if _, err := c.s.Start(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	if exists(filepath.Join(c.ws.Root, "notes.txt")) {
+		t.Error("notes.txt is still in the workspace after the resume")
+	}
+}

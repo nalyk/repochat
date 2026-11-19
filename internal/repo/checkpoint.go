@@ -274,6 +274,7 @@ func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
 	if rec == nil {
 		return nil, ErrNoSession
 	}
+	s.freshPolicy()
 	ws := s.ws
 	head, chain, err := s.chain(ctx, rec)
 	if err != nil {
