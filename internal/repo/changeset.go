@@ -312,6 +312,9 @@ type PlannedFile struct {
 // returns its plan, which is kept for Apply (see storePlan). It writes
 // nothing to the workspace.
 func (s *Sessions) Propose(ctx context.Context, changes []Change) (*Plan, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err

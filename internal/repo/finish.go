@@ -76,7 +76,7 @@ func (s *Sessions) Status(ctx context.Context) (*SessionStatus, error) {
 	if err != nil {
 		return nil, err
 	}
-	files, later, _, err := s.changedFiles(ctx, tip, head)
+	files, later, _, err := s.changedFiles(ctx, rec, tip, head)
 	if err != nil {
 		return nil, err
 	}
@@ -131,12 +131,12 @@ func (r *Repo) isAncestor(ctx context.Context, a, b string) (bool, error) {
 // changedFiles lists the paths that differ between two commits, without
 // those the policy withholds (only counted), and among them the ones that
 // get executed on the owner's machine later.
-func (s *Sessions) changedFiles(ctx context.Context, from, to string) (files, later []string, withheld int, err error) {
-	diff, err := s.ws.treeDiff(ctx, from, to)
+func (s *Sessions) changedFiles(ctx context.Context, rec *sessionRecord, from, to string) (files, later []string, withheld int, err error) {
+	diff, err := s.reader().treeDiff(ctx, from, to)
 	if err != nil {
 		return nil, nil, 0, err
 	}
-	pol, err := s.ws.Policy(ctx)
+	pol, err := s.policy(ctx, rec)
 	if err != nil {
 		return nil, nil, 0, err
 	}
@@ -172,6 +172,9 @@ func (s *Sessions) changedFiles(ctx context.Context, from, to string) (files, la
 // of kind update, when it has commits the session lacks. A conflict, or any
 // other failure, abandons the merge and leaves the session as it was.
 func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err
@@ -576,7 +579,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	} else if !ok {
 		return nil, moved
 	}
-	files, later, withheld, err := s.changedFiles(ctx, tip, head)
+	files, later, withheld, err := s.changedFiles(ctx, rec, tip, head)
 	if err != nil {
 		return nil, err
 	}
@@ -913,7 +916,7 @@ func (s *Sessions) mergeRefusal(ctx context.Context, rec *sessionRecord, stderr 
 	}
 	hidden := 0
 	var shown []string
-	if pol, err := s.ws.Policy(ctx); err == nil {
+	if pol, err := s.policy(ctx, rec); err == nil {
 		_ = pol.Prime(ctx, paths)
 		for _, p := range paths {
 			if pol.Check(p) != "" {

@@ -3,6 +3,7 @@ package cli
 import (
 	"bufio"
 	"bytes"
+	"context"
 	"encoding/json"
 	"fmt"
 	"io"
@@ -13,6 +14,10 @@ import (
 	"strings"
 	"testing"
 	"time"
+
+	"github.com/nalyk/repochat/internal/mcp"
+	"github.com/nalyk/repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/tools"
 )
 
 // driveFromFiles is the stand-in tunnel-client's "drive" mode: it sends the
@@ -471,4 +476,190 @@ func TestPlainMCPWriteStartsASession(t *testing.T) {
 		t.Errorf("--new-session: %q then %q", first, second)
 	}
 	wantIn(t, errText, "session", "The previous session's branch "+first+" is kept")
+}
+
+func sessionWorkspaces(t *testing.T) []string {
+	t.Helper()
+	st, _ := stateDir()
+	found, _ := filepath.Glob(filepath.Join(st, "sessions", "*", "*", "w"))
+	return found
+}
+
+// `repochat session` only looks: it never brings the workspace in line with
+// options other than those of the process that serves it.
+func TestSessionCommandLeavesWithheldFilesOut(t *testing.T) {
+	e := setup(t, "")
+	saveProfile(t, testKey)
+	os.WriteFile(filepath.Join(e.repo, "plans.txt"), []byte("not for the model\n"), 0o644)
+	gitRun(t, e.repo, "add", "plans.txt")
+	gitRun(t, e.repo, "commit", "-q", "-m", "plans")
+	_, _, done := start("--root", e.repo, "--write", "--deny", "plans.txt")
+	defer func() { runCLI("stop"); <-done }()
+	waitFor(t, "the stand-in's requests to be served", func() bool { return e.readRecord().Responses["read"] != "" })
+	ws := sessionWorkspaces(t)
+	if len(ws) != 1 {
+		t.Fatalf("workspaces: %v", ws)
+	}
+	plans := filepath.Join(ws[0], "plans.txt")
+	if _, err := os.Lstat(plans); err == nil {
+		t.Fatal("the withheld file is in the workspace while serving")
+	}
+	if out, errText, code := runCLI("session", "--root", e.repo); code != 0 || !strings.Contains(out, "checkpoints  0") {
+		t.Fatalf("session: %d %s %s", code, out, errText)
+	}
+	if _, err := os.Lstat(plans); err == nil {
+		t.Error("`repochat session` put the withheld file into the workspace")
+	}
+}
+
+// The start (or resumption) of a session, and what the engine says about
+// it, are in the activity log.
+func TestSessionStartsAreRecorded(t *testing.T) {
+	e := setup(t, "")
+	saveProfile(t, testKey)
+	run := func(args ...string) {
+		t.Helper()
+		os.Remove(e.record)
+		_, _, done := start(append([]string{"--root", e.repo, "--write"}, args...)...)
+		waitFor(t, "the stand-in's requests to be served", func() bool { return e.readRecord().Responses["read"] != "" })
+		runCLI("stop")
+		<-done
+	}
+	run()
+	out, _, _ := runCLI("log")
+	wantIn(t, out, "session started: repochat/", "from main @ ")
+	first := regexp.MustCompile(`repochat/\d{4}-\d{2}-\d{2}-[0-9a-f]{8}`).FindString(out)
+	run()
+	out, _, _ = runCLI("log")
+	wantIn(t, out, "session resumed: "+first)
+	run("--new-session")
+	out, _, _ = runCLI("log")
+	wantIn(t, out, "The previous session's branch "+first+" is kept")
+	if strings.Count(out, "session started: ") != 2 {
+		t.Errorf("want two starts in the log:\n%s", out)
+	}
+}
+
+// --quiet hides the tool calls, not what the writes did.
+func TestQuietStillShowsAndRecordsWrites(t *testing.T) {
+	_, d, errb, _ := startWriting(t, "--quiet")
+	if text, isErr := d.call("apply_changes", createNotes); isErr {
+		t.Fatalf("apply_changes: %s", text)
+	}
+	waitFor(t, "the apply in the activity display", func() bool { return strings.Contains(errb.String(), "applied checkpoint") })
+	if strings.Contains(errb.String(), "read_file") {
+		t.Error("--quiet must still hide tool calls")
+	}
+	st, _ := stateDir()
+	waitFor(t, "the apply in the activity log", func() bool {
+		raw, _ := os.ReadFile(filepath.Join(st, auditFile))
+		return strings.Contains(string(raw), `"note":"applied checkpoint`)
+	})
+}
+
+// A workspace that has gone is reported, and abandoning still cleans up.
+func TestAbandonReportsABrokenSession(t *testing.T) {
+	e := setup(t, "")
+	if _, errText, code := runCLI("call", "--root", e.repo, "--write", "start_session"); code != 0 {
+		t.Fatalf("start_session: %s", errText)
+	}
+	ws := sessionWorkspaces(t)
+	if len(ws) != 1 {
+		t.Fatalf("workspaces: %v", ws)
+	}
+	os.RemoveAll(ws[0])
+	out, errText, code := runCLI("session", "abandon", "--root", e.repo)
+	if code != 0 || !strings.Contains(errText, "workspace is missing") || !strings.Contains(out+errText, "Session abandoned") {
+		t.Errorf("session abandon: %d %s %s", code, out, errText)
+	}
+	if out, _, _ := runCLI("session", "--root", e.repo); !strings.Contains(out, "No session is open") {
+		t.Errorf("the session is still open:\n%s", out)
+	}
+}
+
+// The status a person reads in the terminal names what they can do.
+func TestStatusTellsTheOwnerWhatToDo(t *testing.T) {
+	var out bytes.Buffer
+	c := &console{out: &out, errw: io.Discard}
+	printSessionStatus(c, &repo.SessionStatus{Info: repo.SessionInfo{ID: "abcd1234", Branch: "repochat/x", StartBranch: "main", Base: "0123456789", Head: "0123456789"},
+		OwnerMoved: true, OwnerBranch: "main"})
+	if strings.Contains(out.String(), "update_session") || !strings.Contains(out.String(), "ask ChatGPT to update the session") {
+		t.Errorf("status for a moved branch:\n%s", out.String())
+	}
+}
+
+// noteFor reads the footers of the real tool results.
+func TestNotesFromRealToolResults(t *testing.T) {
+	setup(t, "")
+	dir := makeRepo(t, "notes")
+	ctx := context.Background()
+	r, err := repo.Open(ctx, dir, repo.Options{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer r.Close()
+	ss, err := openSessions(r, repo.Options{}, nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer ss.Close()
+	byName := map[string]mcp.Tool{}
+	for _, tl := range tools.NewWrite(r, ss) {
+		byName[tl.Name] = tl
+	}
+	call := func(tool string, args mcp.Args) sessionNote {
+		t.Helper()
+		before, _ := ss.Current(ctx)
+		res, err := byName[tool].Handler(ctx, args)
+		if err != nil {
+			t.Fatalf("%s: %v", tool, err)
+		}
+		n, ok := noteFor(tool, resultMeta(res.Text), before)
+		if !ok {
+			t.Fatalf("%s: no note from %q", tool, res.Text)
+		}
+		return n
+	}
+	n := call("start_session", mcp.Args{})
+	wantIn(t, n.Note, "session started: repochat/", "from main @ "+gitOut(t, dir, "rev-parse", "HEAD")[:7])
+
+	changes := json.RawMessage(`[{"op":"create","path":"a.txt","text":"one\ntwo\n"}]`)
+	n = call("apply_changes", mcp.Args{"changes": changes, "message": "add a"})
+	if n.Checkpoint == "" || n.Files != 1 || n.Added != 2 || n.Removed != 0 {
+		t.Errorf("apply: %+v", n)
+	}
+	cps, err := ss.Checkpoints(ctx)
+	if err != nil {
+		t.Fatal(err)
+	}
+	n = call("undo_to_checkpoint", mcp.Args{"checkpoint": cps[len(cps)-1].ID})
+	if n.Checkpoint == "" || n.Files != 1 || n.Added != 0 || n.Removed != 2 || !strings.HasPrefix(n.Note, "undo: checkpoint ") {
+		t.Errorf("undo: %+v", n)
+	}
+	n = call("update_session", mcp.Args{})
+	if !strings.Contains(n.Note, "already up to date") {
+		t.Errorf("update with nothing to do: %+v", n)
+	}
+	os.WriteFile(filepath.Join(dir, "owner.txt"), []byte("mine\n"), 0o644)
+	gitRun(t, dir, "add", "owner.txt")
+	gitRun(t, dir, "commit", "-q", "-m", "owner")
+	n = call("update_session", mcp.Args{})
+	if !strings.HasPrefix(n.Note, "updated from your branch") || n.Files != 1 || n.Added != 1 {
+		t.Errorf("update: %+v", n)
+	}
+	changes = json.RawMessage(`[{"op":"create","path":"build.sh","text":"echo hi\n"},{"op":"create","path":"b.txt","text":"b\n"}]`)
+	call("apply_changes", mcp.Args{"changes": changes})
+	n = call("finish_session", mcp.Args{})
+	if n.Files != 2 || n.Checkpoint != gitOut(t, dir, "rev-parse", "HEAD") || !strings.Contains(n.Note, "merged into main") ||
+		!strings.Contains(n.Note, "1 of them run on this machine later") {
+		t.Errorf("finish: %+v", n)
+	}
+	call("start_session", mcp.Args{})
+	if n = call("abandon_session", mcp.Args{}); !strings.Contains(n.Note, "kept") {
+		t.Errorf("abandon: %+v", n)
+	}
+	call("start_session", mcp.Args{})
+	if n = call("abandon_session", mcp.Args{"delete_branch": true}); !strings.Contains(n.Note, "deleted") {
+		t.Errorf("abandon --delete-branch: %+v", n)
+	}
 }

@@ -110,13 +110,14 @@ func cmdMCP(c *console, args []string) int {
 		if *blob == "" {
 			// Started by a client directly: like the launcher, start or
 			// resume the session before serving, and say which it is.
-			info, err := ss.Start(ctx, s.NewSession)
+			info, note, err := startSession(ctx, ss, s.NewSession)
 			if err != nil {
 				fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
 				return 1
 			}
 			fmt.Fprintf(c.errw, "repochat: WRITE MODE (experimental): session %s, from %s @ %s\n",
 				repo.SanitizeLine(info.Branch), repo.SanitizeLine(info.StartBranch), shortID(info.Base))
+			sink.session(note)
 		}
 		srv = newWriteServer(r, ss, s.ConfirmMerge, sink.session)
 	}

@@ -38,6 +38,9 @@ type SessionOptions struct {
 	StateDir string       // <repochat state>/sessions
 	Repo     Options      // the exposure options of this run
 	Notify   func(string) // one-line notices for the owner's terminal; may be nil
+	// Observe makes a Sessions that never changes the workspace's files or
+	// index (see errObserving).
+	Observe bool
 }
 
 // SessionInfo describes the open session.
@@ -59,6 +62,7 @@ type sessionRecord struct {
 	Created     time.Time `json:"created"`
 	AnchorKey   string    `json:"anchor_key"`  // base64 of 32 random bytes
 	LastUpdate  string    `json:"last_update"` // commit of the latest update from the owner's branch
+	SyncedWith  string    `json:"synced_with,omitempty"`
 }
 
 // Sessions manages the session of one repository. Every exported method
@@ -99,6 +103,7 @@ var errDamagedRecord = errors.New("session.json is damaged; start a new session 
 var (
 	sessionIDRe  = regexp.MustCompile(`^[0-9a-f]{8}$`)
 	objectIDRe   = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
+	digestRe     = regexp.MustCompile(`^[0-9a-f]{64}$`)
 	sparseConfig = []string{"-c", "core.sparseCheckout=true"}
 )
 
@@ -207,6 +212,9 @@ func (s *Sessions) closeWorkspace() {
 // Serve returns the repository the read tools must use right now:
 // the workspace when a session is open, otherwise the owner's checkout.
 func (s *Sessions) Serve(ctx context.Context) (*Repo, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err
@@ -244,6 +252,9 @@ func (s *Sessions) Current(ctx context.Context) (*SessionInfo, error) {
 // session's workspace is removed, its branch is left in place, and a new
 // session is started.
 func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err
@@ -326,6 +337,7 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		Base:        base,
 		Created:     time.Now().UTC().Truncate(time.Second),
 		AnchorKey:   base64.StdEncoding.EncodeToString(key),
+		SyncedWith:  s.optionsDigest(),
 	}
 	rec.Branch = "repochat/" + time.Now().Format("2006-01-02") + "-" + rec.ID
 	rec.Workspace = filepath.Join(s.dir, rec.ID, "w")
@@ -368,7 +380,9 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 
 // ensure makes the open workspace match session.json: none when there is no
 // session, and otherwise the recorded one, resumed if this process has not
-// opened it yet. The caller holds the locks.
+// opened it yet, and synced with this process's exposure options when the
+// record says it was last synced with others. An observer only checks that
+// the workspace and the branch are there. The caller holds the locks.
 func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 	rec, err := s.readRecord()
 	if err != nil {
@@ -381,19 +395,46 @@ func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 	if err := s.checkOwnerIgnore(); err != nil {
 		return nil, err
 	}
-	if s.ws != nil && s.rec != nil && *s.rec == *rec {
-		// The open handle outlives its directory. A workspace removed
-		// behind this process's back goes through resume like after a
-		// restart, which reports it missing.
-		if fi, err := os.Lstat(rec.Workspace); err == nil && fi.IsDir() {
-			return rec, nil
+	if s.opts.Observe {
+		if _, err := s.present(ctx, rec); err != nil {
+			return nil, err
+		}
+		return rec, nil
+	}
+	mine := s.optionsDigest()
+	// The open handle outlives its directory. A workspace removed behind
+	// this process's back goes through resume like after a restart, which
+	// reports it missing.
+	reuse := s.ws != nil && s.rec != nil && sameSession(s.rec, rec)
+	if reuse {
+		if fi, err := os.Lstat(rec.Workspace); err != nil || !fi.IsDir() {
+			reuse = false
 		}
 	}
-	s.closeWorkspace()
-	if err := s.resume(ctx, rec); err != nil {
+	switch {
+	case !reuse:
 		s.closeWorkspace()
-		return nil, err
+		if err := s.resume(ctx, rec); err != nil {
+			s.closeWorkspace()
+			return nil, err
+		}
+	case rec.SyncedWith != mine:
+		// Synced by a process with other options: nothing is served or
+		// written from it until it matches this one's.
+		if err := s.sync(ctx); err != nil {
+			s.closeWorkspace()
+			return nil, err
+		}
 	}
+	if rec.SyncedWith != mine {
+		s.plans = nil
+		rec.SyncedWith = mine
+		if err := s.writeRecord(rec); err != nil {
+			s.closeWorkspace()
+			return nil, err
+		}
+	}
+	s.rec = rec
 	return rec, nil
 }
 
@@ -798,7 +839,8 @@ func (s *Sessions) readRecord() (*sessionRecord, error) {
 	if !sessionIDRe.MatchString(rec.ID) || !regexp.MustCompile(branchRe).MatchString(rec.Branch) ||
 		rec.Workspace != filepath.Join(s.dir, rec.ID, "w") || !objectIDRe.MatchString(rec.Base) ||
 		kerr != nil || len(key) != sessionKeySize || rec.StartBranch == "" || !SupportedName(rec.StartBranch) ||
-		strings.HasPrefix(rec.StartBranch, "-") || (rec.LastUpdate != "" && !objectIDRe.MatchString(rec.LastUpdate)) {
+		strings.HasPrefix(rec.StartBranch, "-") || (rec.LastUpdate != "" && !objectIDRe.MatchString(rec.LastUpdate)) ||
+		(rec.SyncedWith != "" && !digestRe.MatchString(rec.SyncedWith)) {
 		return nil, damaged
 	}
 	return &rec, nil
@@ -837,4 +879,82 @@ func writeFileAtomic(dir, name string, data []byte) error {
 		os.Remove(tmp)
 	}
 	return err
+}
+
+// errObserving is what an observing Sessions answers to anything that would
+// change the workspace.
+var errObserving = errors.New("this command does not change the workspace: it can show the session, finish it or abandon it")
+
+// optionsDigest identifies the exposure options that decide which files
+// sync leaves out of the workspace. The record keeps the digest of the
+// options the workspace was last synced with.
+func (s *Sessions) optionsDigest() string {
+	o := s.opts.Repo
+	raw, _ := json.Marshal(struct {
+		TrackedOnly        bool
+		Allow, Deny, Own   []string
+		ExtraIgnore, Owner string
+	}{o.TrackedOnly, o.Allow, o.Deny, o.Own, filepath.Join(s.owner.Root, ownerIgnore), s.owner.Root})
+	sum := sha256.Sum256(raw)
+	return hex.EncodeToString(sum[:])
+}
+
+// sameSession reports whether two records describe the same session in the
+// same state, whatever options its workspace was synced with.
+func sameSession(a, b *sessionRecord) bool {
+	x, y := *a, *b
+	x.SyncedWith, y.SyncedWith = "", ""
+	return x == y
+}
+
+// reader is the repository that git questions about the session go to: the
+// open workspace, or, for an observer, the owner's repository, which shares
+// its objects and branches.
+func (s *Sessions) reader() *Repo {
+	if s.opts.Observe {
+		return s.owner
+	}
+	return s.ws
+}
+
+// policy is the exposure policy of the session's files: that of the open
+// workspace, or, for an observer, the one sync would build from the session
+// branch's .repochatignore and the owner's, with the owner repository's
+// options.
+func (s *Sessions) policy(ctx context.Context, rec *sessionRecord) (*Policy, error) {
+	if !s.opts.Observe {
+		return s.ws.Policy(ctx)
+	}
+	out, err := s.owner.git(ctx, 64<<10, "ls-tree", "-z", "--full-tree", "refs/heads/"+rec.Branch, "--", ignoreFileName)
+	if err != nil {
+		return nil, fmt.Errorf("cannot read the session's .repochatignore: %w", err)
+	}
+	text := ""
+	if entry := strings.TrimSuffix(string(out), "\x00"); entry != "" {
+		meta, path, ok := strings.Cut(entry, "\t")
+		f := strings.Fields(meta)
+		if !ok || path != ignoreFileName || len(f) != 3 || strings.Contains(entry, "\x00") {
+			return nil, errors.New("unexpected output from git ls-tree; refusing to guess at the policy")
+		}
+		if f[1] != "blob" {
+			return nil, fmt.Errorf(".repochatignore %v; refusing to run without the policy it defines", errNotRegular)
+		}
+		if text, err = s.owner.ignoreBlob(ctx, f[0], f[2]); err != nil {
+			return nil, err
+		}
+	}
+	pol, err := s.owner.newPolicy(text)
+	if err != nil {
+		return nil, err
+	}
+	extra, found, err := readExtraIgnore(filepath.Join(s.owner.Root, ownerIgnore))
+	if err != nil {
+		return nil, err
+	}
+	if found {
+		if err := pol.AddIgnore(extra); err != nil {
+			return nil, err
+		}
+	}
+	return pol, nil
 }

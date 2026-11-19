@@ -150,6 +150,9 @@ func (sp *storedPlan) matches(plan *Plan) error {
 // touches is byte-identical to what it was when the plan was made; a plan
 // already applied returns the same result again without writing.
 func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, message string) (*Applied, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	if (planID == "") == (len(changes) == 0) {
 		return nil, errors.New("give either a plan identifier from propose_changes or a change set, not both and not neither")
 	}

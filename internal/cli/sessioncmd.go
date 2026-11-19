@@ -66,7 +66,7 @@ func cmdSession(c *console, args []string) int {
 		return 1
 	}
 	defer r.Close()
-	ss, err := openSessions(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
+	ss, err := observeSessions(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
 	if err != nil {
 		c.fail("%v", err)
 		return 1
@@ -77,9 +77,13 @@ func cmdSession(c *console, args []string) int {
 	switch sub {
 	case "abandon":
 		info, err := ss.Current(ctx)
-		if errors.Is(err, repo.ErrNoSession) {
+		switch {
+		case errors.Is(err, repo.ErrNoSession):
 			c.say("No session is open for %s; there is nothing to abandon.", repo.SanitizeLine(r.Root))
 			return 1
+		case err != nil:
+			// A broken session is still abandoned: that is how it is cleaned up.
+			c.warn("%v", err)
 		}
 		if err := ss.Abandon(ctx, *deleteBranch); err != nil {
 			c.fail("%v", err)
@@ -184,7 +188,7 @@ func printSessionStatus(c *console, st *repo.SessionStatus) {
 	fmt.Fprintf(c.out, "  from         %s @ %s, now at %s\n", start, shortID(in.Base), shortID(in.Head))
 	fmt.Fprintf(c.out, "  checkpoints  %d since the start\n", st.Ahead)
 	if st.OwnerMoved {
-		fmt.Fprintf(c.out, "  your branch  %s has commits the session lacks: it must be brought up to date (update_session) before it can be merged\n", start)
+		fmt.Fprintf(c.out, "  your branch  %s has commits the session lacks: ask ChatGPT to update the session before merging, or merge the session branch by hand with git\n", start)
 	} else {
 		fmt.Fprintf(c.out, "  your branch  %s has not moved since the session started\n", start)
 	}

@@ -138,11 +138,43 @@ func sessionsDir() (string, error) {
 // openSessions prepares the sessions of r with the exposure options of this
 // run. notify receives the engine's notices.
 func openSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*repo.Sessions, error) {
+	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify})
+}
+
+// observeSessions prepares the sessions of r for a command that only shows,
+// finishes or abandons the session: it never changes the workspace's files,
+// so it cannot bring them in line with options other than the server's.
+func observeSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*repo.Sessions, error) {
+	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify, Observe: true})
+}
+
+func newSessions(r *repo.Repo, o repo.SessionOptions) (*repo.Sessions, error) {
 	dir, err := sessionsDir()
 	if err != nil {
 		return nil, err
 	}
-	return repo.NewSessions(r, repo.SessionOptions{StateDir: dir, Repo: opts, Notify: notify})
+	o.StateDir = dir
+	return repo.NewSessions(r, o)
+}
+
+// startNote describes a session just started or resumed.
+func startNote(info *repo.SessionInfo, resumed bool) sessionNote {
+	verb := "started"
+	if resumed {
+		verb = "resumed"
+	}
+	return sessionNote{Tool: "start", Note: fmt.Sprintf("session %s: %s, from %s @ %s", verb, info.Branch, info.StartBranch, shortID(info.Base))}
+}
+
+// startSession starts or resumes the session as the command line asks, and
+// says which it did.
+func startSession(ctx context.Context, ss *repo.Sessions, fresh bool) (*repo.SessionInfo, sessionNote, error) {
+	prev, perr := ss.Current(ctx)
+	info, err := ss.Start(ctx, fresh)
+	if err != nil {
+		return nil, sessionNote{}, err
+	}
+	return info, startNote(info, perr == nil && !fresh && prev.ID == info.ID), nil
 }
 
 func (s *session) repoOptions(cfg *Config) repo.Options {

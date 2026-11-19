@@ -566,12 +566,12 @@ func controlPlaneOverride() ([]string, error) {
 
 func (l *launcher) serve(ctx context.Context) (int, error) {
 	c := l.c
+	sess := l.o.session.freeze(l.cfg, l.r.Root)
 	if l.o.Write {
-		if err := l.openSession(ctx); err != nil {
+		if err := l.openSession(ctx, &sess); err != nil {
 			return 1, err
 		}
 	}
-	sess := l.o.session.freeze(l.cfg, l.r.Root)
 	sess.Events = l.sockPath
 	// --new-session has been acted on here; the server resumes that session.
 	sess.NewSession = false
@@ -801,15 +801,23 @@ func (p prefixWriter) Write(b []byte) (int, error) {
 }
 
 // openSession starts or resumes the write-mode session, so that the banner
-// can name it. The serving process opens the same session on its own.
-func (l *launcher) openSession(ctx context.Context) error {
+// can name it; the start and the engine's notices go to the activity log.
+// The serving process opens the same session on its own.
+func (l *launcher) openSession(ctx context.Context, sess *session) error {
 	ss, err := openSessions(l.r, l.o.repoOptions(l.cfg), func(msg string) { l.notes = append(l.notes, msg) })
 	if err != nil {
 		return err
 	}
 	defer ss.Close()
-	if l.sess, err = ss.Start(ctx, l.o.NewSession); err != nil {
+	info, note, err := startSession(ctx, ss, l.o.NewSession)
+	if err != nil {
 		return err
+	}
+	l.sess = info
+	record := terminalRecorder(l.c, sess, l.r, "")
+	record(note)
+	for _, n := range l.notes {
+		record(sessionNote{Note: n})
 	}
 	st, err := ss.Status(ctx)
 	if err != nil {

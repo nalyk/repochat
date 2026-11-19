@@ -41,7 +41,7 @@ func (s *Sessions) Checkpoints(ctx context.Context) ([]Checkpoint, error) {
 	if err != nil {
 		return nil, err
 	}
-	pol, err := s.ws.Policy(ctx)
+	pol, err := s.policy(ctx, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -51,7 +51,7 @@ func (s *Sessions) Checkpoints(ctx context.Context) ([]Checkpoint, error) {
 		if i+1 < len(chain) {
 			parent = chain[i+1]
 		}
-		cp, err := s.ws.describeCheckpoint(ctx, pol, id, parent)
+		cp, err := s.reader().describeCheckpoint(ctx, pol, id, parent)
 		if err != nil {
 			return nil, err
 		}
@@ -64,7 +64,7 @@ func (s *Sessions) Checkpoints(ctx context.Context) ([]Checkpoint, error) {
 // newest first, down to and including the session's base. A branch that no
 // longer descends from its base along first parents is refused.
 func (s *Sessions) chain(ctx context.Context, rec *sessionRecord) (head string, chain []string, err error) {
-	ws := s.ws
+	ws := s.reader()
 	head, code, err := ws.gitText(ctx, "rev-parse", "--verify", "-q", "refs/heads/"+rec.Branch+"^{commit}")
 	if err != nil {
 		return "", nil, err
@@ -252,6 +252,9 @@ func undoRefused(format string, a ...any) error {
 // target must not lie before the latest update from the owner's branch.
 // Undo to the current checkpoint changes nothing and returns it.
 func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
+	if s.opts.Observe {
+		return nil, errObserving
+	}
 	want := strings.ToLower(id)
 	if len(want) > 64 || !checkpointIDRe.MatchString(want) {
 		return nil, undoRefused("a checkpoint is named by its hexadecimal ID as list_checkpoints shows it; %q is not one", SanitizeLine(truncate(id, 40)))
