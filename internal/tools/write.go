@@ -13,8 +13,10 @@ import (
 	"github.com/nalyk/repochat/internal/repo"
 )
 
-// WriteInstructions is appended to Instructions in write mode.
-const WriteInstructions = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge."
+// WriteInstructions is the write-mode part of WriteModeInstructions, the
+// server-level guidance of write mode: it follows the guidance both modes
+// share, in place of read mode's statement that nothing can be modified.
+const WriteInstructions = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result)."
 
 const (
 	maxChangeItems        = 500     // operations in one change set, as the engine allows
@@ -38,7 +40,8 @@ func (v served) Repo(ctx context.Context) (*repo.Repo, error) { return v.s.Serve
 func changesSchema() map[string]any {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	op := str("What to do. replace: lines from..to become text. insert: text goes before or after the line at, or at the start or end of the file. " +
-		"delete: lines from..to are removed. create: a new file at path whose whole content is text. remove: delete the file at path (needs file_tag). move: rename path to to_path.")
+		"delete: lines from..to are removed. create: a new file at path whose whole content is text. remove: delete the file at path (needs file_tag). move: rename path to to_path. " +
+		"A replace or delete of three or more lines also needs file_tag.")
 	op["enum"] = []string{"replace", "insert", "delete", "create", "remove", "move"}
 	where := str(`insert at an anchor only: "before" or "after" that line (default "after").`)
 	where["enum"] = []string{"before", "after"}
@@ -54,12 +57,12 @@ func changesSchema() map[string]any {
 				"op":       op,
 				"path":     str("Repository-relative path of the file, e.g. src/app/main.go."),
 				"from":     str("replace, delete: anchor of the first line of the range, e.g. 12:abc, copied from read_file or search_code output (the part before the |)."),
-				"to":       str("replace, delete: anchor of the last line of the range (12:abc form); omit for a single line."),
+				"to":       str("replace, delete: anchor of the last line of the range (12:abc form); omit for a single line. A range of three or more lines also needs file_tag."),
 				"at":       str(`insert: an anchor (12:abc form) of the line to insert next to, or "start" or "end" of the file.`),
 				"where":    where,
 				"text":     str("replace, insert, create: the new lines, separated by \\n, exactly as they should be in the file: without anchors or line numbers, indentation included."),
 				"to_path":  str("move: the new repository-relative path."),
-				"file_tag": str("remove: the file_tag from the @meta line of read_file for this file, which shows you saw its current content."),
+				"file_tag": str("remove, and replace or delete of three or more lines (required); any replace or delete (optional, checked when given): the file's current file_tag, from the @meta line of read_file for this file or from the [file_tag …] line the last apply_changes result gave for it. It shows you saw the file's current content, including the lines between from and to."),
 			},
 		},
 	}
@@ -100,7 +103,7 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 		},
 		{
 			Name: "apply_changes", Title: "Apply a change set", Write: true,
-			Description: "Apply a change set to the session workspace, completely or not at all, and record it as one checkpoint. Give exactly one of `changes` and `plan` (an id from propose_changes). Returns the checkpoint, line counts and the changed regions with fresh anchors. A stale anchor refuses the whole change set; the error shows the current lines with fresh anchors to retry with.",
+			Description: "Apply a change set to the session workspace, completely or not at all, and record it as one checkpoint. Give exactly one of `changes` and `plan` (an id from propose_changes). Returns the checkpoint, line counts, each changed file's new file_tag and the changed regions with fresh anchors. A stale anchor refuses the whole change set; the error shows the current lines with fresh anchors to retry with.",
 			Schema: mcp.Schema{
 				changes,
 				{Name: "plan", Kind: S, MaxLen: 16, Desc: "A plan id from propose_changes (16 hex characters), instead of changes."},
@@ -360,7 +363,7 @@ func (c *catalog) apply(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	}
 	intro := fmt.Sprintf("Applied as checkpoint %s: %d file(s), +%d -%d lines.\n", ap.Checkpoint.ID, len(ap.Checkpoint.Files), ap.Checkpoint.Added, ap.Checkpoint.Removed)
 	return c.appliedResult("apply_changes", intro,
-		"Changed regions with fresh anchors (elsewhere in these files line numbers may have shifted; read again before editing there):\n", ap), nil
+		"Changed regions with fresh anchors, and each file's new file_tag (elsewhere in these files line numbers may have shifted; read again before editing there):\n", ap), nil
 }
 
 // appliedResult reports a new (or current) checkpoint with the engine's

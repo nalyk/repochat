@@ -264,8 +264,11 @@ func TestStaleAnchorRefusesEverythingAndReturnsFreshLines(t *testing.T) {
 func TestOverlappingRangesAreRefused(t *testing.T) {
 	c := newChangeFixture(t, map[string]string{"a.txt": numbered(8)}, Options{})
 	at := func(n int) string { return c.anchor(t, "a.txt", n) }
+	// The tag a range of three or more lines needs, so that each case is
+	// refused for its overlap and not for lacking it.
+	tag := c.tag(t, "a.txt")
 	rep := func(from, to int) Change {
-		return Change{Op: "replace", Path: "a.txt", From: at(from), To: at(to), Text: "x"}
+		return Change{Op: "replace", Path: "a.txt", From: at(from), To: at(to), Text: "x", FileTag: tag}
 	}
 	ins := func(n int, where string) Change {
 		return Change{Op: "insert", Path: "a.txt", At: at(n), Where: where, Text: "x"}
@@ -945,7 +948,8 @@ func TestNoEditShowsAMaskedLine(t *testing.T) {
 				for _, l := range lines {
 					later.WriteString(l.Text + "\n")
 				}
-				views := map[string]string{"the diff": plan.Diff, "Fresh": c.ws.freshText(bg, plan.Files, nil), "a later read": later.String()}
+				fresh, _ := c.ws.freshText(bg, plan.Files, nil)
+				views := map[string]string{"the diff": plan.Diff, "Fresh": fresh, "a later read": later.String()}
 				if accepted%7 == 1 {
 					a, err := c.s.Apply(bg, plan.ID, nil, "")
 					if err != nil {
@@ -970,4 +974,60 @@ func TestNoEditShowsAMaskedLine(t *testing.T) {
 			t.Logf("%d of %d edits accepted", accepted, len(tries))
 		})
 	}
+}
+
+// C5: a range is addressed by its first and last line only, so a change to
+// a line between them is not seen by the anchors. A replace or delete of
+// three or more lines therefore needs the file's current file_tag.
+func TestLongRangeNeedsTheCurrentFileTag(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"notes.txt": "first\nmiddle\nlast\n", "b.txt": numbered(6)}, nil)
+	a1, a2, a3 := c.anchor(t, "notes.txt", 1), c.anchor(t, "notes.txt", 2), c.anchor(t, "notes.txt", 3)
+	oldTag := c.tag(t, "notes.txt")
+	applied := c.apply(t, "middle", Change{Op: "replace", Path: "notes.txt", From: a2, Text: "new middle"})
+	newTag := c.tag(t, "notes.txt")
+	if newTag == oldTag {
+		t.Fatal("the file tag did not change with the file")
+	}
+	// The result of the apply gives the new tag, in Fresh and by path.
+	if applied.FileTags["notes.txt"] != newTag {
+		t.Errorf("FileTags = %v, want notes.txt: %s", applied.FileTags, newTag)
+	}
+	mustContain(t, applied.Fresh, "FILE notes.txt\n[file_tag "+newTag+"]\n")
+
+	before := wsState(t, c.ws.Root)
+	old := Change{Op: "replace", Path: "notes.txt", From: a1, To: a3, Text: "replacement"}
+	// Without a tag: refused, and told what to send.
+	ce := c.refuse(t, "three or more lines", old)
+	mustContain(t, ce.Error(), `"file_tag"`, "read_file", "apply_changes")
+	mustNotContain(t, ce.Error(), newTag, "new middle")
+	// With the tag of the file as it was read: stale.
+	old.FileTag = oldTag
+	ce = c.refuse(t, "file_tag "+oldTag+" does not match the file as it is now", old)
+	mustNotContain(t, ce.Error(), newTag, "new middle")
+	if _, err := c.s.Apply(bg, "", []Change{old}, ""); err == nil {
+		t.Fatal("a stale range was applied directly")
+	}
+	if after := wsState(t, c.ws.Root); after != before {
+		t.Error("a refused range changed the workspace")
+	}
+	// With the current tag: accepted.
+	old.FileTag = newTag
+	c.apply(t, "all three", old)
+	if got := mustRead(t, filepath.Join(c.ws.Root, "notes.txt")); got != "replacement\n" {
+		t.Errorf("notes.txt = %q", got)
+	}
+
+	// delete alike; one and two lines need no tag, but a tag given must hold.
+	at := func(n int) string { return c.anchor(t, "b.txt", n) }
+	c.refuse(t, "three or more lines", Change{Op: "delete", Path: "b.txt", From: at(2), To: at(4)})
+	c.accept(t, Change{Op: "delete", Path: "b.txt", From: at(2), To: at(3)})
+	c.accept(t, Change{Op: "replace", Path: "b.txt", From: at(2), Text: "two"})
+	c.refuse(t, "does not match the file as it is now", Change{Op: "replace", Path: "b.txt", From: at(2), Text: "two", FileTag: oldTag})
+	c.accept(t, Change{Op: "delete", Path: "b.txt", From: at(2), To: at(4), FileTag: c.tag(t, "b.txt")},
+		Change{Op: "replace", Path: "b.txt", From: at(6), Text: "six", FileTag: c.tag(t, "b.txt")})
+	c.refuse(t, "file_tag", Change{Op: "delete", Path: "b.txt", From: at(2), To: at(4), FileTag: "not-a-tag"})
+	c.refuse(t, `does not take "file_tag"`, Change{Op: "insert", Path: "b.txt", At: at(2), Text: "x", FileTag: c.tag(t, "b.txt")})
+	// A locked line in the range is still the first thing said.
+	c2 := newApplyFixture(t, map[string]string{"s.txt": "a\naws_key = \"" + fakeAWSKey + "\"\nb\n"}, nil)
+	c2.refuse(t, "line 2 holds a value you were not shown", Change{Op: "delete", Path: "s.txt", From: c2.anchor(t, "s.txt", 1), To: c2.anchor(t, "s.txt", 3)})
 }

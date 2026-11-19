@@ -33,19 +33,23 @@ const (
 	maxChangeText  = 1 << 20 // bytes of new text in one change set
 	maxPlannedFile = 2 << 20 // bytes of one resulting file
 	diffContext    = 3
+	longRange      = 3 // lines of a replace or delete from which file_tag is required
 )
 
 // Change is one operation of a change set.
 type Change struct {
-	Op      string `json:"op"`       // replace | insert | delete | create | remove | move
-	Path    string `json:"path"`     //
-	From    string `json:"from"`     // anchor "<line>:<hash>": first line of a range (replace, delete)
-	To      string `json:"to"`       // anchor: last line of the range; empty = same as From
-	At      string `json:"at"`       // insert: an anchor, or "start", or "end"
-	Where   string `json:"where"`    // insert at an anchor: "before" | "after" (default "after")
-	Text    string `json:"text"`     // new lines, "\n"-separated; one trailing "\n" is ignored
-	ToPath  string `json:"to_path"`  // move
-	FileTag string `json:"file_tag"` // remove: the FileTag the model was shown
+	Op     string `json:"op"`      // replace | insert | delete | create | remove | move
+	Path   string `json:"path"`    //
+	From   string `json:"from"`    // anchor "<line>:<hash>": first line of a range (replace, delete)
+	To     string `json:"to"`      // anchor: last line of the range; empty = same as From
+	At     string `json:"at"`      // insert: an anchor, or "start", or "end"
+	Where  string `json:"where"`   // insert at an anchor: "before" | "after" (default "after")
+	Text   string `json:"text"`    // new lines, "\n"-separated; one trailing "\n" is ignored
+	ToPath string `json:"to_path"` // move
+	// FileTag is the file_tag the model was shown for the file as it is now:
+	// needed by remove and by a replace or delete of three or more lines,
+	// checked whenever a replace or delete gives one.
+	FileTag string `json:"file_tag"`
 }
 
 // field returns the member of c that the JSON name denotes, nil for none.
@@ -156,8 +160,8 @@ var (
 	changeArgs = []string{"from", "to", "at", "where", "text", "to_path", "file_tag"}
 	// What each operation takes; every other member must be empty.
 	opTakes = map[string]map[string]bool{
-		"replace": set("from", "to", "text"),
-		"delete":  set("from", "to"),
+		"replace": set("from", "to", "text", "file_tag"),
+		"delete":  set("from", "to", "file_tag"),
 		"insert":  set("at", "where", "text"),
 		"create":  set("text"),
 		"remove":  set("file_tag"),
@@ -218,6 +222,9 @@ func checkShape(c Change) error {
 		}
 		if c.Op == "replace" && c.Text == "" {
 			return errors.New("replace needs text; to remove lines use delete")
+		}
+		if c.FileTag != "" && !fileTagRe.MatchString(c.FileTag) {
+			return errors.New("file_tag must be the 8 characters read_file shows in its @meta line for the file")
 		}
 	case "insert":
 		switch c.At {
@@ -959,6 +966,7 @@ func (r *Repo) editFile(ctx context.Context, key []byte, p string, src *source, 
 		return nil
 	}
 	var edits []lineEdit
+	tag := "" // the file's current tag, computed when an operation needs it
 	for _, i := range idx {
 		c := changes[i]
 		switch c.Op {
@@ -980,6 +988,19 @@ func (r *Repo) editFile(ctx context.Context, key []byte, p string, src *source, 
 				}
 				if err := touch(i, l); err != nil {
 					return nil, err
+				}
+			}
+			// The two anchors vouch for the first and the last line. What
+			// lies between them is vouched for by the file's tag alone.
+			if count := to - from + 1; count >= longRange && c.FileTag == "" {
+				return nil, refusal(p, "operation %d %ss lines %d to %d: a replace or delete of three or more lines also needs the file's current file_tag, because its anchors check only the first and the last line. Send the same operation with \"file_tag\" set to the file_tag in the @meta line of read_file for this file, or to the one the last apply_changes result gave for it", i+1, c.Op, from, to)
+			}
+			if c.FileTag != "" {
+				if tag == "" {
+					tag = fileTagOf(key, shown)
+				}
+				if c.FileTag != tag {
+					return nil, refusal(p, "file_tag %s does not match the file as it is now: it changed since you read it. Read it again, and send the operation with the anchors and the file_tag read_file shows then", c.FileTag)
 				}
 			}
 			edits = append(edits, lineEdit{a: from - 1, b: to, lines: splitText(c.Text)})

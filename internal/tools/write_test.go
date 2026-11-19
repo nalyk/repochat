@@ -213,7 +213,7 @@ func TestWriteCatalogueAddsNineToolsWithHonestAnnotations(t *testing.T) {
 }
 
 func TestWriteInstructionsAreExact(t *testing.T) {
-	const want = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge."
+	const want = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result)."
 	if WriteInstructions != want {
 		t.Fatalf("WriteInstructions differs from the brief:\n%s", WriteInstructions)
 	}
@@ -677,4 +677,62 @@ func TestNewSessionFlagIsTranslatedForTheModel(t *testing.T) {
 	}
 	f.must(t, "start_session", map[string]any{"fresh": true})
 	f.must(t, "read_file", map[string]any{"path": "notes.txt"})
+}
+
+// C5 through the tools: a range read before its middle line changed is
+// refused without the file's current tag and with the old one, and goes
+// through with the tag the apply_changes result gave.
+func TestLongRangeNeedsTheFileTagThroughTheTools(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, map[string]string{"notes.txt": "first\nmiddle\nlast\n"})
+	f.must(t, "start_session", map[string]any{})
+	text, m := f.must(t, "read_file", map[string]any{"path": "notes.txt"})
+	oldTag, _ := m["file_tag"].(string)
+	a1, a2, a3 := anchorFor(t, text, "first"), anchorFor(t, text, "middle"), anchorFor(t, text, "last")
+	applied, _ := f.must(t, "apply_changes", map[string]any{
+		"changes": changesJSON(t, map[string]string{"op": "replace", "path": "notes.txt", "from": a2, "text": "new middle"}),
+	})
+	tagLine := regexp.MustCompile(`(?m)^FILE notes\.txt\n\[file_tag ([a-z2-7]{8})\]$`).FindStringSubmatch(applied)
+	if tagLine == nil || tagLine[1] == oldTag {
+		t.Fatalf("apply_changes gave no new file_tag for notes.txt (old %s):\n%s", oldTag, applied)
+	}
+	stale := map[string]string{"op": "replace", "path": "notes.txt", "from": a1, "to": a3, "text": "replacement"}
+	_, _, err := f.call(t, "apply_changes", map[string]any{"changes": changesJSON(t, stale)})
+	if err == nil || !strings.Contains(err.Error(), "three or more lines") || !strings.Contains(err.Error(), "file_tag") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("a long range without file_tag: %v", err)
+	}
+	stale["file_tag"] = oldTag
+	_, _, err = f.call(t, "apply_changes", map[string]any{"changes": changesJSON(t, stale)})
+	if err == nil || !strings.Contains(err.Error(), "does not match the file as it is now") {
+		t.Fatalf("a long range with the stale file_tag: %v", err)
+	}
+	if got := gitOut(t, f.dir, "worktree", "list"); !strings.Contains(got, "repochat/") {
+		t.Fatalf("no session worktree: %s", got)
+	}
+	text, m = f.must(t, "read_file", map[string]any{"path": "notes.txt"})
+	if !strings.Contains(text, "| new middle") || m["file_tag"] != tagLine[1] {
+		t.Fatalf("after the refusals the file is not as the first apply left it (tag %v, want %s):\n%s", m["file_tag"], tagLine[1], text)
+	}
+	stale["file_tag"] = tagLine[1]
+	f.must(t, "apply_changes", map[string]any{"changes": changesJSON(t, stale)})
+	text, _ = f.must(t, "read_file", map[string]any{"path": "notes.txt"})
+	if !strings.Contains(text, "| replacement") || strings.Contains(text, "middle") {
+		t.Fatalf("after the range with the fresh tag:\n%s", text)
+	}
+
+	// The schema and the instructions say so.
+	var changes mcp.Param
+	for _, p := range f.tools["apply_changes"].Schema {
+		if p.Name == "changes" {
+			changes = p
+		}
+	}
+	props := changes.Raw["items"].(map[string]any)["properties"].(map[string]any)
+	for _, name := range []string{"op", "to", "file_tag"} {
+		if desc := props[name].(map[string]any)["description"].(string); !strings.Contains(desc, "three or more lines") {
+			t.Errorf("%s does not state the file_tag rule: %s", name, desc)
+		}
+	}
+	if !strings.HasSuffix(WriteInstructions, "A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result).") {
+		t.Error("WriteInstructions does not end with the file_tag rule")
+	}
 }

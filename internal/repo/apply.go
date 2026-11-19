@@ -6,6 +6,7 @@ import (
 	"errors"
 	"fmt"
 	"io"
+	"maps"
 	"os"
 	"path/filepath"
 	"slices"
@@ -59,12 +60,17 @@ type Applied struct {
 	Checkpoint Checkpoint
 	Fresh      string // touched regions ±3 lines with fresh anchors, per file
 	Warnings   []string
+	// FileTags gives, for every touched file that exists afterwards and can
+	// be shown as lines, the file_tag read_file shows for it now. Fresh
+	// carries the same tags.
+	FileTags map[string]string
 }
 
 func (a *Applied) clone() *Applied {
 	c := *a
 	c.Checkpoint.Files = slices.Clone(a.Checkpoint.Files)
 	c.Warnings = slices.Clone(a.Warnings)
+	c.FileTags = maps.Clone(a.FileTags)
 	return &c
 }
 
@@ -224,10 +230,12 @@ func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, m
 		return nil, err
 	}
 	cp.Added, cp.Removed = plan.Added, plan.Removed
+	fresh, tags := s.ws.freshText(ctx, plan.Files, moves)
 	applied := &Applied{
 		Checkpoint: *cp,
-		Fresh:      s.ws.freshText(ctx, plan.Files, moves),
+		Fresh:      fresh,
 		Warnings:   slices.Clone(plan.Warnings),
+		FileTags:   tags,
 	}
 	if sp != nil {
 		sp.applied = applied
@@ -738,15 +746,17 @@ func commitMessage(message, kind string) (text string, full []byte) {
 	return text, []byte(text + "\n\nMade-through: repochat\nRepochat-Kind: " + kind + "\n")
 }
 
-// freshText shows, for each file, its changed regions with diffContext lines
-// around them and the anchors read_file shows for them now. moves maps a
-// moved file's old path to its new one.
-func (r *Repo) freshText(ctx context.Context, files []PlannedFile, moves map[string]string) string {
+// freshText shows, for each file, its new file_tag and its changed regions
+// with diffContext lines around them and the anchors read_file shows for
+// them now; tags holds the same file tags by path. moves maps a moved file's
+// old path to its new one.
+func (r *Repo) freshText(ctx context.Context, files []PlannedFile, moves map[string]string) (text string, tags map[string]string) {
 	key := r.Opts.AnchorKey
 	from := map[string]string{}
 	for src, to := range moves {
 		from[to] = src
 	}
+	tags = map[string]string{}
 	var b strings.Builder
 	for _, f := range files {
 		fmt.Fprintf(&b, "FILE %s\n", Sanitize(f.Path))
@@ -757,19 +767,24 @@ func (r *Repo) freshText(ctx context.Context, files []PlannedFile, moves map[str
 		case f.After == nil:
 			b.WriteString("[removed]\n")
 			continue
+		}
+		// A file that is not text (moved unchanged) has no lines and no tag.
+		lines, err := r.shownLines(ctx, f.After)
+		if err == nil {
+			tags[f.Path] = fileTagOf(key, lines)
+			fmt.Fprintf(&b, "[file_tag %s]\n", tags[f.Path])
+		}
+		switch {
 		case len(f.Regions) == 0 && from[f.Path] != "":
 			fmt.Fprintf(&b, "[moved from %s; content unchanged]\n", Sanitize(from[f.Path]))
 			continue
 		case len(f.Regions) == 0:
 			b.WriteString("[content unchanged]\n")
 			continue
-		}
-		lines, err := r.shownLines(ctx, f.After)
-		if err != nil {
+		case err != nil:
 			b.WriteString("[fresh anchors unavailable: read the file again]\n")
 			continue
-		}
-		if len(lines) == 0 {
+		case len(lines) == 0:
 			b.WriteString("[empty]\n")
 			continue
 		}
@@ -784,5 +799,5 @@ func (r *Repo) freshText(ctx context.Context, files []PlannedFile, moves map[str
 		}
 		writeWindows(&b, key, lines, wins)
 	}
-	return b.String()
+	return b.String(), tags
 }
