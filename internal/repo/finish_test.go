@@ -879,122 +879,530 @@ func TestUpdateIsUndoneWhenAWithheldFileStaysOnDisk(t *testing.T) {
 	}
 }
 
-// shCmd runs a shell command line in dir with the environment gitCmd uses.
-func shCmd(t *testing.T, dir, line string) {
-	t.Helper()
+// shOut runs a shell command line in dir with the environment gitCmd uses
+// and returns what it printed.
+func shOut(dir, line string, env ...string) (string, error) {
 	cmd := exec.Command("sh", "-c", line)
 	cmd.Dir = dir
-	cmd.Env = append(os.Environ(),
+	cmd.Env = append(append(os.Environ(),
 		"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@example.com",
 		"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@example.com",
-		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-	if out, err := cmd.CombinedOutput(); err != nil {
-		t.Fatalf("sh -c %q: %v\n%s", line, err, out)
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null"), env...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+// shCmd runs a recovery command line in dir and returns what it printed; it
+// must succeed.
+func shCmd(t *testing.T, dir, line string) string {
+	t.Helper()
+	out, err := shOut(dir, line)
+	if err != nil {
+		t.Fatalf("sh -c %q in %s: %v\n%s", line, dir, err, out)
 	}
+	return out
 }
 
 var backticked = regexp.MustCompile("`([^`]+)`")
 
 func TestPartlyUpdatedCheckoutRecoveryCommandsWork(t *testing.T) {
 	type state struct {
-		name     string
-		addsOnly bool
+		name string
+		kind string // what the session changes: work, adds or swap
 		// leave builds what a cut-off merge left in the owner's checkout.
 		leave func(t *testing.T, dir, tip, land string)
 	}
 	states := []state{
-		{"index at tip", false, func(t *testing.T, dir, tip, land string) {
+		{"index at tip", "work", func(t *testing.T, dir, tip, land string) {
 			write(t, dir, "a.txt", "A\n")
 			write(t, dir, "new.txt", "new\n")
 			os.Remove(filepath.Join(dir, "gone.txt"))
 		}},
-		{"index at land", false, func(t *testing.T, dir, tip, land string) {
+		{"index at land", "work", func(t *testing.T, dir, tip, land string) {
 			gitCmd(t, dir, "read-tree", "-m", "-u", tip, land)
 		}},
-		{"only additions", true, func(t *testing.T, dir, tip, land string) {
+		{"only additions", "adds", func(t *testing.T, dir, tip, land string) {
 			write(t, dir, "-new.txt", "n\n")
+		}},
+		// A file takes the place of a directory, and git was cut off before
+		// it wrote anything.
+		{"file for directory, nothing written", "swap", func(t *testing.T, dir, tip, land string) {}},
+		{"file for directory, index at land", "swap", func(t *testing.T, dir, tip, land string) {
+			gitCmd(t, dir, "read-tree", "-m", "-u", tip, land)
 		}},
 	}
 	for _, st := range states {
 		for _, way := range []string{"go back", "complete"} {
-			t.Run(st.name+", "+way, func(t *testing.T) {
-				c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n", "u.txt": "u\n"}, nil)
-				want := map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n"}
-				var added []string
-				if st.addsOnly {
-					c.apply(t, "adds", Change{Op: "create", Path: "-new.txt", Text: "n"}, Change{Op: "create", Path: "with space.txt", Text: "s"})
-					added = []string{"-new.txt", "with space.txt"}
-				} else {
-					c.apply(t, "work",
-						Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
-						Change{Op: "replace", Path: "-dash.txt", From: c.anchor(t, "-dash.txt", 1), Text: "D"},
-						Change{Op: "create", Path: "new.txt", Text: "new"},
-						Change{Op: "create", Path: "with space.txt", Text: "s"},
-						Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
-					added = []string{"new.txt", "with space.txt"}
-				}
-				tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
-				land := c.head(t)
-				write(t, c.f.dir, "u.txt", "owner's edit\n") // unrelated, uncommitted
-				lock := filepath.Join(c.f.dir, ".git", "index.lock")
-				c.s.beforeOwnerMerge = func() {
-					st.leave(t, c.f.dir, tip, land)
-					write(t, c.f.dir, ".git/index.lock", "") // the merge fails on it
-				}
-				_, err := c.s.Finish(bg, false, "")
-				if err == nil {
-					t.Fatal("Finish succeeded")
-				}
-				msg := err.Error()
-				mustContain(t, msg, "partly updated", tip, land, lock)
-				cmds := backticked.FindAllStringSubmatch(msg, -1)
-				if len(cmds) != 4 {
-					t.Fatalf("want three commands to go back and one more to complete, got %d in:\n%s", len(cmds), msg)
-				}
-				os.Remove(lock) // "if no git command is running, remove the lock"
-				run := cmds[:3]
-				if way == "complete" {
-					run = cmds
-				}
-				for _, m := range run {
-					shCmd(t, c.f.dir, m[1])
-				}
+			for _, from := range []string{".", "docs"} {
+				t.Run(st.name+", "+way+", from "+from, func(t *testing.T) {
+					c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n", "u.txt": "u\n",
+						"d/y": "y\n", "docs/keep.txt": "keep\n"}, nil)
+					want := map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n", "d/y": "y\n"}
+					var added []string
+					switch st.kind {
+					case "adds":
+						c.apply(t, "adds", Change{Op: "create", Path: "-new.txt", Text: "n"}, Change{Op: "create", Path: "with space.txt", Text: "s"})
+						added = []string{"-new.txt", "with space.txt"}
+					case "swap":
+						c.apply(t, "no directory", Change{Op: "remove", Path: "d/y", FileTag: c.tag(t, "d/y")})
+						c.apply(t, "a file", Change{Op: "create", Path: "d", Text: "file"}, Change{Op: "create", Path: "new.txt", Text: "new"})
+						added = []string{"new.txt"}
+					default:
+						c.apply(t, "work",
+							Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+							Change{Op: "replace", Path: "-dash.txt", From: c.anchor(t, "-dash.txt", 1), Text: "D"},
+							Change{Op: "create", Path: "new.txt", Text: "new"},
+							Change{Op: "create", Path: "with space.txt", Text: "s"},
+							Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
+						added = []string{"new.txt", "with space.txt"}
+					}
+					tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+					land := c.head(t)
+					// The owner's own uncommitted work, none of it on a path
+					// the merge changes: docs/new.txt only shares its name
+					// with a file the merge adds at the top.
+					write(t, c.f.dir, "u.txt", "owner's edit\n")
+					write(t, c.f.dir, "docs/keep.txt", "owner's edit\n")
+					write(t, c.f.dir, "docs/new.txt", "owner's own\n")
+					const status = "M docs/keep.txt\n M u.txt\n?? docs/new.txt"
+					lock := filepath.Join(c.f.dir, ".git", "index.lock")
+					c.s.beforeOwnerMerge = func() {
+						st.leave(t, c.f.dir, tip, land)
+						write(t, c.f.dir, ".git/index.lock", "") // the merge fails on it
+					}
+					_, err := c.s.Finish(bg, false, "")
+					if err == nil {
+						t.Fatal("Finish succeeded")
+					}
+					msg := err.Error()
+					mustContain(t, msg, "partly updated", tip, land, lock)
+					cmds := backticked.FindAllStringSubmatch(msg, -1)
+					if len(cmds) < 2 || !strings.Contains(cmds[len(cmds)-1][1], "git merge --ff-only "+land) {
+						t.Fatalf("want the commands to go back and then the merge, got %d in:\n%s", len(cmds), msg)
+					}
+					os.Remove(lock) // "if no git command is running, remove the lock"
+					run := cmds[:len(cmds)-1]
+					if way == "complete" {
+						run = cmds
+					}
+					for i, m := range run {
+						// The owner stops at whatever looks like an error:
+						// going back prints nothing.
+						if out := shCmd(t, filepath.Join(c.f.dir, from), m[1]); out != "" && i < len(cmds)-1 {
+							t.Errorf("%s printed:\n%s", m[1], out)
+						}
+					}
 
-				if got := gitCmd(t, c.f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
-					t.Fatalf("HEAD is %s", got)
-				}
-				if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "M u.txt" {
-					t.Errorf("status after %s:\n%s", way, got)
-				}
-				if got := gitCmd(t, c.f.dir, "diff", "--cached", "--name-only"); got != "" {
-					t.Errorf("staged after %s:\n%s", way, got)
-				}
-				if mustRead(t, filepath.Join(c.f.dir, "u.txt")) != "owner's edit\n" {
-					t.Error("the owner's unrelated edit was lost")
-				}
-				main := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main")
-				if way == "complete" {
-					if main != land {
-						t.Errorf("main at %s, want %s", main, land)
+					if got := gitCmd(t, c.f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+						t.Fatalf("HEAD is %s", got)
 					}
-					return
-				}
-				if main != tip {
-					t.Errorf("main at %s, want %s", main, tip)
-				}
-				for p, w := range want {
-					if got := mustRead(t, filepath.Join(c.f.dir, p)); got != w {
-						t.Errorf("%s = %q, want %q", p, got, w)
+					if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != status {
+						t.Errorf("status after %s:\n%s", way, got)
 					}
-				}
-				for _, p := range added {
-					if exists(filepath.Join(c.f.dir, p)) {
-						t.Errorf("%s is still there", p)
+					if got := gitCmd(t, c.f.dir, "diff", "--cached", "--name-only"); got != "" {
+						t.Errorf("staged after %s:\n%s", way, got)
 					}
-				}
-			})
+					for p, w := range map[string]string{"u.txt": "owner's edit\n", "docs/keep.txt": "owner's edit\n", "docs/new.txt": "owner's own\n"} {
+						if got, _ := os.ReadFile(filepath.Join(c.f.dir, p)); string(got) != w {
+							t.Errorf("the owner's own %s is now %q", p, got)
+						}
+					}
+					main := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main")
+					if way == "complete" {
+						if main != land {
+							t.Errorf("main at %s, want %s", main, land)
+						}
+						return
+					}
+					if main != tip {
+						t.Errorf("main at %s, want %s", main, tip)
+					}
+					for p, w := range want {
+						if got := mustRead(t, filepath.Join(c.f.dir, p)); got != w {
+							t.Errorf("%s = %q, want %q", p, got, w)
+						}
+					}
+					for _, p := range added {
+						if exists(filepath.Join(c.f.dir, p)) {
+							t.Errorf("%s is still there", p)
+						}
+					}
+				})
+			}
 		}
 	}
+}
+
+// checkoutState is every file of a checkout (content, executable bit, link
+// target) and its index. Empty directories do not count: git keeps none.
+func checkoutState(t *testing.T, dir string) string {
+	t.Helper()
+	var b strings.Builder
+	err := filepath.Walk(dir, func(p string, fi os.FileInfo, err error) error {
+		if err != nil {
+			return err
+		}
+		rel, _ := filepath.Rel(dir, p)
+		switch {
+		case rel == ".git":
+			if fi.IsDir() {
+				return filepath.SkipDir
+			}
+		case fi.Mode()&os.ModeSymlink != 0:
+			to, _ := os.Readlink(p)
+			fmt.Fprintf(&b, "%q -> %q\n", rel, to)
+		case !fi.IsDir():
+			data, err := os.ReadFile(p)
+			fmt.Fprintf(&b, "%q x=%v %q %v\n", rel, fi.Mode()&0o100 != 0, data, err)
+		}
+		return nil
+	})
+	if err != nil {
+		t.Fatal(err)
+	}
+	fmt.Fprintf(&b, "index\n%s\n", gitCmd(t, dir, "ls-files", "-s"))
+	return b.String()
+}
+
+// TestRecoveryCommandsMatrix runs the recovery commands against real
+// checkouts in every state a cut-off fast-forward can leave: going back must
+// give exactly the checkout the owner had before the merge, their own
+// uncommitted work included.
+func TestRecoveryCommandsMatrix(t *testing.T) {
+	link := func(t *testing.T, dir, name, to string) {
+		t.Helper()
+		if err := os.Symlink(to, filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	remove := func(t *testing.T, dir, name string) {
+		t.Helper()
+		if err := os.RemoveAll(filepath.Join(dir, name)); err != nil {
+			t.Fatal(err)
+		}
+	}
+	type kase struct {
+		name   string
+		tip    func(t *testing.T, dir string) // more files in the old tip
+		land   func(t *testing.T, dir string) // what the landed commit changes
+		own    func(t *testing.T, dir string) // more uncommitted work of the owner
+		half   func(t *testing.T, dir string) // files git was cut off in the middle of
+		linked bool                           // the owner's checkout is a linked worktree
+		roots  bool                           // also run from the top of the checkout
+		// kept names a path the commands must report as left alone;
+		// completed is git's status after completing, when it is not the
+		// status from before the merge.
+		kept, completed string
+	}
+	plainLand := func(t *testing.T, dir string) {
+		write(t, dir, "a.txt", "A\n")
+		write(t, dir, "keep.txt", "KEEP\n")
+		write(t, dir, "new.txt", "new\n")
+		write(t, dir, "sub/deep/n.txt", "n\n")
+		remove(t, dir, "gone.txt")
+		remove(t, dir, "only")
+	}
+	plainTip := func(t *testing.T, dir string) {
+		write(t, dir, "a.txt", "a\n")
+		write(t, dir, "gone.txt", "g\n")
+		write(t, dir, "only/x.txt", "x\n")
+	}
+	plainHalf := func(t *testing.T, dir string) {
+		write(t, dir, "a.txt", "") // cut off while writing it
+		write(t, dir, "new.txt", "ne")
+		remove(t, dir, "sub")               // not written yet
+		write(t, dir, "keep.txt", "keep\n") // not written yet
+	}
+	cases := []kase{
+		{name: "plain", tip: plainTip, land: plainLand, half: plainHalf, roots: true},
+		{name: "linked worktree", tip: plainTip, land: plainLand, half: plainHalf, linked: true, roots: true},
+		{name: "odd names",
+			tip: func(t *testing.T, dir string) {
+				write(t, dir, "-dash.txt", "d\n")
+				write(t, dir, "g*.txt", "g\n")
+				write(t, dir, "gx.txt", "gx\n")
+				write(t, dir, "line\nbreak.txt", "l\n")
+			},
+			land: func(t *testing.T, dir string) {
+				write(t, dir, "-dash.txt", "D\n")
+				write(t, dir, "-n.txt", "n\n")
+				write(t, dir, "-rf", "n\n")
+				write(t, dir, "sp ace.txt", "s\n")
+				write(t, dir, "new\nline.txt", "s\n")
+				write(t, dir, "*.txt", "star\n")
+				write(t, dir, "[u].txt", "class\n")
+				write(t, dir, "?.txt", "any\n")
+				write(t, dir, ":colon.txt", "c\n")
+				write(t, dir, "docs/*", "c\n")
+				write(t, dir, "line\nbreak.txt", "L\n")
+				remove(t, dir, "g*.txt")
+			},
+			half: func(t *testing.T, dir string) {
+				write(t, dir, "*.txt", "st")
+				write(t, dir, "line\nbreak.txt", "")
+				remove(t, dir, "-rf")
+			}},
+		{name: "file for directory",
+			tip: func(t *testing.T, dir string) {
+				write(t, dir, "d/y", "y\n")
+				write(t, dir, "d/sub/z", "z\n")
+			},
+			land: func(t *testing.T, dir string) {
+				remove(t, dir, "d")
+				write(t, dir, "d", "file\n")
+			},
+			half: func(t *testing.T, dir string) { remove(t, dir, "d") }}, // directory gone, file not written
+		{name: "directory for file",
+			tip: func(t *testing.T, dir string) { write(t, dir, "d", "file\n") },
+			land: func(t *testing.T, dir string) {
+				remove(t, dir, "d")
+				write(t, dir, "d/y", "y\n")
+				write(t, dir, "d/sub/z", "z\n")
+			},
+			half: func(t *testing.T, dir string) { remove(t, dir, "d/sub") }},
+		// The paths the merge adds lie behind a link in the old tip: seen
+		// through it they are the owner's own files in docs.
+		{name: "directory for link", roots: true,
+			tip: func(t *testing.T, dir string) { link(t, dir, "d", "docs") },
+			land: func(t *testing.T, dir string) {
+				remove(t, dir, "d")
+				write(t, dir, "d/new.txt", "n\n")
+				write(t, dir, "d/keep.txt", "k\n")
+			},
+			half: func(t *testing.T, dir string) { remove(t, dir, "d/keep.txt") }},
+		{name: "link for directory",
+			tip: func(t *testing.T, dir string) {
+				write(t, dir, "d/new.txt", "n\n")
+				write(t, dir, "d/keep.txt", "k\n")
+			},
+			land: func(t *testing.T, dir string) {
+				remove(t, dir, "d")
+				link(t, dir, "d", "docs")
+			},
+			half: func(t *testing.T, dir string) { remove(t, dir, "d") }},
+		{name: "links and modes",
+			tip: func(t *testing.T, dir string) {
+				write(t, dir, "a.txt", "a\n")
+				write(t, dir, "run.sh", "#!/bin/sh\n")
+				link(t, dir, "oldlink", "u.txt")
+				link(t, dir, "tofile", "docs")
+			},
+			land: func(t *testing.T, dir string) {
+				remove(t, dir, "a.txt")
+				link(t, dir, "a.txt", "u.txt")
+				link(t, dir, "todocs", "docs")
+				remove(t, dir, "oldlink")
+				remove(t, dir, "tofile")
+				write(t, dir, "tofile", "now a file\n")
+				if err := os.Chmod(filepath.Join(dir, "run.sh"), 0o755); err != nil {
+					t.Fatal(err)
+				}
+			}},
+		// The owner had staged the very content the merge brings and then
+		// kept editing: git merges over that, and the edits are theirs.
+		{name: "the owner's own edits on the merge's paths", tip: plainTip, land: plainLand,
+			own: func(t *testing.T, dir string) {
+				write(t, dir, "a.txt", "A\n")
+				write(t, dir, "new.txt", "new\n")
+				gitCmd(t, dir, "add", "a.txt", "new.txt")
+				write(t, dir, "a.txt", "mine\n")
+				write(t, dir, "new.txt", "mine too\n")
+			},
+			roots:     true,
+			kept:      "new.txt",
+			completed: "M a.txt\n M docs/keep.txt\n M new.txt\nM  s.txt\n M u.txt\n?? docs/new.txt"},
+	}
+	states := []string{"nothing written", "files written", "cut off in a file", "index at land"}
+	for _, k := range cases {
+		for _, st := range states {
+			if st == "cut off in a file" && k.half == nil {
+				continue
+			}
+			for _, way := range []string{"go back", "complete"} {
+				for _, from := range []string{"docs", "."} {
+					if from == "." && !k.roots {
+						continue
+					}
+					t.Run(k.name+", "+st+", "+way+", from "+from, func(t *testing.T) {
+						dir := newDir(t)
+						gitCmd(t, dir, "config", "user.name", "Ada")
+						gitCmd(t, dir, "config", "user.email", "ada@example.com")
+						for p, text := range map[string]string{"u.txt": "u\n", "s.txt": "s\n", "keep.txt": "keep\n", "docs/keep.txt": "keep\n"} {
+							write(t, dir, p, text)
+						}
+						if k.tip != nil {
+							k.tip(t, dir)
+						}
+						tip := commit(t, dir, "tip")
+						gitCmd(t, dir, "checkout", "-q", "-b", "work")
+						k.land(t, dir)
+						land := commit(t, dir, "land")
+						if k.linked {
+							wt := filepath.Join(newDirPath(t), "owner")
+							gitCmd(t, dir, "worktree", "add", "-q", wt, "main")
+							dir = wt
+						} else {
+							gitCmd(t, dir, "checkout", "-q", "main")
+						}
+
+						// The owner's uncommitted work: edits, a staged edit,
+						// and files named like ones the merge touches.
+						write(t, dir, "u.txt", "owner's edit\n")
+						write(t, dir, "docs/keep.txt", "owner's edit\n")
+						write(t, dir, "docs/new.txt", "owner's own\n")
+						write(t, dir, "s.txt", "staged\n")
+						gitCmd(t, dir, "add", "s.txt")
+						if k.own != nil {
+							k.own(t, dir)
+						}
+						before := checkoutState(t, dir)
+						status := gitCmd(t, dir, "status", "--porcelain", "--untracked-files=all")
+
+						// What git merge --ff-only does, up to where it was
+						// cut off: it writes the files, then the index, then
+						// the branch.
+						switch st {
+						case "files written", "cut off in a file":
+							index := gitCmd(t, dir, "rev-parse", "--git-path", "index")
+							if !filepath.IsAbs(index) {
+								index = filepath.Join(dir, index)
+							}
+							data, err := os.ReadFile(index)
+							if err != nil {
+								t.Fatal(err)
+							}
+							tmp := filepath.Join(t.TempDir(), "index")
+							if err := os.WriteFile(tmp, data, 0o644); err != nil {
+								t.Fatal(err)
+							}
+							if out, err := shOut(dir, "git read-tree -m -u "+tip+" "+land, "GIT_INDEX_FILE="+tmp); err != nil {
+								t.Fatalf("read-tree: %v\n%s", err, out)
+							}
+							if st == "cut off in a file" {
+								k.half(t, dir)
+							}
+						case "index at land":
+							gitCmd(t, dir, "read-tree", "-m", "-u", tip, land)
+						}
+
+						cmds := recoveryCommands(tip, land)
+						run := cmds[:len(cmds)-1]
+						if way == "complete" {
+							run = cmds
+						}
+						var printed string
+						for i, line := range run {
+							if out := shCmd(t, filepath.Join(dir, from), line); i < len(cmds)-1 {
+								printed += out
+							}
+						}
+						if k.kept == "" && printed != "" {
+							t.Errorf("the commands printed:\n%s", printed)
+						}
+						if k.kept != "" && !strings.Contains(printed, k.kept) {
+							t.Errorf("the commands do not say that %s was left alone:\n%s", k.kept, printed)
+						}
+
+						if got := gitCmd(t, dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+							t.Fatalf("HEAD is %s", got)
+						}
+						main := gitCmd(t, dir, "rev-parse", "refs/heads/main")
+						if way == "go back" {
+							if main != tip {
+								t.Errorf("main at %s, want %s", main, tip)
+							}
+							if got := checkoutState(t, dir); got != before {
+								t.Errorf("the checkout is not what it was before the merge:\n%s\nwant:\n%s", got, before)
+							}
+							return
+						}
+						if main != land {
+							t.Errorf("main at %s, want %s", main, land)
+						}
+						want := status
+						if k.completed != "" {
+							want = k.completed
+						}
+						if got := gitCmd(t, dir, "status", "--porcelain", "--untracked-files=all"); got != want {
+							t.Errorf("status after completing:\n%s\nwant:\n%s", got, want)
+						}
+						for p, w := range map[string]string{"u.txt": "owner's edit\n", "docs/keep.txt": "owner's edit\n", "docs/new.txt": "owner's own\n", "s.txt": "staged\n"} {
+							if got, _ := os.ReadFile(filepath.Join(dir, p)); string(got) != w {
+								t.Errorf("the owner's own %s is now %q", p, got)
+							}
+						}
+						if k.own != nil {
+							for p, w := range map[string]string{"a.txt": "mine\n", "new.txt": "mine too\n"} {
+								if got, _ := os.ReadFile(filepath.Join(dir, p)); string(got) != w {
+									t.Errorf("the owner's own %s is now %q", p, got)
+								}
+							}
+						}
+					})
+				}
+			}
+		}
+	}
+}
+
+// The commands to go back reason from a checkout that was at the old tip:
+// anywhere else they must change nothing.
+func TestRecoveryCommandsDoNothingElsewhere(t *testing.T) {
+	dir := newDir(t)
+	gitCmd(t, dir, "config", "user.name", "Ada")
+	gitCmd(t, dir, "config", "user.email", "ada@example.com")
+	write(t, dir, "a.txt", "a\n")
+	write(t, dir, "config", "c\n")
+	tip := commit(t, dir, "tip")
+	write(t, dir, "a.txt", "A\n")
+	write(t, dir, "HEAD", "new\n")
+	land := commit(t, dir, "land")
+	write(t, dir, "b.txt", "b\n")
+	commit(t, dir, "elsewhere")
+	write(t, dir, "a.txt", "uncommitted\n")
+	write(t, dir, "HEAD", "uncommitted\n")
+	before := checkoutState(t, dir)
+	head := mustRead(t, filepath.Join(dir, ".git", "HEAD"))
+	cmds := recoveryCommands(tip, land)
+	for _, from := range []string{".", ".git"} {
+		for _, line := range cmds[:len(cmds)-1] {
+			if out, err := shOut(filepath.Join(dir, from), line); err == nil {
+				t.Errorf("from %s, in a checkout that is not at the old tip, sh -c %q succeeded:\n%s", from, line, out)
+			}
+		}
+	}
+	if got := checkoutState(t, dir); got != before {
+		t.Errorf("the checkout changed:\n%s\nwant:\n%s", got, before)
+	}
+	if got := mustRead(t, filepath.Join(dir, ".git", "HEAD")); got != head {
+		t.Errorf(".git/HEAD is now %q", got)
+	}
+
+	// At the old tip, but run from inside the git directory, where the
+	// merge's paths would name git's own files.
+	gitCmd(t, dir, "checkout", "-q", "-f", "-B", "main", tip)
+	before = checkoutState(t, dir)
+	for _, line := range cmds[:len(cmds)-1] {
+		if out, err := shOut(filepath.Join(dir, ".git"), line); err == nil {
+			t.Errorf("from the git directory, sh -c %q succeeded:\n%s", line, out)
+		}
+	}
+	if got := checkoutState(t, dir); got != before {
+		t.Errorf("the checkout changed:\n%s\nwant:\n%s", got, before)
+	}
+	if got := mustRead(t, filepath.Join(dir, ".git", "HEAD")); got != head {
+		t.Errorf(".git/HEAD is now %q", got)
+	}
+}
+
+// newDirPath is a fresh resolved directory outside any repository.
+func newDirPath(t *testing.T) string {
+	t.Helper()
+	dir, err := filepath.EvalSymlinks(t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	return dir
 }
 
 func TestSessionBranchBeingRebasedElsewhereIsKept(t *testing.T) {

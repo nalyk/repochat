@@ -729,31 +729,56 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 		}
 		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
 	}
-	// git refuses a fast-forward when a path it touches has local changes, so
-	// every path that differs between tip and land held exactly tip's content
-	// before the merge: those paths, and only those, are put back to tip,
-	// whether git was cut off before or after it wrote the index. The paths
-	// land adds are taken out of the index and off the disk, the others
-	// checked out from tip. Completing is going back and then the merge.
-	// Renames are listed as a deletion and an addition (--no-renames). Each
-	// step runs through sh, which does nothing for an empty list: GNU xargs
-	// runs its command once even without input, and git checkout without
-	// paths would switch the checkout to the commit. Paths are literal, never
-	// patterns.
-	step := func(filter, cmd string) string {
-		return fmt.Sprintf(`git diff -z --no-renames --name-only --diff-filter=%s %s %s | xargs -0 sh -c 'test $# -gt 0 || exit 0; %s -- "$@"' sh`, filter, tip, land, cmd)
-	}
+	cmds := recoveryCommands(tip, land)
 	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only did not complete. %s is still at %s; the commit being landed is %s. The session, its branch and its workspace are kept. "+
-		"To recover, in the checkout, first, if no git command is running, remove the lock file %s. "+
-		"Then, to go back to %s, run these three commands in order: `%s`, then `%s`, then `%s`. "+
-		"To complete the merge instead, run the same three and then `git merge --ff-only %s`. "+
-		"They touch only the paths the merge changes: git refuses a fast-forward when one of them has uncommitted changes, so before the merge each of them held exactly %s's content, and other uncommitted changes are kept",
+		"To recover, first, if no git command is running, remove the lock file %s. "+
+		"Then, to go back to %s, run these two commands in order, from any directory of the checkout: `%s`, then `%s`. "+
+		"To complete the merge instead, run the same two and then `%s`. "+
+		"The two do nothing unless the checkout is at %s, and touch only the paths the merge changes, putting each back to that commit's content: git refuses a fast-forward over uncommitted changes to one of them, so the merge's own writing is all they undo. "+
+		"The one exception they leave alone and name: a path whose staged content already was the landed commit's while the file was edited further. Other uncommitted changes are kept",
 		rec.StartBranch, tip, land, SanitizeLine(ownerIndexLock(s.owner)),
-		tip,
-		step("A", "git --literal-pathspecs rm -q --cached --ignore-unmatch"),
-		step("A", "rm -f"),
-		step("DMT", "git --literal-pathspecs checkout --no-overlay "+tip),
-		land, tip)
+		tip, cmds[0], cmds[1], cmds[2], tip)
+}
+
+// recoveryCommands are the shell command lines the owner runs after a
+// fast-forward from tip to land was cut off halfway: all but the last put the
+// checkout back to tip, and the last is the merge itself, so that completing
+// is going back and then merging.
+//
+// git fast-forwards over a path that differs between tip and land in two
+// cases only: index and file both hold tip's content (git then writes the
+// file), or the index already holds land's content (git then leaves the file
+// alone, whatever is in it). It writes every file before it writes the index.
+// So a path whose index entry is land's while its file differs from the index
+// holds the owner's own edit, in every state: it is left alone and named.
+// Every other path of the diff held exactly tip's content, and is put back:
+// the paths land adds are taken out of the index and off the disk, the others
+// checked out from tip, whether git was cut off before, while or after it
+// wrote the files or the index.
+//
+// Each line works from any directory of the checkout (the paths git diff
+// prints are relative to its top) and does nothing outside a checkout that is
+// at tip. Renames are listed as a deletion and an addition (--no-renames).
+// Each list runs through sh, which does nothing for an empty one, since GNU
+// xargs runs its command once even without input. Paths are literal, never
+// patterns, and are handled one at a time, so that a file where the other
+// commit has a directory is no obstacle. A path land adds is deleted from the
+// disk only when git lists it as an untracked file there: not while tip's
+// directory still stands in its place, and never through a link that tip has
+// in its place, behind which the owner's own files lie.
+func recoveryCommands(tip, land string) []string {
+	const top = `cd "$(git rev-parse --show-toplevel)" && `
+	own := `if git --literal-pathspecs diff-index --cached --quiet ` + land + ` -- "$p" && ! git --literal-pathspecs diff --no-ext-diff --quiet -- "$p"; then printf "%s\n" "left as it is, with your own uncommitted changes: $p"; continue; fi; `
+	step := func(filter, restore string) string {
+		return top + `test "$(git rev-parse --is-inside-work-tree),$(git rev-parse HEAD)" = true,` + tip +
+			` && git diff -z --no-renames --name-only --diff-filter=` + filter + ` ` + tip + ` ` + land +
+			` | xargs -0 sh -c 'test $# -gt 0 || exit 0; for p do ` + own + restore + ` || exit 255; done' sh`
+	}
+	return []string{
+		step("A", `git update-index --force-remove -- "$p" || exit 255; if { test -L "$p" || test -f "$p"; } && test -n "$(git --literal-pathspecs ls-files -o -- "$p")"; then rm -f -- "$p"; fi`),
+		step("DMT", `git --literal-pathspecs checkout --no-overlay `+tip+` -- "$p"`),
+		top + "git merge --ff-only " + land,
+	}
 }
 
 // deleteBranch deletes the session branch, unless a worktree other than the
