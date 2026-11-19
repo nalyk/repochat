@@ -113,7 +113,7 @@ repochat call read_file '{"path":"README.md"}'    # exact textul pe care l-ar pr
 | `--max-output-kb N` | bugetul unui răspuns, cu tot cu linia `@meta` (16–2048, implicit 32) |
 | `--profile NUME` | alt tunel salvat |
 
-Un fișier `.repochatignore` în repository (aceeași sintaxă ca `.gitignore`, citită ca git: o negație `!` nu poate readuce un fișier dintr-un director exclus) reține fișiere pentru toți cei care servesc acel repository. El poate doar să strângă: `--allow` nu trece peste el.
+Un fișier `.repochatignore` în repository (aceeași sintaxă ca `.gitignore`) reține fișiere pentru toți cei care servesc acel repository. Ce înseamnă o regulă hotărăște git-ul tău, nu o reimplementare: repochat întreabă `git check-ignore` într-un repository gol, izolat de configurația ta, a sistemului și a repository-ului servit, în loturi, și ține minte răspunsurile cât timp regulile și programul git rămân aceleași. Poți verifica o regulă cu aceeași comandă. Numele se compară exact (majusculele contează). Dacă git nu poate fi întrebat, nimic nu se servește: lista de fișiere nu se construiește, iar o cale izolată este reținută ca `policy-unavailable`. El poate doar să strângă: `--allow` nu trece peste el.
 
 Ordinea regulilor: fișierele proprii ale repochat → nume nesuportat → `.repochatignore` → `--deny` → `--allow` → regulile implicite pentru secrete.
 

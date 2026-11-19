@@ -41,7 +41,8 @@ func fixture(t *testing.T, opts repo.Options) (string, *repo.Repo, map[string]mc
 	t.Helper()
 	dir, _ := filepath.EvalSymlinks(t.TempDir())
 	t.Setenv("HOME", t.TempDir())
-	git(t, dir, "init", "-q", "-b", "main")
+	git(t, dir, "init", "-q")
+	git(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
 	for i := 0; i < 9; i++ {
 		write(t, dir, fmt.Sprintf("pkg/f%d.go", i), fmt.Sprintf("package pkg\n\n// needle %d\nfunc F%d() {}\n", i, i))
 	}
@@ -377,7 +378,8 @@ func TestRepositoryNameIsNotASecretChannel(t *testing.T) {
 	dir := filepath.Join(base, token)
 	os.MkdirAll(dir, 0o755)
 	t.Setenv("HOME", t.TempDir())
-	git(t, dir, "init", "-q", "-b", "main")
+	git(t, dir, "init", "-q")
+	git(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
 	write(t, dir, "a.txt", "hello\n")
 	git(t, dir, "add", "-A")
 	git(t, dir, "commit", "-q", "-m", "first")

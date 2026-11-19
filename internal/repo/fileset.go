@@ -105,6 +105,15 @@ func (r *Repo) Snapshot(ctx context.Context) (*Snapshot, error) {
 	return s, nil
 }
 
+// primePolicy has the policy judge a list of paths in one go (see
+// Policy.Prime) before they are checked one by one. A failure is not
+// reported here: each check then finds no answer and withholds the path.
+func (r *Repo) primePolicy(ctx context.Context, paths []string) {
+	if pol, err := r.Policy(ctx); err == nil {
+		_ = pol.Prime(ctx, paths)
+	}
+}
+
 // Policy returns the current policy (from the current snapshot).
 func (r *Repo) Policy(ctx context.Context) (*Policy, error) {
 	s, err := r.Snapshot(ctx)
@@ -145,6 +154,17 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	s.Policy.own = r.own
 	s.Policy.hash += "+" + strings.Join(r.own, "|")
+	// The answers git gave for these rules are kept from one snapshot to the
+	// next; new rules start with none.
+	if o := s.Policy.oracle; o != nil {
+		r.mu.Lock()
+		if r.oracle != nil && bytes.Equal(r.oracle.rules, o.rules) {
+			s.Policy.oracle = r.oracle
+		} else {
+			r.oracle = o
+		}
+		r.mu.Unlock()
+	}
 
 	const listLimit = 256 << 20
 	cached, err := r.git(ctx, listLimit, "ls-files", "-z", "--stage")
@@ -206,6 +226,15 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	}
 
 	sort.Slice(s.Entries, func(i, j int) bool { return s.Entries[i].Path < s.Entries[j].Path })
+	// One question to git for the whole list. Without its answers nothing
+	// here is known to be allowed, so there is no list.
+	all := make([]string, len(s.Entries))
+	for i := range s.Entries {
+		all[i] = s.Entries[i].Path
+	}
+	if err := s.Policy.Prime(ctx, all); err != nil {
+		return nil, fmt.Errorf(".repochatignore could not be evaluated (%v); refusing to serve without the policy it defines", err)
+	}
 	h := sha256.New()
 	h.Write([]byte(s.Policy.hash))
 	for i := range s.Entries {

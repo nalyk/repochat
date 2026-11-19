@@ -77,7 +77,8 @@ type Repo struct {
 	red      *Redactor
 	allow    []*Glob
 	deny     []*Glob
-	own      []string // Options.Own as repository-relative prefixes, lower case
+	own      []string      // Options.Own as repository-relative prefixes, lower case
+	oracle   *ignoreOracle // git's answers about .repochatignore, kept while the rules stay the same
 	version  [3]int
 
 	mu         sync.Mutex

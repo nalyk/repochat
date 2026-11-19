@@ -34,7 +34,8 @@ def run(repochat, testbin, work):
         with open(os.path.join(proj, name), "w") as f:
             f.write(content)
     git = ["git", "-c", "user.name=A", "-c", "user.email=a@example.com"]
-    subprocess.run(git + ["init", "-q", "-b", "main"], cwd=proj, check=True)
+    subprocess.run(git + ["init", "-q"], cwd=proj, check=True)
+    subprocess.run(git + ["symbolic-ref", "HEAD", "refs/heads/main"], cwd=proj, check=True)  # init -b needs git 2.28
     subprocess.run(git + ["add", "-A"], cwd=proj, check=True)
     subprocess.run(git + ["commit", "-q", "-m", "first"], cwd=proj, check=True)
 

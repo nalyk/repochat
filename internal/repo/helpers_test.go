@@ -53,7 +53,8 @@ func newDir(t *testing.T) string {
 	// Keep the user's real git configuration out of the tests.
 	t.Setenv("HOME", t.TempDir())
 	t.Setenv("XDG_CONFIG_HOME", filepath.Join(os.Getenv("HOME"), ".config"))
-	gitCmd(t, dir, "init", "-q", "-b", "main")
+	gitCmd(t, dir, "init", "-q")
+	gitCmd(t, dir, "symbolic-ref", "HEAD", "refs/heads/main")
 	return dir
 }
 

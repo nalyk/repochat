@@ -44,7 +44,8 @@ func submoduleFixture(t *testing.T) subFixture {
 		t.Fatal(err)
 	}
 	fx := subFixture{super: newDir(t)}
-	gitCmd(t, lib, "init", "-q", "-b", "main")
+	gitCmd(t, lib, "init", "-q")
+	gitCmd(t, lib, "symbolic-ref", "HEAD", "refs/heads/main")
 	write(t, lib, "lib.txt", "v1\n")
 	write(t, lib, ".env", "DB_PASSWORD=subsecret-1\n")
 	fx.s[0] = commit(t, lib, "SUBSUBJECT one")
@@ -1000,7 +1001,8 @@ func TestGitDirThatDoesNotPointBackIsReported(t *testing.T) {
 	if err := os.MkdirAll(work, 0o755); err != nil {
 		t.Fatal(err)
 	}
-	gitCmd(t, work, "init", "-q", "-b", "main", "--separate-git-dir", filepath.Join(separate, "store.git"))
+	gitCmd(t, work, "init", "-q", "--separate-git-dir", filepath.Join(separate, "store.git"))
+	gitCmd(t, work, "symbolic-ref", "HEAD", "refs/heads/main")
 	write(t, work, "a.txt", "a\n")
 	commit(t, work, "first")
 	// git records nothing in a separate git directory that leads back to the

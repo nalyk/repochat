@@ -1397,42 +1397,12 @@ func (o *gitOracle) ignored(rules []string) map[string]bool {
 	return ignored
 }
 
-// gitReading applies rules by their git reading alone (the policy combines
-// it with a more lenient one), to check that the port of git's matcher is
-// exact in both directions.
-func gitReading(rules []string, rel string) bool {
-	type rule struct {
-		g      gitPattern
-		negate bool
-	}
-	var parsed []rule
-	for _, line := range rules {
-		line = strings.TrimSuffix(line, "\r")
-		if line == "" || strings.HasPrefix(line, "#") {
-			continue
-		}
-		negate := strings.HasPrefix(line, "!")
-		parsed = append(parsed, rule{parseGitPattern(strings.TrimPrefix(line, "!")), negate})
-	}
-	last := func(path string, isDir bool) bool {
-		for i := len(parsed) - 1; i >= 0; i-- {
-			if parsed[i].g.match(path, isDir) {
-				return !parsed[i].negate
-			}
-		}
-		return false
-	}
-	for i := 0; i < len(rel); i++ {
-		if rel[i] == '/' && last(rel[:i], true) {
-			return true
-		}
-	}
-	return last(rel, false)
-}
-
-// The port of git's pattern matcher must agree with git exactly, on the
-// table and on generated rule sets that include malformed patterns.
-func TestGitPatternMatcherIsExact(t *testing.T) {
+// The policy asks git about names, in an empty scratch repository, where the
+// user's git would be looking at files. The two must give the same answer,
+// exactly and in both directions, on the table and on generated rule sets
+// that include malformed patterns: this is what makes "the same syntax as
+// .gitignore" true whatever git is installed.
+func TestGitJudgesNamesAsItJudgesFiles(t *testing.T) {
 	paths := append([]string{}, ignoreProbePaths...)
 	paths = append(paths, []string{"ab", "abz", "a/x/b", "b/a", "x", "x/y/z", "a]", "a-", "!a", "a\\b", "a ", " a", "*", "a*b", "?", "a?", "[", "[a]", "a.b", ".a", "a/.b", "-", "é", "aé", "é/a", "ab/é.txt"}...)
 	oracle := newGitOracle(t, paths)
@@ -1456,9 +1426,23 @@ func TestGitPatternMatcherIsExact(t *testing.T) {
 	yes, no := 0, 0
 	for _, rules := range sets {
 		want := oracle.ignored(rules)
+		byName := newIgnoreOracle(strings.Join(rules, "\n") + "\n")
+		var names []string
 		for _, path := range paths {
-			if got := gitReading(rules, path); got != want[path] {
-				t.Errorf("rules %q, path %q: git says ignored=%v, the port says %v", rules, path, want[path], got)
+			if SupportedName(path) {
+				names = append(names, path)
+			}
+		}
+		if err := byName.decide(bg, names); err != nil {
+			t.Fatalf("rules %q: %v", rules, err)
+		}
+		if byName.runs != 1 {
+			t.Fatalf("%d paths took %d git processes", len(names), byName.runs)
+		}
+		for _, path := range names {
+			got, err := byName.ignored(bg, path)
+			if err != nil || got != want[path] {
+				t.Errorf("rules %q, path %q: for the file git says ignored=%v, for the name %v (%v)", rules, path, want[path], got, err)
 			}
 			if want[path] {
 				yes++
@@ -1507,6 +1491,9 @@ func TestIgnoreFileAgreesWithGit(t *testing.T) {
 			continue
 		}
 		want := oracle.ignored(rules)
+		if err := p.Prime(bg, ignoreProbePaths); err != nil {
+			t.Fatalf("rules %q: %v", rules, err)
+		}
 		for _, path := range ignoreProbePaths {
 			got := p.ignored(path)
 			if !SupportedName(path) && p.Check(path) == "" {
@@ -1548,6 +1535,7 @@ func TestIgnoreRulesOnlyEverTighten(t *testing.T) {
 	rng := rand.New(rand.NewSource(5))
 	pieces := []string{"a", "b", "z", "x", ".txt", "/", "/", "*", "*", "**", "?", "[ab]", "[!a]", "[a-c]", "[[:alpha:]]", `\*`, `\ `, " ", "-", "é", "**/", "/**", "./", "\t"}
 	paths := append([]string{"ab", "abz", "a/x/b", "b/a", "x", "x/y/z", "a b", " a", "a*b", "é", "é/a.txt", "a/b/é.txt", "a/ b/z.txt"}, ignoreProbePaths...)
+	oracle := newGitOracle(t, paths)
 	accepted, withheld := 0, 0
 	for n := 0; n < 700; n++ {
 		var set []string
@@ -1566,6 +1554,10 @@ func TestIgnoreRulesOnlyEverTighten(t *testing.T) {
 			continue // refusing a rule set is always safe
 		}
 		accepted++
+		want := oracle.ignored(set)
+		if err := p.Prime(bg, paths); err != nil {
+			t.Fatalf("rules %q: %v", set, err)
+		}
 		for _, path := range paths {
 			if !SupportedName(path) {
 				continue
@@ -1577,7 +1569,7 @@ func TestIgnoreRulesOnlyEverTighten(t *testing.T) {
 					before = !r.negate
 				}
 			}
-			if gitReading(set, path) && !got {
+			if want[path] && !got {
 				t.Errorf("rules %q: git would ignore %q, the policy serves it", set, path)
 			}
 			if before && !got {
@@ -1603,9 +1595,6 @@ func FuzzIgnoreRule(f *testing.F) {
 		if len(line) > 600 || len(path) > 600 || len(other) > 600 || strings.ContainsRune(line, 0) || strings.Contains(line, "\n") {
 			return
 		}
-		g := parseGitPattern(strings.TrimPrefix(line, "!"))
-		g.match(path, true)
-		g.match(other, false)
 		p, err := NewPolicy(line+"\n", nil, nil)
 		if err != nil || len(p.ignore) == 0 || strings.HasSuffix(line, "\r") {
 			return // refused, a comment or a blank line; a final CR belongs to the line terminator
@@ -1614,8 +1603,12 @@ func FuzzIgnoreRule(f *testing.F) {
 			if !SupportedName(s) {
 				continue
 			}
-			if !strings.HasPrefix(line, "!") && g.match(s, false) && !p.ignored(s) {
-				t.Fatalf("rule %q: its git reading matches %q but the policy serves it", line, s)
+			// Whatever the rule, the answer is one of two and is stable.
+			if first := p.ignored(s); first != p.ignored(s) {
+				t.Fatalf("rule %q: the answer for %q changed between two checks", line, s)
+			}
+			if p.lenient(s) && !p.ignored(s) {
+				t.Fatalf("rule %q: the lenient reading withholds %q but the policy serves it", line, s)
 			}
 		}
 	})

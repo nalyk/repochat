@@ -279,6 +279,13 @@ func (r *Repo) status(ctx context.Context) (*Status, error) {
 		// overview, result footers) can pass them on.
 		st.HeadOID, st.HasAB, st.Ahead, st.Behind = "", false, 0, 0
 	}
+	// Staged files and old names of renames may not be in the working-tree
+	// list; have them all judged at once before anyone checks them.
+	names := append([]string{}, st.Untracked...)
+	for _, e := range st.Entries {
+		names = append(names, e.Path, e.Orig)
+	}
+	r.primePolicy(ctx, names)
 	return st, nil
 }
 
