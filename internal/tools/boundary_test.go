@@ -261,15 +261,20 @@ func gitSaysIgnored(t *testing.T, rules, path string) bool {
 	git(t, dir, "init", "-q")
 	write(t, dir, ".git/info/exclude", rules)
 	write(t, dir, path, "x\n")
-	cmd := exec.Command("git", "-c", "core.ignorecase=false", "check-ignore", "-q", "--no-index", path)
+	// The verbose record names the rule that decided. Without it, git before
+	// 2.27 also reports a path whose deciding rule is a negation, i.e. one
+	// that is not ignored.
+	cmd := exec.Command("git", "-c", "core.ignorecase=false", "check-ignore", "-v", "-n", "-z", "--no-index", "--stdin")
+	cmd.Stdin = strings.NewReader(path + "\x00")
 	cmd.Dir = dir
 	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
-	err := cmd.Run()
-	if exit, ok := err.(*exec.ExitError); ok && exit.ExitCode() == 1 {
-		return false
-	}
-	if err != nil {
+	out, err := cmd.Output()
+	if exit, ok := err.(*exec.ExitError); err != nil && !(ok && exit.ExitCode() == 1) {
 		t.Fatalf("git check-ignore: %v", err)
 	}
-	return true
+	fields := strings.Split(string(out), "\x00")
+	if len(fields) < 4 || fields[3] != path {
+		t.Fatalf("unexpected answer from git check-ignore: %q", out)
+	}
+	return fields[2] != "" && !strings.HasPrefix(fields[2], "!")
 }
