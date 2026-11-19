@@ -62,6 +62,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		"docs/guide.md":            "# Guide\n",
 		"old.txt":                  "to be removed\n",
 		"x.evil":                   "CANARY-FILTERED\n",
+		"x.evilp":                  "CANARY-FILTERED-PROCESS\n",
 		".env":                     "TOKEN=CANARY-ENV\n", // built-in secret rule
 		"vault/keys.txt":           "CANARY-VAULT\n",     // committed .repochatignore
 		"private/plan.txt":         "CANARY-PRIVATE\n",   // the owner's uncommitted .repochatignore
@@ -120,10 +121,13 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 			t.Fatal(err)
 		}
 	}
-	write(t, dir, ".git/info/attributes", "*.evil filter=evil\n*.go diff=evil\n")
+	// The long-running process filter has a driver of its own: on a driver
+	// that has one, git never starts the clean and smudge commands, and their
+	// marks could not appear whatever repochat did.
+	write(t, dir, ".git/info/attributes", "*.evil filter=evil\n*.evilp filter=evilproc\n*.go diff=evil\n")
 	og("config", "filter.evil.clean", mark("filter-clean", true))
 	og("config", "filter.evil.smudge", mark("filter-smudge", true))
-	og("config", "filter.evil.process", mark("filter-process", false))
+	og("config", "filter.evilproc.process", mark("filter-process", false))
 	og("config", "diff.evil.command", mark("diff-driver", false))
 	og("config", "diff.external", mark("diff-external", false))
 	og("config", "core.fsmonitor", mark("fsmonitor", false))
@@ -143,6 +147,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	write(t, outside, "lib/a.go", "package lib\n\n// CANARY-OUTSIDE-LIB\nfunc A() {}\n")
 	write(t, outside, "hard.txt", "alpha\nbeta\ngamma\n")
 	write(t, home, "canary.txt", "CANARY-HOME\n")
+	write(t, home, "hard.txt", "alpha\nbeta\ngamma\n")
 	write(t, stateParent, "canary.txt", "CANARY-STATE-PARENT\n")
 
 	// --- repochat in write mode -------------------------------------------
@@ -312,8 +317,29 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	libTag, _ := m["file_tag"].(string)
 	text, m = legit("read notes.txt", "read_file", map[string]any{"path": "notes.txt"})
 	notesTag, _ := m["file_tag"].(string)
-	if libTag == "" || notesTag == "" {
+	_, m = legit("read src/app.go", "read_file", map[string]any{"path": "src/app.go"})
+	appTag, _ := m["file_tag"].(string)
+	if libTag == "" || notesTag == "" || appTag == "" {
 		t.Fatalf("read_file gave no file_tag")
+	}
+	// refusedForItsPath checks that a refusal came from the path alone: the
+	// file was never opened to compare an anchor or a file tag.
+	refusedForItsPath := func(label, msg string) {
+		t.Helper()
+		for _, read := range []string{"does not match the current file", "but the file has", "does not match the file as it is now"} {
+			if strings.Contains(msg, read) {
+				t.Errorf("%s: the path passed every check and the file was read:\n%s", label, clipped(msg))
+			}
+		}
+	}
+	// removes drives removals that carry the real tag of the file a link
+	// leads to: nothing but the path checks stands between them and the file.
+	removes := func(group string, list map[string]string) {
+		t.Helper()
+		for p, tag := range list {
+			label := fmt.Sprintf("%s %q remove with the file's real tag", group, p)
+			refusedForItsPath(label, hostile(label, "apply_changes", ops(map[string]string{"op": "remove", "path": p, "file_tag": tag})))
+		}
 	}
 
 	relTo := func(target string) string { r, _ := filepath.Rel(ws, target); return r }
@@ -344,7 +370,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		"link-owner/new.txt", "link-owner/.git/config", "link-git", "link-git/config", "link-git/hooks/pre-commit", "link-env",
 		"link-vault/keys.txt", "link-vault/new.txt", "link-src", "link-src/app.go", "link-src/new.go", "link-up/x.txt",
 		// The submodule, and a file whose attributes name a filter.
-		"sub", "sub/x.txt", "x.evil",
+		"sub", "sub/x.txt", "x.evil", "x.evilp",
 	}
 	// matrix drives one path through every operation that names a path, as
 	// the path and as the target of a move, alone and next to a valid edit.
@@ -371,11 +397,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 				if valid && c.what != "after a valid edit" {
 					continue
 				}
-				msg := hostile(label+" "+c.what, "apply_changes", ops(c.ops...))
-				// Refused for its path: the file was never opened to check an anchor.
-				if strings.Contains(msg, "does not match the current file") || strings.Contains(msg, "but the file has") {
-					t.Errorf("%s %s: the path passed every check and the file was read:\n%s", label, c.what, clipped(msg))
-				}
+				refusedForItsPath(label+" "+c.what, hostile(label+" "+c.what, "apply_changes", ops(c.ops...)))
 				if c.what == "create" || c.what == "move onto" {
 					hostile(label+" "+c.what+" (propose)", "propose_changes", ops(c.ops...))
 				}
@@ -383,6 +405,16 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		}
 	}
 	matrix("path", paths, false)
+	// outside/hard.txt and the owner's notes.txt hold what the workspace's
+	// notes.txt holds, and the owner's lib/a.go what the workspace's does: the
+	// tags read from the workspace are theirs too.
+	removes("committed link", map[string]string{
+		"link-src/app.go":                             appTag,
+		"link-owner/notes.txt":                        notesTag,
+		"link-owner/lib/a.go":                         libTag,
+		"link-outside/hard.txt":                       notesTag,
+		"link-up/" + filepath.Base(ws) + "/notes.txt": notesTag,
+	})
 
 	// --- 3. Behind the session's back: links and swaps in the workspace ----
 	plants := map[string]string{
@@ -405,6 +437,12 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	}
 	sort.Strings(planted)
 	matrix("planted link", planted, false)
+	removes("planted link", map[string]string{
+		"plant-outside/hard.txt": notesTag,
+		"plant-owner/notes.txt":  notesTag,
+		"plant-owner/lib/a.go":   libTag,
+		"plant-home/hard.txt":    notesTag,
+	})
 	for p := range plants {
 		os.Remove(filepath.Join(ws, p))
 	}
@@ -529,15 +567,32 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	if err := os.Symlink(outside, ws); err != nil {
 		t.Fatal(err)
 	}
+	linked := ws
 	ws, wtGit = "", ""
 	hostile("apply while the workspace is a link out", "apply_changes", editA)
-	run("abandon_session", map[string]any{"delete_branch": true})
-	check("abandon a session whose workspace is a link out")
-	if _, err := sessions.Current(bg); err != repo.ErrNoSession {
-		// The record survives when the workspace could not be removed; the
-		// next abandon must still change nothing outside.
-		run("abandon_session", map[string]any{"delete_branch": true})
-		check("abandon again")
+	// Nothing is removed through a workspace path that is a link: abandon
+	// refuses, twice, and the session stays recorded.
+	for _, n := range []string{"", " again"} {
+		if msg := hostile("abandon a session whose workspace is a link out"+n, "abandon_session", map[string]any{"delete_branch": true}); !strings.Contains(msg, "nothing was removed") || !strings.Contains(msg, "start_session with fresh=true") {
+			t.Errorf("abandon through a link%s should say that nothing was removed and how to go on: %s", n, clipped(msg))
+		}
+	}
+	if _, err := sessions.Current(bg); err == nil || err == repo.ErrNoSession {
+		t.Errorf("the session whose workspace could not be removed should still be recorded, as broken: %v", err)
+	}
+	if fi, err := os.Lstat(linked); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link at the workspace path was touched: %v", err)
+	}
+	if _, err := os.Stat(filepath.Join(linked+".moved", "notes.txt")); err != nil {
+		t.Errorf("the moved workspace was removed through the refusal: %v", err)
+	}
+	// A fresh start leaves it all where it is and opens another session,
+	// which is abandoned as usual.
+	open("start_session fresh past a workspace that is a link out", map[string]any{"fresh": true})
+	closed() // its worktree's git directory goes with it
+	legit("abandon the fresh session", "abandon_session", map[string]any{"delete_branch": true})
+	if fi, err := os.Lstat(linked); err != nil || fi.Mode()&os.ModeSymlink == 0 {
+		t.Errorf("the link at the old workspace path was touched by the fresh start: %v", err)
 	}
 	noSession("after abandon")
 
@@ -616,6 +671,27 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 			t.Errorf("the control: %s is missing after a plain git commit, so the marks prove nothing", m)
 		}
 	}
+	// The same for the three filter programs: a plain git runs the clean
+	// command on add, the smudge command on checkout, and starts the process
+	// filter for the file whose driver has one.
+	plain := func(args ...string) {
+		cmd := exec.Command("git", args...)
+		cmd.Dir = dir
+		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+		out, err := cmd.CombinedOutput()
+		t.Logf("control: git %s: %v %s", strings.Join(args, " "), err, clipped(string(out)))
+	}
+	write(t, dir, "x.evil", "changed\n")
+	plain("add", "x.evil")
+	os.Remove(filepath.Join(dir, "x.evil"))
+	plain("checkout", "--", "x.evil")
+	write(t, dir, "x.evilp", "changed\n")
+	plain("add", "x.evilp") // the mark's script speaks no filter protocol: git reports it and goes on
+	for _, m := range []string{"RAN-filter-clean", "RAN-filter-smudge", "RAN-filter-process"} {
+		if _, err := os.Stat(filepath.Join(outside, m)); err != nil {
+			t.Errorf("the control: %s is missing after plain git ran over a filtered file, so that mark proves nothing", m)
+		}
+	}
 }
 
 var canaryRe = regexp.MustCompile(`CANARY-[A-Z-]*[A-Z]`)
@@ -631,7 +707,7 @@ func within(dir, p string) bool {
 func wbGit(t *testing.T, dir string, args ...string) string {
 	t.Helper()
 	safe := []string{"-c", "core.hooksPath=/dev/null", "-c", "core.fsmonitor=false", "-c", "filter.evil.clean=",
-		"-c", "filter.evil.smudge=", "-c", "filter.evil.process=", "-c", "filter.evil.required=false", "-c", "diff.external=",
+		"-c", "filter.evil.smudge=", "-c", "filter.evil.process=", "-c", "filter.evil.required=false", "-c", "filter.evilproc.process=", "-c", "diff.external=",
 		"-c", "core.editor=true", "-c", "sequence.editor=true"}
 	cmd := exec.Command("git", append(safe, args...)...)
 	cmd.Dir = dir

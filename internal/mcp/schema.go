@@ -235,12 +235,12 @@ func (s Schema) Validate(raw map[string]any) (Args, error) {
 			if err != nil {
 				return nil, fmt.Errorf("argument %q is not valid JSON", p.Name)
 			}
-			max := p.MaxBytes
-			if max <= 0 {
-				max = defaultObjectBytes
+			limit := p.MaxBytes
+			if limit <= 0 {
+				limit = defaultObjectBytes
 			}
-			if len(enc) > max {
-				return nil, fmt.Errorf("%s: too large (%d bytes, max %d)", p.Name, len(enc), max)
+			if len(enc) > limit {
+				return nil, fmt.Errorf("%s: too large (%d bytes, max %d)", p.Name, len(enc), limit)
 			}
 			out[p.Name] = json.RawMessage(enc)
 		case StringList:

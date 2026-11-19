@@ -2,6 +2,7 @@ package repo
 
 import (
 	"errors"
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -377,5 +378,131 @@ func TestUndoAcrossAFileThatBecameADirectory(t *testing.T) {
 				t.Errorf("the files after undoing the undo:\n%s\nwant:\n%s", got, swapped)
 			}
 		})
+	}
+}
+
+// A prefix that names more than one checkpoint, none, one before the latest
+// update, and a latest update that is not on the branch.
+func TestFindCheckpoint(t *testing.T) {
+	id := func(prefix string) string { return prefix + strings.Repeat("0", 40-len(prefix)) }
+	chain := []string{id("abcdef1a"), id("abcdef1b"), id("1234567"), id("7654321"), id("ba5e")} // newest first
+	base, update := chain[4], chain[2]
+	for _, tc := range []struct {
+		want, boundary, refusal string
+		index                   int
+	}{
+		{"abcdef1a", base, "", 0},
+		{"abcdef1b", base, "", 1},
+		{chain[3], base, "", 3},
+		{"ba5e000", base, "", 4},
+		{"abcdef1", base, "names more than one checkpoint; give more characters", 0},
+		{"abcdef", update, "names more than one checkpoint", 0},
+		{"fffffff", base, "is not a checkpoint of this session", 0},
+		{"1234567", update, "", 2},
+		{"7654321", update, "cannot undo past the update from main", 0},
+		{"ba5e000", update, "cannot undo past the update from main", 0},
+		{"abcdef1a", id("0ff"), "is not on its branch", 0},
+		{"fffffff", id("0ff"), "is not on its branch", 0},
+	} {
+		got, err := findCheckpoint(chain, tc.want, tc.boundary, "main")
+		switch {
+		case tc.refusal == "" && (err != nil || got != tc.index):
+			t.Errorf("findCheckpoint(%s, boundary %s) = %d, %v; want %d", tc.want, tc.boundary[:7], got, err, tc.index)
+		case tc.refusal != "" && (err == nil || !strings.Contains(err.Error(), tc.refusal) || !strings.Contains(err.Error(), "undo refused") || !strings.Contains(err.Error(), "nothing was changed")):
+			t.Errorf("findCheckpoint(%s, boundary %s) = %d, %v; want a refusal with %q that says nothing was changed", tc.want, tc.boundary[:7], got, err, tc.refusal)
+		}
+	}
+}
+
+// The record names a latest update that is not on the session branch (the
+// branch failed to move after the record was written, or the record was
+// edited): undo refuses, saying that nothing was changed.
+func TestUndoRefusesWhenTheRecordedUpdateIsOffTheBranch(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	base := c.base(t)
+	c.replaceLine(t, "a.txt", 1, "A")
+	write(t, c.f.dir, "o.txt", "o\n")
+	foreign := commit(t, c.f.dir, "owner's own")
+	rec, err := c.s.readRecord()
+	if err != nil {
+		t.Fatal(err)
+	}
+	rec.LastUpdate = foreign
+	if err := c.s.writeRecord(rec); err != nil {
+		t.Fatal(err)
+	}
+	c.refuseUndo(t, base, "is not on its branch")
+	c.refuseUndo(t, base, "nothing was changed")
+}
+
+// Files the undo would restore were changed in the workspace behind
+// repochat's back, on disk or in git's index: refused, nothing changed.
+func TestUndoRefusesFilesChangedOutside(t *testing.T) {
+	for _, tc := range []struct {
+		name, want string
+		tamper     func(t *testing.T, ws string)
+	}{
+		{"edited on disk", "belong to no checkpoint (made outside repochat)", func(t *testing.T, ws string) {
+			write(t, ws, "a.txt", "edited by hand\n")
+		}},
+		{"deleted on disk", "", func(t *testing.T, ws string) {
+			if err := os.Remove(filepath.Join(ws, "a.txt")); err != nil {
+				t.Fatal(err)
+			}
+		}},
+		{"an untracked file where the undo restores one", "belong to no checkpoint (made outside repochat)", func(t *testing.T, ws string) {
+			write(t, ws, "gone.txt", "put here by hand\n")
+		}},
+		{"index flagged", "is not in the session workspace's git index as the current checkpoint has it (changed outside repochat)", func(t *testing.T, ws string) {
+			gitCmd(t, ws, "update-index", "--assume-unchanged", "a.txt")
+		}},
+		{"staged by hand", "", func(t *testing.T, ws string) {
+			write(t, ws, "a.txt", "staged by hand\n")
+			gitCmd(t, ws, "add", "a.txt")
+		}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "gone.txt": "g\n", "b.txt": "b\n"}, nil)
+			base := c.base(t)
+			c.apply(t, "change", Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+				Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
+			head := c.head(t)
+			tc.tamper(t, c.ws.Root)
+			before := wsState(t, c.ws.Root)
+			_, err := c.s.UndoTo(bg, base)
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("UndoTo: %v; want %q and that nothing was changed", err, tc.want)
+			}
+			t.Logf("refused: %v", err)
+			if c.head(t) != head || wsState(t, c.ws.Root) != before {
+				t.Error("a refused undo changed the workspace")
+			}
+		})
+	}
+}
+
+// One undo restores at most maxUndoFiles paths.
+func TestUndoRefusesMoreFilesThanTheLimit(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	base := c.base(t)
+	// One commit by hand on the session branch, larger than any change set.
+	for i := 0; i <= maxUndoFiles; i++ {
+		write(t, c.ws.Root, fmt.Sprintf("many/f%04d.txt", i), "x\n")
+	}
+	gitCmd(t, c.ws.Root, "add", "-A")
+	gitCmd(t, c.ws.Root, "commit", "-q", "-m", "by hand")
+	head := c.head(t)
+	c.refuseUndo(t, base, fmt.Sprintf("it would restore %d files; at most %d are restored at once", maxUndoFiles+1, maxUndoFiles))
+	if c.head(t) != head || !exists(filepath.Join(c.ws.Root, "many", "f0000.txt")) {
+		t.Error("a refused undo changed the workspace")
+	}
+	// One file fewer goes through.
+	if err := os.Remove(filepath.Join(c.ws.Root, "many", "f0000.txt")); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, c.ws.Root, "commit", "-q", "-a", "-m", "one fewer")
+	c.undo(t, base)
+	if exists(filepath.Join(c.ws.Root, "many")) {
+		t.Error("the undo left files behind")
 	}
 }

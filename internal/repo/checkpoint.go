@@ -284,28 +284,11 @@ func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
 	if rec.LastUpdate != "" {
 		boundary = rec.LastUpdate
 	}
-	bound := -1
-	var matches []int
-	for i, c := range chain {
-		if c == boundary {
-			bound = i
-		}
-		if strings.HasPrefix(c, want) {
-			matches = append(matches, i)
-		}
+	at, err := findCheckpoint(chain, want, boundary, rec.StartBranch)
+	if err != nil {
+		return nil, err
 	}
-	if bound < 0 {
-		return nil, errors.New("the latest update recorded for the session is not on its branch; undo is refused until the session is started again")
-	}
-	switch {
-	case len(matches) == 0:
-		return nil, undoRefused("%s is not a checkpoint of this session; list_checkpoints shows them", want)
-	case len(matches) > 1:
-		return nil, undoRefused("%s names more than one checkpoint; give more characters", want)
-	case matches[0] > bound:
-		return nil, undoRefused("cannot undo past the update from %s: that would revert the owner's own commits and merge the reversal back into %s. Undo to the update or a later checkpoint", rec.StartBranch, rec.StartBranch)
-	}
-	target := chain[matches[0]]
+	target := chain[at]
 	parentOf := func(i int) string {
 		if i+1 < len(chain) {
 			return chain[i+1]
@@ -394,6 +377,35 @@ func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
 		}
 	}
 	return &Applied{Checkpoint: *cp, Fresh: fresh.String()}, nil
+}
+
+// findCheckpoint returns the index in chain (newest first) of the one
+// checkpoint whose ID starts with want. boundary is the oldest checkpoint an
+// undo may go back to: the latest update from the owner's branch, or the
+// session's base. A prefix that names none or several, a target older than
+// the boundary, and a boundary that is not on the chain are refused.
+func findCheckpoint(chain []string, want, boundary, startBranch string) (int, error) {
+	bound := -1
+	var matches []int
+	for i, c := range chain {
+		if c == boundary {
+			bound = i
+		}
+		if strings.HasPrefix(c, want) {
+			matches = append(matches, i)
+		}
+	}
+	switch {
+	case bound < 0:
+		return 0, undoRefused("the latest update recorded for the session is not on its branch, so how far back an undo may go is not known; undo is refused until a new session is started with --new-session")
+	case len(matches) == 0:
+		return 0, undoRefused("%s is not a checkpoint of this session; list_checkpoints shows them", want)
+	case len(matches) > 1:
+		return 0, undoRefused("%s names more than one checkpoint; give more characters", want)
+	case matches[0] > bound:
+		return 0, undoRefused("cannot undo past the update from %s: that would revert the owner's own commits and merge the reversal back into %s. Undo to the update or a later checkpoint", startBranch, startBranch)
+	}
+	return matches[0], nil
 }
 
 // checkUndoPaths refuses an undo that would write what a session never
