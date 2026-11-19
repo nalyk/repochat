@@ -1,0 +1,19 @@
+You are an adversarial reviewer. The repository in the current directory is a Go program (standard library only) that serves a local git repository to a language model through MCP. Branch feat/write-mode adds an opt-in write mode (`--write`). The design is docs/superpowers/specs/2026-11-19-write-mode-edits-design.md; the code is in internal/repo (session.go, fswrite.go, anchor.go, changeset.go, protect.go, apply.go, checkpoint.go, finish.go), internal/tools/write.go and internal/cli (session.go, sessioncmd.go, serve.go, run.go).
+
+The caller of the write tools is a language model that may be steered by hostile text inside the repository, and the repository's own content and git configuration are untrusted. The owner approved writes once per conversation and is not watching.
+
+Try to break each guarantee below by reading the code. For every claim give: the guarantee, the exact file and function, a concrete reproduction (repository state, tool calls with arguments, or commands), and what happens. Do not report style issues, and do not report something as a defect unless you can describe the sequence of steps that triggers it. Say explicitly which guarantees you could not break and what you tried.
+
+Guarantees:
+1. Writes happen only inside the session workspace (a linked worktree under repochat's state directory), plus the git bookkeeping of the session branch, plus one fast-forward of the owner's branch when finish_session is called. Nothing else in the owner's checkout, its .git directory, or anywhere on disk changes. Consider symbolic links (committed, or created in the workspace between two calls), `..`, absolute paths, case-insensitive file systems, submodules, paths that become directories, and time-of-check/time-of-use gaps.
+2. No write reaches a protected path (.git, CI definitions, hook directories, .gitmodules, .gitattributes, .repochatignore) or a path the exposure policy withholds (built-in secret-file rules, .repochatignore committed or only in the owner's checkout, --deny), by any operation: replace, insert, delete, create, remove, move (source and target), undo, update.
+3. Files the policy withholds never exist on disk in the workspace, after start, resume, update, undo, or when two processes with different options use the same session.
+4. A change set is applied completely or not at all; the commit contains exactly the validated content; a change made against outdated content is refused.
+5. An anchor or file tag reveals nothing about a value the model was shown masked, and no tool result, error message, diff or warning does either. A line carrying a masked value cannot be changed, and a multi-line masked value cannot be altered by inserting inside it.
+6. No program configured by the repository runs at any step: hooks, clean/smudge/process filters, merge drivers, diff drivers and textconv, fsmonitor, credential or signing programs, editors, pagers, `core.sshCommand`, aliases, `include`d configuration. Check every git invocation the write path makes and the configuration and environment it runs with.
+7. finish_session either fast-forwards the owner's branch (or lands one squashed commit) or changes nothing; it never runs with a cancelled or timed-out context killing git mid-checkout; it never deletes a session whose work did not land; it never overwrites the owner's uncommitted or ignored files.
+8. Without --write the program is unchanged: the same 13 read-only tools with identical descriptions, schemas and output.
+9. Undo never discards history, cannot go past an update from the owner's branch, and cannot be pointed at a commit outside the session.
+10. Session state on disk (session.json) cannot be used, if tampered with, to delete or write outside the session's own directory.
+
+Finish with a short list, most severe first, of the findings you are confident in, and a separate list of weaker suspicions.
