@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"errors"
 	"os"
 	"path/filepath"
 	"strings"
@@ -322,5 +323,59 @@ func TestUnwritableIndexBaseIsRestoredOnTheNextCall(t *testing.T) {
 	c.apply(t, "y", Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"})
 	if mustRead(t, filepath.Join(c.ws.Root, "a.txt")) != "A\n" {
 		t.Error("the apply after the restore did not write")
+	}
+}
+
+// F4: an undo across a file that became a directory, or a directory that
+// became a file, removes first and writes afterwards.
+func TestUndoAcrossAFileThatBecameADirectory(t *testing.T) {
+	for _, tc := range []struct {
+		name, first, second string
+		start               map[string]string
+	}{
+		{"file to directory", "a", "a/b.txt", map[string]string{"a": "file\n", "z.txt": "z\n"}},
+		{"directory to file", "a/b.txt", "a", map[string]string{"a/b.txt": "inside\n", "z.txt": "z\n"}},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newApplyFixture(t, tc.start, nil)
+			base := c.base(t)
+			start := wsState(t, c.ws.Root)
+			c.apply(t, "remove", Change{Op: "remove", Path: tc.first, FileTag: c.tag(t, tc.first)})
+			c.apply(t, "create", Change{Op: "create", Path: tc.second, Text: "new"})
+			swapped := wsState(t, c.ws.Root)
+			swappedHead := c.head(t)
+
+			// A failure after the files were swapped back puts them as they were.
+			c.s.applyFault = func(i int) error {
+				if i == 2 {
+					return errors.New("injected after the swap")
+				}
+				return nil
+			}
+			if _, err := c.s.UndoTo(bg, base); err == nil || !strings.Contains(err.Error(), "injected after the swap") || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("UndoTo with a failure after the swap: %v", err)
+			}
+			if got := wsState(t, c.ws.Root); got != swapped {
+				t.Errorf("the rollback did not restore the swap:\n%s\nwant:\n%s", got, swapped)
+			}
+			c.s.applyFault = nil
+
+			a := c.undo(t, base)
+			if a.Checkpoint.Kind != "undo" {
+				t.Errorf("checkpoint %+v", a.Checkpoint)
+			}
+			got := wsState(t, c.ws.Root)
+			if strings.Replace(got, "HEAD "+c.head(t), "", 1) != strings.Replace(start, "HEAD "+base, "", 1) {
+				t.Errorf("the files after the undo:\n%s\nwant those of the start:\n%s", got, start)
+			}
+			if gitCmd(t, c.ws.Root, "rev-parse", "HEAD^{tree}") != gitCmd(t, c.ws.Root, "rev-parse", base+"^{tree}") {
+				t.Error("the undo's tree is not the start's")
+			}
+			// And forward again, across the same swap.
+			c.undo(t, swappedHead)
+			if got := wsState(t, c.ws.Root); strings.Replace(got, "HEAD "+c.head(t), "", 1) != strings.Replace(swapped, "HEAD "+swappedHead, "", 1) {
+				t.Errorf("the files after undoing the undo:\n%s\nwant:\n%s", got, swapped)
+			}
+		})
 	}
 }

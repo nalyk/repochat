@@ -874,3 +874,60 @@ func TestNewFileUnderASymlinkSaysSo(t *testing.T) {
 		t.Errorf("outside holds %v", got)
 	}
 }
+
+// C6: every file is checked against what the change set was validated on
+// before anything is written, but a file can change after that check and
+// before its own turn. It is read again right before it is written, and a
+// file that changed meanwhile is neither overwritten nor removed.
+func TestFileChangedAfterTheCheckIsNotOverwritten(t *testing.T) {
+	for _, tc := range []struct {
+		name    string
+		changes func(c *changeFixture) []Change
+		meddle  string // the path changed behind the apply, before its turn
+		want    string
+	}{
+		{"replace", func(c *changeFixture) []Change {
+			return []Change{
+				{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+				{Op: "replace", Path: "b.txt", From: c.anchor(t, "b.txt", 1), Text: "B"},
+			}
+		}, "b.txt", "b.txt changed while the change set was being applied"},
+		{"create", func(c *changeFixture) []Change {
+			return []Change{
+				{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+				{Op: "create", Path: "n.txt", Text: "new"},
+			}
+		}, "n.txt", "n.txt appeared in the workspace while the change set was being applied"},
+		{"remove", func(c *changeFixture) []Change {
+			return []Change{
+				{Op: "remove", Path: "a.txt", FileTag: c.tag(t, "a.txt")},
+				{Op: "remove", Path: "b.txt", FileTag: c.tag(t, "b.txt")},
+			}
+		}, "b.txt", "b.txt changed while the change set was being applied"},
+	} {
+		t.Run(tc.name, func(t *testing.T) {
+			c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+			head := c.head(t)
+			changes := tc.changes(c)
+			c.s.applyFault = func(i int) error {
+				if i == 1 { // a.txt is done; the other file's turn is next
+					write(t, c.ws.Root, tc.meddle, "edited meanwhile\n")
+				}
+				return nil
+			}
+			_, err := c.s.Apply(bg, "", changes, "x")
+			if err == nil || !strings.Contains(err.Error(), tc.want) || !strings.Contains(err.Error(), "nothing was changed") {
+				t.Fatalf("Apply: %v; want %q", err, tc.want)
+			}
+			if got := mustRead(t, filepath.Join(c.ws.Root, tc.meddle)); got != "edited meanwhile\n" {
+				t.Errorf("%s = %q: the edit made meanwhile was lost", tc.meddle, got)
+			}
+			if got := mustRead(t, filepath.Join(c.ws.Root, "a.txt")); got != "a\n" {
+				t.Errorf("a.txt = %q: it was not put back", got)
+			}
+			if got := c.head(t); got != head {
+				t.Errorf("the branch moved to %s", got)
+			}
+		})
+	}
+}

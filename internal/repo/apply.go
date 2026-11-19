@@ -358,11 +358,16 @@ func writeErr(p string, err error) error {
 	return fmt.Errorf("writing %s failed: %v", SanitizeLine(p), pathErrCause(err))
 }
 
-// writeFiles writes files in order (sorted by path), each through the no-
-// follow writer, after checking that every one still holds its Before. The
-// mode each file is written with is set in its Mode. It returns the function
-// that puts back the files written so far, which is also valid after an
-// error.
+// writeFiles brings files (sorted by path) to their After, each through the
+// no-follow writer: the removals first, so that a file can take the place of
+// a directory the same checkpoint empties and a directory the place of a
+// file it removes, then the writes. Every existing file is checked against
+// its Before up front, so that most refusals come before anything is
+// written, and every file again right before its own turn: one that changed
+// or appeared meanwhile is left as it is, and what was written is put back.
+// The mode each file is written with is set in its Mode. It returns the
+// function that puts back the files written so far, which is also valid
+// after an error.
 func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, err error) {
 	op := ws.newOpener()
 	var done []fileWrite
@@ -384,45 +389,85 @@ func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, e
 		}
 		return first
 	}
-
-	// Each file must still be what the change set was validated against:
-	// that is also what a rollback writes back.
-	for _, f := range files {
+	// holds checks that f is still what the change set was validated
+	// against: that is also what a rollback writes back.
+	holds := func(f *fileWrite) error {
+		defer op.Close() // no handle cached here may outlive a write
 		if f.Before == nil {
 			_, err := op.Lstat(f.Path)
 			switch {
 			case errors.Is(err, os.ErrNotExist):
+				return nil
 			case errors.Is(err, errSymlink) || errors.Is(err, syscall.ELOOP):
-				return undo, fmt.Errorf("%s passes through a symbolic link; symbolic links are never followed", SanitizeLine(f.Path))
+				return fmt.Errorf("%s passes through a symbolic link; symbolic links are never followed", SanitizeLine(f.Path))
 			case err != nil:
-				return undo, fmt.Errorf("%s cannot be checked: %v", SanitizeLine(f.Path), pathErrCause(err))
-			default:
-				return undo, fmt.Errorf("%s appeared in the workspace while the change set was being applied", SanitizeLine(f.Path))
+				return fmt.Errorf("%s cannot be checked: %v", SanitizeLine(f.Path), pathErrCause(err))
 			}
-			continue
+			return fmt.Errorf("%s appeared in the workspace while the change set was being applied", SanitizeLine(f.Path))
 		}
 		data, fi, truncated, err := op.ReadAll(f.Path, int64(len(f.Before)))
 		if err != nil {
-			return undo, fmt.Errorf("%s cannot be read: %v", SanitizeLine(f.Path), pathErrCause(err))
+			return fmt.Errorf("%s cannot be read: %v", SanitizeLine(f.Path), pathErrCause(err))
 		}
 		if truncated || !bytes.Equal(data, f.Before) {
-			return undo, fmt.Errorf("%s changed while the change set was being applied", SanitizeLine(f.Path))
+			return fmt.Errorf("%s changed while the change set was being applied", SanitizeLine(f.Path))
 		}
 		modes[f.Path] = fi.Mode().Perm()
+		return nil
 	}
-	op.Close()
 
+	// Up front: every file that exists. A path to create is looked at once
+	// the removals are done, since one of them may be what frees it.
 	for i := range files {
-		f := &files[i]
-		if s.applyFault != nil {
-			if err := s.applyFault(i); err != nil {
-				return undo, writeErr(f.Path, err)
+		if files[i].Before != nil {
+			if err := holds(&files[i]); err != nil {
+				return undo, err
 			}
 		}
-		var err error
-		if f.After == nil {
-			err = op.Remove(f.Path)
+	}
+	var removals, writes []*fileWrite
+	for i := range files {
+		if files[i].After == nil {
+			removals = append(removals, &files[i])
 		} else {
+			writes = append(writes, &files[i])
+		}
+	}
+	turn := 0 // the applyFault seam counts files in the order they are written
+	step := func(f *fileWrite, write func() error) error {
+		if s.applyFault != nil {
+			if err := s.applyFault(turn); err != nil {
+				return writeErr(f.Path, err)
+			}
+		}
+		turn++
+		// Again, right before the write: the file may have changed since.
+		if err := holds(f); err != nil {
+			return err
+		}
+		if err := write(); err != nil {
+			return writeErr(f.Path, err)
+		}
+		done = append(done, *f)
+		return nil
+	}
+	for _, f := range removals {
+		if f.Before == nil { // neither there before nor after: nothing to do
+			continue
+		}
+		if err := step(f, func() error { return op.Remove(f.Path) }); err != nil {
+			return undo, err
+		}
+	}
+	for _, f := range writes {
+		if f.Before == nil {
+			if err := holds(f); err != nil {
+				return undo, err
+			}
+		}
+	}
+	for _, f := range writes {
+		err := step(f, func() error {
 			mode := f.Mode
 			if mode == 0 {
 				switch {
@@ -436,12 +481,11 @@ func (s *Sessions) writeFiles(ws *Repo, files []fileWrite) (undo func() error, e
 				mode = 0o644
 			}
 			f.Mode = mode
-			err = op.WriteAtomic(f.Path, f.After, mode)
-		}
+			return op.WriteAtomic(f.Path, f.After, mode)
+		})
 		if err != nil {
-			return undo, writeErr(f.Path, err)
+			return undo, err
 		}
-		done = append(done, *f)
 	}
 	return undo, nil
 }
