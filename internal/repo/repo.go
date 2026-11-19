@@ -495,6 +495,10 @@ func gitEnv() []string {
 // path of the index file that git must use instead of the repository's own.
 type gitIndexKey struct{}
 
+// gitTimeoutKey is the context key under which a time.Duration replaces
+// gitTimeout for the git commands run with that context.
+type gitTimeoutKey struct{}
+
 // withPrivateIndex returns a context whose git commands work on a private
 // copy of the index, and a function that removes the copy.
 //
@@ -565,7 +569,11 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 
 // runGitInput is runGit with input on git's standard input (none when nil).
 func runGitInput(ctx context.Context, dir string, pre []string, input []byte, limit int, args ...string) (out []byte, truncated bool, code int, err error) {
-	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
+	timeout := gitTimeout
+	if d, ok := ctx.Value(gitTimeoutKey{}).(time.Duration); ok && d > 0 {
+		timeout = d
+	}
+	ctx, cancel := context.WithTimeout(ctx, timeout)
 	defer cancel()
 
 	full := append([]string{"--no-pager"}, pre...)

@@ -81,6 +81,10 @@ type Sessions struct {
 	// returns fails the apply there.
 	now        func() time.Time
 	applyFault func(i int) error
+	// Called right before the owner's `git merge --ff-only` in Finish, and
+	// right after an update's merge is committed, before the resync.
+	beforeOwnerMerge func()
+	afterUpdateMerge func()
 }
 
 const (
@@ -519,6 +523,22 @@ func (s *Sessions) openWorkspace(ctx context.Context, rec *sessionRecord) (*Repo
 // when it is resumed, and after every update from the owner's branch. If a
 // withheld file is still on disk afterwards, the workspace is removed.
 func (s *Sessions) sync(ctx context.Context) error {
+	err := s.syncFiles(ctx)
+	if !errors.Is(err, errWithheldOnDisk) {
+		return err
+	}
+	path := s.ws.Root
+	s.closeWorkspace()
+	s.removeWorkspace(ctx, path)
+	return errors.New("a file the policy withholds could not be kept out of the session workspace, so the workspace was removed")
+}
+
+// errWithheldOnDisk is a withheld file found in the workspace after a sync.
+var errWithheldOnDisk = errors.New("a file the policy withholds is in the session workspace")
+
+// syncFiles is sync without the removal: it returns errWithheldOnDisk when
+// a withheld file is still on disk afterwards.
+func (s *Sessions) syncFiles(ctx context.Context) error {
 	ws := s.ws
 	if ws == nil {
 		return ErrNoSession
@@ -542,17 +562,12 @@ func (s *Sessions) sync(ctx context.Context) error {
 
 	// The guarantee is what is on disk, not what git was asked to do.
 	for _, p := range withheld {
-		_, err := os.Lstat(filepath.Join(ws.Root, filepath.FromSlash(p)))
-		if err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)) {
-			continue
+		if onDisk(ws.Root, p) {
+			if s.owner.Logf != nil {
+				s.owner.Logf("session sync: withheld %q present after the sparse checkout", p)
+			}
+			return errWithheldOnDisk
 		}
-		path := ws.Root
-		s.closeWorkspace()
-		s.removeWorkspace(ctx, path)
-		if s.owner.Logf != nil {
-			s.owner.Logf("session sync: withheld %q present after the sparse checkout (%v)", p, err)
-		}
-		return errors.New("a file the policy withholds could not be kept out of the session workspace, so the workspace was removed")
 	}
 	return nil
 }
@@ -649,7 +664,8 @@ func sparseEscape(p string) (string, error) {
 func (s *Sessions) removeWorkspace(ctx context.Context, path string) error {
 	var first error
 	out, _, code, err := s.owner.gitRaw(ctx, 64<<10, "worktree", "remove", "--force", "--force", path)
-	if err != nil || code != 0 {
+	removed := err == nil && code == 0
+	if !removed {
 		if s.owner.Logf != nil {
 			s.owner.Logf("session: git worktree remove failed: %v %s", err, firstErr(nil, out))
 		}
@@ -659,11 +675,63 @@ func (s *Sessions) removeWorkspace(ctx context.Context, path string) error {
 		if s.owner.Logf != nil {
 			s.owner.Logf("session: cannot remove the workspace: %v", err)
 		}
-		if first == nil {
-			first = pathErrCause(err)
+		return pathErrCause(err)
+	}
+	if !removed {
+		// git refuses a worktree whose directory is gone (older versions):
+		// its registration is removed here, that one only, never by a prune.
+		if s.removeWorktreeEntry(ctx, path) {
+			first = nil
 		}
 	}
 	return first
+}
+
+// removeWorktreeEntry removes the registration, in the owner's git
+// directory, of the session worktree at path, once its directory is gone:
+// the entry under <common dir>/worktrees whose gitdir file names path/.git.
+// path must lie in the session state directory. It reports whether no such
+// entry remains.
+func (s *Sessions) removeWorktreeEntry(ctx context.Context, path string) bool {
+	if !within(s.dir, path) || path == s.dir {
+		return false
+	}
+	if _, err := os.Lstat(path); !errors.Is(err, os.ErrNotExist) {
+		return false
+	}
+	common, code, err := s.owner.gitText(ctx, "rev-parse", "--git-common-dir")
+	if err != nil || code != 0 || common == "" {
+		return false
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(s.owner.Root, common)
+	}
+	admin := filepath.Join(common, "worktrees")
+	entries, err := os.ReadDir(admin)
+	if errors.Is(err, os.ErrNotExist) {
+		return true
+	}
+	if err != nil {
+		return false
+	}
+	want := filepath.Join(path, ".git")
+	clean := true
+	for _, e := range entries {
+		if !e.IsDir() { // never through a symbolic link
+			continue
+		}
+		data, err := os.ReadFile(filepath.Join(admin, e.Name(), "gitdir"))
+		if err != nil || filepath.Clean(strings.TrimRight(string(data), "\r\n")) != want {
+			continue
+		}
+		if err := os.RemoveAll(filepath.Join(admin, e.Name())); err != nil {
+			if s.owner.Logf != nil {
+				s.owner.Logf("session: cannot remove the stale worktree entry: %v", err)
+			}
+			clean = false
+		}
+	}
+	return clean
 }
 
 // checkOwnerIgnore refuses an owner's .repochatignore that is not a regular

@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"os"
@@ -640,6 +641,10 @@ func TestAbandonKeepsTheBranchUnlessTold(t *testing.T) {
 	if strings.Contains(branches(t, f.dir), info3.Branch) || exists(filepath.Join(f.state, f.owner.ID, sessionFile)) {
 		t.Error("the session was not abandoned")
 	}
+	// Its own stale registration is gone too, without a prune.
+	if wt := gitCmd(t, f.dir, "worktree", "list", "--porcelain"); strings.Contains(wt, info3.Workspace) {
+		t.Errorf("the stale worktree entry is still registered:\n%s", wt)
+	}
 }
 
 func TestAfterTheEndReadsServeTheOwnerAndWritesRefuse(t *testing.T) {
@@ -682,5 +687,191 @@ func TestAfterTheEndReadsServeTheOwnerAndWritesRefuse(t *testing.T) {
 				t.Error("a write reached the owner's checkout")
 			}
 		})
+	}
+}
+
+func TestFinishCompletesDespiteACancelledCall(t *testing.T) {
+	for _, squash := range []bool{false, true} {
+		c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+		info := c.info(t)
+		c.replaceLine(t, "a.txt", 1, "A")
+		ctx, cancel := context.WithCancel(bg)
+		c.s.beforeOwnerMerge = cancel // the call is cancelled as the merge starts
+		fin, err := c.s.Finish(ctx, squash, "")
+		cancel()
+		if err != nil {
+			t.Fatalf("Finish(squash=%v) with the call cancelled: %v", squash, err)
+		}
+		if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != fin.Commit {
+			t.Errorf("main at %s, Finished.Commit %s", got, fin.Commit)
+		}
+		if mustRead(t, filepath.Join(c.f.dir, "a.txt")) != "A\n" {
+			t.Error("a.txt was not updated")
+		}
+		if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "" {
+			t.Errorf("owner's status:\n%s", got)
+		}
+		c.sessionDone(t, info)
+	}
+}
+
+func TestFinishRefusesWhileTheOwnersIndexIsLocked(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	lock := filepath.Join(c.f.dir, ".git", "index.lock")
+	write(t, c.f.dir, ".git/index.lock", "")
+	c.refuseFinish(t, false, "nothing was changed", "a.txt")
+	if !exists(lock) {
+		t.Error("the owner's index.lock was removed")
+	}
+	os.Remove(lock)
+	if _, err := c.s.Finish(bg, false, ""); err != nil {
+		t.Fatalf("Finish once the lock is gone: %v", err)
+	}
+}
+
+func TestFinishSaysWhenTheCheckoutMayBePartlyUpdated(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	info := c.info(t)
+	lock := filepath.Join(c.f.dir, ".git", "index.lock")
+	// Between the last check and the merge, git's index lock appears and a
+	// file changes: what a merge killed halfway leaves behind.
+	c.s.beforeOwnerMerge = func() {
+		write(t, c.f.dir, ".git/index.lock", "")
+		write(t, c.f.dir, "b.txt", "half\n")
+	}
+	_, err := c.s.Finish(bg, false, "")
+	os.Remove(lock)
+	if err == nil {
+		t.Fatal("Finish succeeded")
+	}
+	mustContain(t, err.Error(), "partly updated", "index.lock", "git merge --ff-only", "git reset --merge")
+	mustNotContain(t, err.Error(), "nothing was changed")
+	now := c.info(t)
+	if now.Head != info.Head || !exists(info.Workspace) || !strings.Contains(branches(t, c.f.dir), info.Branch) {
+		t.Errorf("the session was not kept: %+v", now)
+	}
+}
+
+func TestSessionBranchCheckedOutElsewhereIsKept(t *testing.T) {
+	// Finish: the session branch is also checked out in another worktree.
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	branch := c.branch(t)
+	other := filepath.Join(t.TempDir(), "other")
+	gitCmd(t, c.f.dir, "worktree", "add", "-q", "--force", other, branch)
+	fin, err := c.s.Finish(bg, false, "")
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	mustContain(t, strings.Join(fin.Notes, "\n"), branch, "checked out")
+	if !strings.Contains(branches(t, c.f.dir), branch) {
+		t.Error("the session branch checked out elsewhere was deleted")
+	}
+	if got := gitCmd(t, other, "symbolic-ref", "HEAD"); got != "refs/heads/"+branch {
+		t.Errorf("the other worktree is on %s", got)
+	}
+
+	// Abandon: the owner checked the branch out in the main checkout.
+	f := newSessionFixture(t, map[string]string{"a.txt": "a\n"})
+	s, info := f.start(t, Options{})
+	s.Close()
+	if err := os.RemoveAll(filepath.Dir(info.Workspace)); err != nil {
+		t.Fatal(err)
+	}
+	gitCmd(t, f.dir, "checkout", "-q", "--ignore-other-worktrees", info.Branch)
+	s2 := f.sessions(t, Options{})
+	err = s2.Abandon(bg, true)
+	if err == nil || !strings.Contains(err.Error(), info.Branch) || !strings.Contains(err.Error(), "checked out") {
+		t.Fatalf("Abandon: %v", err)
+	}
+	if got := gitCmd(t, f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/"+info.Branch {
+		t.Errorf("the owner's checkout is on %s", got)
+	}
+	if !strings.Contains(branches(t, f.dir), info.Branch) {
+		t.Error("the branch the owner has checked out was deleted")
+	}
+	if exists(filepath.Join(f.state, f.owner.ID, sessionFile)) {
+		t.Error("the session was not abandoned")
+	}
+}
+
+func TestFinishRefusesARewrittenSessionBranch(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	// The branch rewritten by hand: its commit no longer descends from the
+	// session's start along first parents.
+	tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+	tree := gitCmd(t, c.ws.Root, "rev-parse", "HEAD^{tree}")
+	orphan := gitCmd(t, c.ws.Root, "commit-tree", "-m", "rewritten", tree)
+	merged := gitCmd(t, c.ws.Root, "commit-tree", "-p", orphan, "-p", tip, "-m", "by hand", tree)
+	gitCmd(t, c.ws.Root, "update-ref", "refs/heads/"+c.branch(t), merged)
+	c.refuseFinish(t, false, "no longer descends", "a.txt")
+}
+
+func TestAbandonKeepsTheRecordWhenTheWorkspaceCannotBeRemoved(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	f := newSessionFixture(t, map[string]string{"a.txt": "a\n"})
+	s, info := f.start(t, Options{})
+	dir := filepath.Dir(info.Workspace)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	if err := s.Abandon(bg, true); err == nil {
+		t.Fatal("Abandon succeeded with the workspace still there")
+	}
+	if !exists(filepath.Join(f.state, f.owner.ID, sessionFile)) {
+		t.Error("the record was deleted while the workspace remains")
+	}
+	if !strings.Contains(branches(t, f.dir), info.Branch) {
+		t.Error("the branch was deleted while the workspace remains")
+	}
+}
+
+func TestUpdateDropsPendingPlans(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	plan, err := c.s.Propose(bg, []Change{{Op: "replace", Path: "b.txt", From: c.anchor(t, "b.txt", 1), Text: "B"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	write(t, c.f.dir, "b.txt", "owner\n")
+	commit(t, c.f.dir, "owner's own")
+	if _, err := c.s.Update(bg); err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	_, err = c.s.Apply(bg, plan.ID, nil, "")
+	if err == nil || !strings.Contains(err.Error(), "unknown or has expired") {
+		t.Fatalf("Apply of a plan made before the update: %v", err)
+	}
+}
+
+func TestUpdateIsUndoneWhenAWithheldFileStaysOnDisk(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", ".env": "TOKEN=x\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	head := c.head(t)
+	branch := c.branch(t)
+	write(t, c.f.dir, "new.txt", "new\n")
+	commit(t, c.f.dir, "owner's own")
+	recBefore, _ := c.s.readRecord()
+	// What a git that cannot keep a withheld file out of a merge leaves.
+	c.s.afterUpdateMerge = func() { write(t, c.ws.Root, ".env", "TOKEN=x\n") }
+
+	_, err := c.s.Update(bg)
+	if err == nil || !strings.Contains(err.Error(), "withholds") {
+		t.Fatalf("Update: %v", err)
+	}
+	if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/"+branch); got != head {
+		t.Errorf("the session branch is at %s, want %s: the update was not undone", got, head)
+	}
+	if recAfter, _ := c.s.readRecord(); recAfter == nil || *recAfter != *recBefore {
+		t.Errorf("the record changed: %+v", recAfter)
+	}
+	if exists(filepath.Join(c.ws.Root, ".env")) {
+		t.Error("the withheld file is still in the workspace")
 	}
 }

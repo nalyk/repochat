@@ -11,6 +11,7 @@ import (
 	"strconv"
 	"strings"
 	"syscall"
+	"time"
 )
 
 // The end of a session. Update merges the owner's branch into the session;
@@ -268,23 +269,24 @@ func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
 		}
 		return nil, s.abortMerge(ctx, rec, head, cause)
 	}
-	for _, p := range before {
-		if onDisk(ws.Root, p) {
-			if s.owner.Logf != nil {
-				s.owner.Logf("update: withheld %q written by the merge", p)
-			}
-			return nil, s.abortMerge(ctx, rec, head, errors.New("update refused: this version of git cannot merge without writing a file the policy withholds into the session workspace; the merge was abandoned. The owner can merge by hand with git"))
-		}
-	}
-
+	prev := *rec
 	id, err := s.commitUpdate(ctx, rec, ident, head, tip)
 	if err != nil {
 		return nil, s.abortMerge(ctx, rec, head, err)
 	}
-	// Files that the policy withholds and that the merge brought leave the
-	// disk here; a failure removes the workspace.
-	if err := s.sync(ctx); err != nil {
-		return nil, fmt.Errorf("the update was recorded as %s, but %w", id[:12], err)
+	// The plans were validated against the files before the merge.
+	s.plans = nil
+	if s.afterUpdateMerge != nil {
+		s.afterUpdateMerge()
+	}
+	// Whatever the policy withholds, kept out by git or brought by the
+	// merge, leaves the disk here, and the check on disk is the guard: when
+	// it fails, the update is undone.
+	if err := s.syncFiles(ctx); err != nil {
+		if !errors.Is(err, errWithheldOnDisk) {
+			return nil, fmt.Errorf("the update was recorded as %s, but the session workspace could not be brought in line with it: %w", id[:12], err)
+		}
+		return nil, s.undoUpdate(ctx, &prev, id, head)
 	}
 	if pol, err = ws.Policy(ctx); err != nil {
 		return nil, err
@@ -294,6 +296,40 @@ func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
 		return nil, err
 	}
 	return &Applied{Checkpoint: *cp, Fresh: "[the owner's changes were merged: read files again for fresh anchors]\n"}, nil
+}
+
+// undoUpdate takes back an update commit id whose files could not be kept
+// in line with the policy: the branch returns to head, the record to prev,
+// and the workspace to head's files, which sync then checks again (and
+// removes the workspace when that fails too).
+func (s *Sessions) undoUpdate(ctx context.Context, prev *sessionRecord, id, head string) error {
+	ws := s.ws
+	refusal := errors.New("update refused: git could not merge without leaving a file the policy withholds in the session workspace, so the update was undone. The owner can merge by hand with git")
+	ident := s.identity(ctx)
+	if _, err := ws.git(ctx, 4096, append(ident, "update-ref", "-m", "repochat: undo a failed update", "refs/heads/"+prev.Branch, head, id)...); err != nil {
+		path := ws.Root
+		s.closeWorkspace()
+		s.removeWorkspace(ctx, path)
+		return fmt.Errorf("%v; the update commit %s could not be taken off the branch either, so the workspace was removed", refusal, id[:12])
+	}
+	if err := s.writeRecord(prev); err != nil && s.owner.Logf != nil {
+		s.owner.Logf("update: cannot restore session.json: %v", err)
+	}
+	if s.rec != nil {
+		r := *prev
+		s.rec = &r
+	}
+	_, rerr := ws.git(ctx, 1<<20, "read-tree", "--reset", "-u", "HEAD")
+	if rerr == nil {
+		_, rerr = ws.git(ctx, 1<<20, "clean", "-f", "-d", "-q")
+	}
+	if err := s.sync(ctx); err != nil {
+		return fmt.Errorf("%v; %w", refusal, err)
+	}
+	if rerr != nil {
+		s.closeWorkspace() // resuming restores it
+	}
+	return refusal
 }
 
 // commitUpdate records the merge in progress in the workspace as a commit of
@@ -484,7 +520,8 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		return nil, ErrNoSession
 	}
 	owner := s.owner
-	head, err := s.present(ctx, rec)
+	// A branch rewritten outside repochat is refused here as everywhere.
+	head, _, err := s.chain(ctx, rec)
 	if err != nil {
 		return nil, err
 	}
@@ -494,7 +531,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		return nil, finishRefused("the session has no checkpoints beyond its start, so there is nothing to merge")
 	}
 	// 2. The owner's checkout is on the start branch.
-	onBranch := func() error {
+	onBranch := func(ctx context.Context) error {
 		branch, err := s.ownerBranch(ctx)
 		if err != nil {
 			return err
@@ -508,7 +545,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		}
 		return nil
 	}
-	if err := onBranch(); err != nil {
+	if err := onBranch(ctx); err != nil {
 		return nil, err
 	}
 	// 3. No signing asked for.
@@ -539,50 +576,83 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	} else if !ok {
 		return nil, moved
 	}
-
 	files, later, withheld, err := s.changedFiles(ctx, tip, head)
 	if err != nil {
 		return nil, err
 	}
+
+	// From here on the call's cancellation no longer applies: a merge into
+	// the owner's checkout cut off halfway would leave it neither merged nor
+	// as it was. What fails before the merge still changes nothing.
+	wctx := context.WithoutCancel(ctx)
 	land := head
 	if squash {
-		if land, err = s.squashCommit(ctx, head, tip, message); err != nil {
+		if land, err = s.squashCommit(wctx, head, tip, message); err != nil {
 			return nil, err
 		}
 	}
-
 	// The owner may have acted since: everything again, right before the
 	// merge. git's --ff-only is the final guard.
-	if err := owner.beforeWorktreeRead(ctx); err != nil {
+	if err := owner.beforeWorktreeRead(wctx); err != nil {
 		return nil, err
 	}
-	if err := onBranch(); err != nil {
+	if err := onBranch(wctx); err != nil {
 		return nil, err
 	}
-	if now, err := s.ownerTip(ctx, rec); err != nil {
+	if now, err := s.ownerTip(wctx, rec); err != nil {
 		return nil, err
 	} else if now != tip {
 		return nil, moved
 	}
-	if ok, err := owner.isAncestor(ctx, tip, land); err != nil {
+	if ok, err := owner.isAncestor(wctx, tip, land); err != nil {
 		return nil, err
 	} else if !ok {
-		return nil, errors.New("finish refused: the commit to land does not descend from the branch (nothing was changed)")
+		return nil, finishRefused("the commit to land does not descend from %s", rec.StartBranch)
 	}
-	out, _, code, err := owner.gitRaw(ctx, 1<<20, "-c", "merge.autoStash=false",
-		"merge", "--ff-only", "--no-stat", "--no-verify-signatures", land)
+	if ownerIndexLocked(owner) {
+		return nil, finishRefused("another git command is running in the repository's checkout (its git index is locked by .git/index.lock); retry once it has finished, or, if no git command is running, the owner can remove that file")
+	}
+	before, err := ownerWorktreeState(wctx, owner)
 	if err != nil {
-		return nil, s.mergeFailed(ctx, tip, err)
-	}
-	if code != 0 {
-		return nil, s.mergeFailed(ctx, tip, s.mergeRefusal(ctx, rec, out))
-	}
-	now, code, err := owner.gitText(ctx, "rev-parse", "--verify", "-q", "HEAD^{commit}")
-	if err != nil || code != 0 || !objectIDRe.MatchString(now) {
-		now = land
+		return nil, err
 	}
 
-	fin := &Finished{Commit: now, Squashed: squash, Files: files, RunsLater: later}
+	if s.beforeOwnerMerge != nil {
+		s.beforeOwnerMerge()
+	}
+	mctx := context.WithValue(wctx, gitTimeoutKey{}, ownerMergeTimeout)
+	out, _, code, err := owner.gitRaw(mctx, 1<<20, "-c", "merge.autoStash=false",
+		"merge", "--ff-only", "--no-stat", "--no-verify-signatures", land)
+	var notes []string
+	if err != nil || code != 0 {
+		if err != nil && s.owner.Logf != nil {
+			s.owner.Logf("finish: git merge --ff-only: %v", err)
+		}
+		if now, _ := s.ownerTip(wctx, rec); now != land {
+			var refusal error
+			if err == nil {
+				refusal = s.mergeRefusal(wctx, rec, out)
+			}
+			return nil, s.failedMerge(wctx, rec, tip, land, before, refusal)
+		}
+		notes = append(notes, "git reported an error at the end of the merge, but the branch is at the merged commit; check the checkout with git status.")
+	}
+
+	// What the merge left: only a branch verifiably at the landed commit
+	// lets the session go.
+	fin := &Finished{Commit: land, Squashed: squash, Files: files, RunsLater: later}
+	now, _ := s.ownerTip(wctx, rec)
+	if now != land {
+		fin.Commit = now
+		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge as done, but %s is not at the merged commit %s; the session, its branch and its workspace are kept. Check the checkout with git status and git log.", rec.StartBranch, land[:12]))
+		return fin, nil
+	}
+	fin.Notes = notes
+	keepBranch := false
+	if err := onBranch(wctx); err != nil {
+		keepBranch = true
+		fin.Notes = append(fin.Notes, fmt.Sprintf("WARNING: %s is at the merged commit, but the repository's checkout is no longer on it (another git command switched it); the session branch %s is kept.", rec.StartBranch, rec.Branch))
+	}
 	if squash {
 		fin.Notes = append(fin.Notes, "The commit is unsigned: repochat runs no signing program.")
 	} else {
@@ -591,23 +661,106 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	if withheld > 0 {
 		fin.Notes = append(fin.Notes, fmt.Sprintf("%d changed file(s) that the policy withholds are part of the merge and not listed.", withheld))
 	}
-	if hooks := s.skippedHooks(ctx); len(hooks) > 0 {
+	if hooks := s.skippedHooks(wctx); len(hooks) > 0 {
 		fin.Notes = append(fin.Notes, fmt.Sprintf("These hooks of the repository did not run, because repochat runs none: %s. Run them by hand if the repository relies on them.", strings.Join(hooks, ", ")))
 	}
 
 	// The merge has happened: what fails from here on is a note.
 	s.closeWorkspace()
 	s.plans = nil
-	if err := s.removeWorkspace(ctx, rec.Workspace); err != nil {
-		fin.Notes = append(fin.Notes, "The session workspace could not be removed completely; `git worktree prune` clears what is left of its registration.")
+	if err := s.removeWorkspace(wctx, rec.Workspace); err != nil {
+		fin.Notes = append(fin.Notes, "The session workspace could not be removed completely; it lies under repochat's state directory.")
 	}
-	if _, err := owner.git(ctx, 4096, "update-ref", "-m", "repochat: finished", "-d", "refs/heads/"+rec.Branch, head); err != nil {
-		fin.Notes = append(fin.Notes, fmt.Sprintf("The session branch %s could not be deleted; delete it with: git branch -D %s", rec.Branch, rec.Branch))
+	if !keepBranch {
+		if note := s.deleteBranch(wctx, rec, head); note != nil {
+			fin.Notes = append(fin.Notes, note.Error())
+		}
 	}
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fin.Notes = append(fin.Notes, "The session record could not be deleted; the next call reports the session as broken, and --new-session starts another.")
 	}
 	return fin, nil
+}
+
+// ownerMergeTimeout bounds the one git command that writes the owner's
+// checkout, far beyond any other git command: cutting it off is worse than
+// waiting.
+const ownerMergeTimeout = 10 * time.Minute
+
+// ownerIndexLocked reports whether git's index lock exists in the owner's
+// checkout.
+func ownerIndexLocked(owner *Repo) bool {
+	_, err := os.Lstat(filepath.Join(owner.GitDir, "index.lock"))
+	return !errors.Is(err, os.ErrNotExist)
+}
+
+// ownerWorktreeState is what git status says of the owner's checkout. It
+// writes nothing (GIT_OPTIONAL_LOCKS=0).
+func ownerWorktreeState(ctx context.Context, owner *Repo) (string, error) {
+	out, err := owner.git(ctx, 64<<20, "status", "--porcelain", "-z", "--untracked-files=all", "--ignore-submodules=dirty")
+	return string(out), err
+}
+
+// failedMerge reports a fast-forward that did not land: as a refusal that
+// changed nothing when the branch, git's index lock and the checkout's
+// status are all as they were before the merge, and otherwise as a checkout
+// that may be partly updated, with the owner's way back. refusal is git's
+// refusal as mergeRefusal describes it, nil when git did not finish.
+func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, land, before string, refusal error) error {
+	now, nowErr := s.ownerTip(ctx, rec)
+	status, statusErr := ownerWorktreeState(ctx, s.owner)
+	if nowErr == nil && statusErr == nil && now == tip && !ownerIndexLocked(s.owner) && status == before {
+		if refusal != nil {
+			return refusal
+		}
+		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
+	}
+	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only %s did not complete. The session, its branch and its workspace are kept. To recover, in the checkout: if no git command is running, remove .git/index.lock; then either complete the merge with `git merge --ff-only %s` or go back with `git reset --merge`", land[:12], land)
+}
+
+// deleteBranch deletes the session branch, unless a worktree other than the
+// session's own (the owner's checkout among them) has it checked out, or
+// that cannot be known. The error is the reason it was kept.
+func (s *Sessions) deleteBranch(ctx context.Context, rec *sessionRecord, head string) error {
+	ref := "refs/heads/" + rec.Branch
+	elsewhere, err := s.checkedOutElsewhere(ctx, rec)
+	switch {
+	case err != nil:
+		return fmt.Errorf("The session branch %s is kept: whether it is checked out elsewhere could not be read (%v)", rec.Branch, err)
+	case elsewhere:
+		return fmt.Errorf("The session branch %s is kept: it is checked out in another worktree or checkout", rec.Branch)
+	}
+	if _, err := s.owner.git(ctx, 4096, "update-ref", "-m", "repochat: session ended", "-d", ref, head); err != nil {
+		return fmt.Errorf("The session branch %s could not be deleted; delete it with: git branch -D %s", rec.Branch, rec.Branch)
+	}
+	return nil
+}
+
+// checkedOutElsewhere reports whether a worktree of the repository other
+// than the session's workspace has the session branch checked out.
+func (s *Sessions) checkedOutElsewhere(ctx context.Context, rec *sessionRecord) (bool, error) {
+	out, err := s.owner.git(ctx, 16<<20, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	want := "branch refs/heads/" + rec.Branch
+	path := ""
+	for _, l := range strings.Split(string(out), "\n") {
+		if p, ok := strings.CutPrefix(l, "worktree "); ok {
+			path = p
+			continue
+		}
+		if l != want {
+			continue
+		}
+		if path == "" {
+			return false, errors.New("unexpected output from git worktree list")
+		}
+		if filepath.Clean(path) != rec.Workspace && resolveExisting(path) != rec.Workspace {
+			return true, nil
+		}
+	}
+	return false, nil
 }
 
 // squashCommit makes one commit with head's tree on top of tip, with the
@@ -670,19 +823,6 @@ func (s *Sessions) mergeRefusal(ctx context.Context, rec *sessionRecord, stderr 
 	return finishRefused("the merge would overwrite changes in the repository's checkout that are not committed (or untracked files): %s. The owner has to commit, stash or move them first", listPaths(shown, hidden))
 }
 
-// mergeFailed returns cause for a fast-forward that did not happen, after
-// checking that the owner's branch is indeed where it was.
-func (s *Sessions) mergeFailed(ctx context.Context, tip string, cause error) error {
-	now, _, err := s.owner.gitText(ctx, "rev-parse", "--verify", "-q", "HEAD^{commit}")
-	if err == nil && now != tip {
-		if s.owner.Logf != nil {
-			s.owner.Logf("finish: the merge failed and HEAD is at %s, not %s", now, tip)
-		}
-		return fmt.Errorf("%v; the repository's HEAD is no longer where it was before the merge: check the checkout with git status", cause)
-	}
-	return cause
-}
-
 // skippedHooks lists the merge hooks the owner's repository has, executable,
 // in its hooks directory: they would have run after a merge made by hand.
 // The files are only looked at.
@@ -739,7 +879,12 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 	}
 	s.closeWorkspace()
 	s.plans = nil
-	s.removeWorkspace(ctx, rec.Workspace)
+	// A workspace that is still there keeps the session open: its record is
+	// what lets the next call find it again.
+	werr := s.removeWorkspace(ctx, rec.Workspace)
+	if _, err := os.Lstat(filepath.Dir(rec.Workspace)); !errors.Is(err, os.ErrNotExist) {
+		return fmt.Errorf("the session workspace could not be removed (%v); the session stays open, and abandoning it can be tried again", werr)
+	}
 	var berr error
 	if deleteBranch {
 		ref := "refs/heads/" + rec.Branch
@@ -748,14 +893,14 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 		case err != nil:
 			berr = err
 		case code == 0 && objectIDRe.MatchString(head):
-			_, berr = s.owner.git(ctx, 4096, "update-ref", "-m", "repochat: abandoned", "-d", ref, head)
+			berr = s.deleteBranch(ctx, rec, head)
 		}
 	}
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("the session workspace was removed, but its record could not be deleted: %v", pathErrCause(err))
 	}
 	if berr != nil {
-		return fmt.Errorf("the session was abandoned, but its branch %s could not be deleted (%v); delete it with: git branch -D %s", rec.Branch, berr, rec.Branch)
+		return fmt.Errorf("the session was abandoned, but its branch was not deleted. %v", berr)
 	}
 	return nil
 }
