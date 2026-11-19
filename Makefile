@@ -40,6 +40,7 @@ fuzz: ## short fuzzing pass over the input validators
 	go test -run '^$$' -fuzz '^FuzzCheckPath$$' -fuzztime 20s ./internal/repo/
 	go test -run '^$$' -fuzz '^FuzzGlob$$' -fuzztime 20s ./internal/repo/
 	go test -run '^$$' -fuzz '^FuzzRevision$$' -fuzztime 20s ./internal/repo/
+	go test -run '^$$' -fuzz '^FuzzParseChanges$$' -fuzztime 20s ./internal/repo/
 
 check: vet test-race test-onboarding ## everything CI runs
 

@@ -560,6 +560,11 @@ func copyIndex(from, to string) error {
 // exit is reported through code with stderr as out; err is reserved for
 // failures to run git at all and for timeouts/cancellation.
 func runGit(ctx context.Context, dir string, pre []string, limit int, args ...string) (out []byte, truncated bool, code int, err error) {
+	return runGitInput(ctx, dir, pre, nil, limit, args...)
+}
+
+// runGitInput is runGit with input on git's standard input (none when nil).
+func runGitInput(ctx context.Context, dir string, pre []string, input []byte, limit int, args ...string) (out []byte, truncated bool, code int, err error) {
 	ctx, cancel := context.WithTimeout(ctx, gitTimeout)
 	defer cancel()
 
@@ -573,6 +578,9 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
 	}
 	cmd.Stdin = nil
+	if input != nil {
+		cmd.Stdin = bytes.NewReader(input)
+	}
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }
 	cmd.WaitDelay = 2 * time.Second
@@ -650,7 +658,15 @@ func (r *Repo) gitRaw(ctx context.Context, limit int, args ...string) ([]byte, b
 
 // git runs a command that must succeed and whose output must be complete.
 func (r *Repo) git(ctx context.Context, limit int, args ...string) ([]byte, error) {
-	out, truncated, code, err := r.gitRaw(ctx, limit, args...)
+	return r.gitInput(ctx, nil, limit, args...)
+}
+
+// gitInput is git with input on git's standard input.
+func (r *Repo) gitInput(ctx context.Context, input []byte, limit int, args ...string) ([]byte, error) {
+	if err := r.checkRoot(); err != nil {
+		return nil, err
+	}
+	out, truncated, code, err := runGitInput(ctx, r.Root, r.gitPre(), input, limit, args...)
 	if err != nil {
 		return nil, err
 	}
