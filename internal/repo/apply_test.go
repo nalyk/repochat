@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"context"
 	"errors"
 	"fmt"
 	"io/fs"
@@ -929,5 +930,76 @@ func TestFileChangedAfterTheCheckIsNotOverwritten(t *testing.T) {
 				t.Errorf("the branch moved to %s", got)
 			}
 		})
+	}
+}
+
+// F5: the call is cancelled as the branch is about to move. The ref move
+// and the look at where the branch is afterwards do not take the call's
+// cancellation, so the outcome is decided from the branch: the checkpoint is
+// there with its files, never files put back under a branch that moved.
+func TestCancellationAtTheRefMoveIsDecidedFromTheBranch(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	base := c.head(t)
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	c.ws.beforeRefMove = cancel
+	a, err := c.s.Apply(ctx, "", []Change{{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"}}, "x")
+	c.ws.beforeRefMove = nil
+	head := c.head(t)
+	file := mustRead(t, filepath.Join(c.ws.Root, "a.txt"))
+	switch {
+	case err != nil && (head != base || file != "a\n"):
+		t.Fatalf("Apply failed (%v) but the branch is at %s (was %s) and a.txt is %q", err, head, base, file)
+	case err != nil:
+		t.Fatalf("Apply: %v; the ref move must not take the call's cancellation", err)
+	}
+	if head == base || a.Checkpoint.ID != head[:12] || file != "A\n" {
+		t.Errorf("Apply succeeded with the branch at %s (was %s), checkpoint %s, a.txt %q", head, base, a.Checkpoint.ID, file)
+	}
+	if _, err := c.s.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+}
+
+// The same for an update: the record's latest update and the branch agree.
+func TestCancellationAtTheUpdatesRefMoveIsDecidedFromTheBranch(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	write(t, c.f.dir, "b.txt", "owner\n")
+	commit(t, c.f.dir, "owner's own")
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	c.ws.beforeRefMove = cancel
+	_, err := c.s.Update(ctx)
+	c.ws.beforeRefMove = nil
+	t.Logf("Update: %v", err)
+	rec, rerr := c.s.readRecord()
+	if rerr != nil || rec == nil {
+		t.Fatalf("record: %v", rerr)
+	}
+	head := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/"+rec.Branch)
+	if rec.LastUpdate != head {
+		t.Errorf("the record's latest update is %q, the branch is at %s", rec.LastUpdate, head)
+	}
+	if gitCmd(t, c.f.dir, "rev-list", "--count", head+"^2") == "" || gitCmd(t, c.f.dir, "rev-parse", head+"^2") != gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main") {
+		t.Errorf("the branch's head %s is not the update commit", head)
+	}
+	// The next call finds a consistent session: the workspace holds the
+	// merged files, and undo to the update is allowed.
+	ws, err := c.s.Serve(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := mustRead(t, filepath.Join(ws.Root, "b.txt")); got != "owner\n" {
+		t.Errorf("b.txt in the workspace = %q", got)
+	}
+	if got := gitCmd(t, ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+	if _, err := c.s.UndoTo(bg, head); err != nil {
+		t.Errorf("undo to the update: %v", err)
 	}
 }

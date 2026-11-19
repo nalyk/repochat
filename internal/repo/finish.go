@@ -288,7 +288,10 @@ func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
 	// it fails, the update is undone.
 	if err := s.syncFiles(ctx); err != nil {
 		if !errors.Is(err, errWithheldOnDisk) {
-			return nil, fmt.Errorf("the update was recorded as %s, but the session workspace could not be brought in line with it: %w", id[:12], err)
+			// Nothing is served or written from a workspace that may hold
+			// what the policy withholds: the next call resumes and syncs it.
+			s.closeWorkspace()
+			return nil, fmt.Errorf("the update was recorded as %s, but the session workspace could not be brought in line with it (%w); it is brought in line on the next call", id[:12], err)
 		}
 		return nil, s.undoUpdate(ctx, &prev, id, head)
 	}
@@ -338,9 +341,10 @@ func (s *Sessions) undoUpdate(ctx context.Context, prev *sessionRecord, id, head
 
 // commitUpdate records the merge in progress in the workspace as a commit of
 // kind update with parents head and tip, records it as the latest update, and
-// moves the session branch to it. The record is written first: should the
-// branch then fail to move, the record names a commit that is not on the
-// branch, and undo refuses until the session starts again.
+// moves the session branch to it. The record is written first, and put back
+// when the branch is seen not to have moved (see moveRef); should that fail,
+// the record names a commit that is not on the branch, and undo refuses
+// until the session starts again.
 func (s *Sessions) commitUpdate(ctx context.Context, rec *sessionRecord, ident []string, head, tip string) (string, error) {
 	ws := s.ws
 	out, err := ws.git(ctx, 4096, "write-tree")
@@ -367,9 +371,14 @@ func (s *Sessions) commitUpdate(ctx context.Context, rec *sessionRecord, ident [
 		return "", fmt.Errorf("cannot record the update: %v", pathErrCause(err))
 	}
 	ref := "refs/heads/" + rec.Branch
-	if _, err := ws.git(ctx, 4096, append(slices.Clone(ident), "update-ref", "-m", "repochat: update", ref, id, head)...); err != nil {
-		if werr := s.writeRecord(rec); werr != nil && s.owner.Logf != nil {
-			s.owner.Logf("update: cannot restore session.json: %v", werr)
+	if err := ws.moveRef(ctx, ident, "repochat: update", ref, id, head); err != nil {
+		// Where the branch could not be read, the record keeps naming the
+		// update: right if the branch moved, and if it did not, undo refuses
+		// until the session starts again.
+		if !errors.Is(err, errRefUnknown) {
+			if werr := s.writeRecord(rec); werr != nil && s.owner.Logf != nil {
+				s.owner.Logf("update: cannot restore session.json: %v", werr)
+			}
 		}
 		return "", err
 	}

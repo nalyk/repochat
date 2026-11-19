@@ -94,6 +94,9 @@ type Repo struct {
 	// options every git command carries, and where .repochatignore is read.
 	extraPre        []string
 	ignoreFromIndex bool
+	// A test seam, nil in production: called right before a checkpoint's or
+	// an update's commit is put on the session branch.
+	beforeRefMove func()
 
 	mu         sync.Mutex
 	snap       *Snapshot

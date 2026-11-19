@@ -1652,3 +1652,38 @@ func TestGoingBackNeverDeletesAnIgnoredFile(t *testing.T) {
 		t.Errorf("status after going back:\n%s", got)
 	}
 }
+
+// F6: the update is committed, and then the workspace cannot be brought in
+// line with it. The workspace is closed, so nothing is served or written
+// from it as it is; the next call resumes and syncs it.
+func TestUpdateWhoseSyncFailsClosesTheWorkspace(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "plain.txt": "p\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	write(t, c.f.dir, ".env", "TOKEN=owner\n")
+	write(t, c.f.dir, "b.txt", "owner\n")
+	gitCmd(t, c.f.dir, "add", "-f", ".env")
+	commit(t, c.f.dir, "owner's own, with a file the policy withholds")
+	ctx, cancel := context.WithCancel(bg)
+	defer cancel()
+	c.s.afterUpdateMerge = cancel // the sync that follows fails
+	_, err := c.s.Update(ctx)
+	if err == nil || !strings.Contains(err.Error(), "was recorded as") {
+		t.Fatalf("Update: %v", err)
+	}
+	if c.s.ws != nil {
+		t.Error("the workspace is still open after a sync that failed")
+	}
+	ws, err := c.s.Serve(bg)
+	if err != nil {
+		t.Fatalf("Serve after the failed sync: %v", err)
+	}
+	if exists(filepath.Join(ws.Root, ".env")) {
+		t.Error("the withheld file the update brought is in the workspace")
+	}
+	if got := mustRead(t, filepath.Join(ws.Root, "b.txt")); got != "owner\n" {
+		t.Errorf("b.txt = %q", got)
+	}
+	if got := gitCmd(t, ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+}

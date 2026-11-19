@@ -311,6 +311,13 @@ func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, mes
 		s.closeWorkspace()
 		return nil, err
 	}
+	if errors.Is(err, errRefUnknown) {
+		// Putting the files back would be wrong if the branch did move, and
+		// leaving them wrong if it did not: resuming brings the workspace in
+		// line with the branch, wherever it is.
+		s.closeWorkspace()
+		return nil, fmt.Errorf("%w, so whether this checkpoint was recorded is not known; the session workspace is brought in line with its branch on the next call, and list_checkpoints then shows whether it is there", err)
+	}
 	if errors.Is(err, errIndexOutOfStep) {
 		err = s.rollBack(ctx, err, undo)
 		// Resuming restores the index from the branch.
@@ -603,8 +610,8 @@ func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, files 
 		return "", errors.New("git commit-tree gave no commit id")
 	}
 	ref := "refs/heads/" + branch
-	if _, err := r.git(ctx, 4096, append(slices.Clone(cfg), "update-ref", "-m", "repochat: "+kind, ref, id, old)...); err != nil {
-		if now, _, _ := r.gitText(ctx, "rev-parse", "--verify", "-q", ref+"^{commit}"); now != old {
+	if err := r.moveRef(ctx, cfg, "repochat: "+kind, ref, id, old); err != nil {
+		if errors.Is(err, errRefElsewhere) {
 			return "", fmt.Errorf("the session branch %s moved while the files were being written (another git command working on it)", branch)
 		}
 		return "", err
@@ -613,13 +620,49 @@ func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, files 
 		if r.Logf != nil {
 			r.Logf("apply: cannot install the new index: %v", err)
 		}
-		if _, berr := r.git(ctx, 4096, append(slices.Clone(cfg), "update-ref", "-m", "repochat: undo a failed "+kind, ref, old, id)...); berr != nil {
+		if berr := r.moveRef(ctx, cfg, "repochat: undo a failed "+kind, ref, old, id); berr != nil {
 			return "", &staleIndexError{id: id}
 		}
 		return "", errors.New("the session workspace's git index could not be updated")
 	}
 	locked = false
 	return id, nil
+}
+
+var (
+	// errRefElsewhere: after a ref move the ref is neither where it was nor
+	// where it was to go.
+	errRefElsewhere = errors.New("the session branch was moved by another git command")
+	// errRefUnknown: where the ref is after a move could not be read.
+	errRefUnknown = errors.New("where the session branch is could not be read after moving it")
+)
+
+// moveRef moves ref from old to id and answers from where the ref then is:
+// nil only when it is at id. Neither the move nor the look afterwards takes
+// the call's cancellation: a call cancelled just as git moved the branch
+// would otherwise be reported, and cleaned up after, as one that did not
+// move it. cfg are the identity overrides (the reflog entry names them).
+func (r *Repo) moveRef(ctx context.Context, cfg []string, msg, ref, id, old string) error {
+	if r.beforeRefMove != nil {
+		r.beforeRefMove()
+	}
+	wctx := context.WithoutCancel(ctx)
+	_, uerr := r.git(wctx, 4096, append(slices.Clone(cfg), "update-ref", "-m", msg, ref, id, old)...)
+	now, code, err := r.gitText(wctx, "rev-parse", "--verify", "-q", ref+"^{commit}")
+	switch {
+	case err != nil || code != 0 || !objectIDRe.MatchString(now):
+		if r.Logf != nil {
+			r.Logf("moving %s: update-ref: %v; reading it back: %v", ref, uerr, err)
+		}
+		return errRefUnknown
+	case now == id:
+		return nil
+	case now != old:
+		return errRefElsewhere
+	case uerr != nil:
+		return uerr
+	}
+	return errors.New("git update-ref did not move the session branch")
 }
 
 // errIndexBusy is an index.lock that another git command may still hold.
