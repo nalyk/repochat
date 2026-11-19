@@ -34,6 +34,11 @@ type Options struct {
 	// repository (its configuration with the API key, its state, its helper).
 	// Whatever lies under them is withheld before any pattern is consulted.
 	Own []string
+	// ExtraIgnoreFile is the absolute path of a second rules file in the
+	// syntax of .repochatignore, read at every snapshot build: a path that it
+	// or the served tree's .repochatignore withholds is withheld. A missing
+	// file is no extra rules; one that cannot be read fails the snapshot.
+	ExtraIgnoreFile string
 }
 
 const (
@@ -79,6 +84,7 @@ type Repo struct {
 	deny     []*Glob
 	own      []string      // Options.Own as repository-relative prefixes, lower case
 	oracle   *ignoreOracle // git's answers about .repochatignore, kept while the rules stay the same
+	extra    *ignoreOracle // the same for Options.ExtraIgnoreFile
 	version  [3]int
 
 	mu         sync.Mutex
@@ -163,6 +169,9 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 		return nil, fmt.Errorf("--deny %w", err)
 	}
 	r.own = ownPrefixes(root, opts.Own)
+	if opts.ExtraIgnoreFile != "" && !filepath.IsAbs(opts.ExtraIgnoreFile) {
+		return nil, errors.New("the extra ignore file must be given by an absolute path")
+	}
 
 	if out, _, code, err := runGit(ctx, root, nil, 1024, "version"); err != nil || code != 0 {
 		return nil, fmt.Errorf("cannot run git: %v", firstErr(err, out))

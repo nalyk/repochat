@@ -7,9 +7,11 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"sort"
 	"strings"
+	"syscall"
 	"time"
 )
 
@@ -152,19 +154,25 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	if s.Policy, err = NewPolicy(ignoreText, r.deny, r.allow); err != nil {
 		return nil, err
 	}
+	if r.Opts.ExtraIgnoreFile != "" {
+		extra, found, err := readExtraIgnore(r.Opts.ExtraIgnoreFile)
+		if err != nil {
+			return nil, err
+		}
+		if found {
+			if err := s.Policy.AddIgnore(extra); err != nil {
+				return nil, err
+			}
+		}
+	}
 	s.Policy.own = r.own
 	s.Policy.hash += "+" + strings.Join(r.own, "|")
 	// The answers git gave for these rules are kept from one snapshot to the
 	// next; new rules start with none.
-	if o := s.Policy.oracle; o != nil {
-		r.mu.Lock()
-		if r.oracle != nil && bytes.Equal(r.oracle.rules, o.rules) {
-			s.Policy.oracle = r.oracle
-		} else {
-			r.oracle = o
-		}
-		r.mu.Unlock()
-	}
+	r.mu.Lock()
+	adoptOracle(&r.oracle, &s.Policy.oracle)
+	adoptOracle(&r.extra, &s.Policy.extraOracle)
+	r.mu.Unlock()
 
 	const listLimit = 256 << 20
 	cached, err := r.git(ctx, listLimit, "ls-files", "-z", "--stage")
@@ -256,6 +264,55 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	}
 	s.Generation = hex.EncodeToString(h.Sum(nil))[:12]
 	return s, nil
+}
+
+// adoptOracle keeps the oracle *kept while *fresh asks about the same rules,
+// and otherwise makes *fresh the one kept. A nil *fresh changes nothing.
+func adoptOracle(kept, fresh **ignoreOracle) {
+	switch {
+	case *fresh == nil:
+	case *kept != nil && bytes.Equal((*kept).rules, (*fresh).rules):
+		*fresh = *kept
+	default:
+		*kept = *fresh
+	}
+}
+
+// readExtraIgnore reads Options.ExtraIgnoreFile. The path is the program's
+// own choice and lies outside the served tree, so it is opened as it is.
+// Only a file that does not exist counts as no rules; any other failure is
+// an error, which names no path.
+func readExtraIgnore(name string) (text string, found bool, err error) {
+	const limit = 256 << 10
+	// Non-blocking, so that a named pipe in its place cannot stall the build.
+	f, err := os.OpenFile(name, os.O_RDONLY|syscall.O_NONBLOCK, 0)
+	if err != nil {
+		if os.IsNotExist(err) {
+			return "", false, nil
+		}
+		return "", false, fmt.Errorf("cannot read the repository owner's .repochatignore (%v); refusing to run without the policy it defines", pathErrCause(err))
+	}
+	defer f.Close()
+	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
+		return "", false, errors.New("the repository owner's .repochatignore is not a regular file; refusing to run without the policy it defines")
+	}
+	data, err := io.ReadAll(io.LimitReader(f, limit+1))
+	if err != nil {
+		return "", false, fmt.Errorf("cannot read the repository owner's .repochatignore (%v); refusing to run without the policy it defines", pathErrCause(err))
+	}
+	if len(data) > limit {
+		return "", false, errors.New("the repository owner's .repochatignore is larger than 256 KB; refusing to guess at the policy")
+	}
+	return string(data), true, nil
+}
+
+// pathErrCause drops the path from an error about a file.
+func pathErrCause(err error) error {
+	var pe *os.PathError
+	if errors.As(err, &pe) {
+		return pe.Err
+	}
+	return err
 }
 
 // CheckPath validates a model-supplied path and returns its cleaned form.
