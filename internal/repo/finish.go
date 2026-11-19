@@ -258,7 +258,7 @@ func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
 	ident := s.identity(ctx)
 	args := append(slices.Clone(ident),
 		"-c", "rerere.enabled=false", "-c", "merge.autoStash=false", "-c", "merge.log=false",
-		"merge", "--no-ff", "--no-commit", "--no-verify-signatures", "--no-stat", tip)
+		"merge", "-s", ws.mergeStrategy(), "--no-ff", "--no-commit", "--no-verify-signatures", "--no-stat", tip)
 	out, _, code, err = ws.gitRaw(ctx, 1<<20, args...)
 	if err != nil || code != 0 {
 		var cause error
@@ -673,9 +673,12 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		}
 	}
 	// git reads branch.<name>.mergeOptions as more options of every merge
-	// into that branch, after its command line's: a strategy, --squash,
-	// --autostash, --gpg-sign. With any of them the merge below is no longer
-	// the fast-forward that lands or changes nothing.
+	// into that branch, before its command line's, so the command line wins
+	// where it gives the opposite option. But the setting can add options
+	// the merge below does not counter: --squash, --autostash, a strategy
+	// (strategies add up, and "ours" forbids a fast-forward). With any of
+	// them the merge is no longer the fast-forward that lands or changes
+	// nothing.
 	if err := s.checkMergeOptions(ctx, rec, byHand); err != nil {
 		return nil, err
 	}
@@ -746,9 +749,11 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	}
 	mctx := context.WithValue(wctx, gitTimeoutKey{}, ownerMergeTimeout)
 	// --no-overwrite-ignore: an ignored file that appears in the merge's way
-	// after checkInTheWay makes git refuse instead of replacing it.
+	// after checkInTheWay makes git refuse instead of replacing it. The
+	// strategy is named so that pull.twohead cannot choose one (see
+	// mergeStrategy).
 	out, _, code, err := owner.gitRaw(mctx, 1<<20, "-c", "merge.autoStash=false", "-c", "commit.gpgsign=false",
-		"merge", "--ff-only", "--no-stat", "--no-verify-signatures", "--no-gpg-sign", "--no-overwrite-ignore", land)
+		"merge", "-s", owner.mergeStrategy(), "--ff-only", "--no-stat", "--no-verify-signatures", "--no-gpg-sign", "--no-overwrite-ignore", land)
 	var notes []string
 	if err != nil || code != 0 {
 		if err != nil && s.owner.Logf != nil {
@@ -832,6 +837,20 @@ func (s *Sessions) checkMergeOptions(ctx context.Context, rec *sessionRecord, by
 		return finishRefused("the repository's git configuration sets %s, options git adds to every merge into %s (they can make the merge something other than a fast-forward, stash or stage changes, or run a signing program), and repochat merges only as a plain fast-forward. %s, or remove the setting and finish again", key, rec.StartBranch, byHand)
 	}
 	return finishRefused("whether the repository's git configuration sets %s could not be read. %s", key, byHand)
+}
+
+// mergeStrategy is the strategy the installed git merges two heads with by
+// default: ort from git 2.34 on, recursive before. Both merges name it on
+// their command line, because git takes the strategy from pull.twohead (and
+// pull.octopus) only when none is given there, and the repository's
+// configuration could choose "ours", which forbids a fast-forward and drops
+// the other side's changes, or the name of a program git runs as
+// git-merge-<name>. Neither ort nor recursive forbids a fast-forward.
+func (r *Repo) mergeStrategy() string {
+	if versionLess(r.version, [3]int{2, 34, 0}) {
+		return "recursive"
+	}
+	return "ort"
 }
 
 // ownerMergeTimeout bounds the one git command that writes the owner's

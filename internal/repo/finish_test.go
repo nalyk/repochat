@@ -1728,6 +1728,176 @@ func TestUnrecognisedGitErrorAfterPartialWritesIsReportedAsPartlyUpdated(t *test
 	}
 }
 
+// readOr is the content of path, or what went wrong reading it.
+func readOr(path string) string {
+	data, err := os.ReadFile(path)
+	if err != nil {
+		return err.Error()
+	}
+	return string(data)
+}
+
+// git takes a merge's strategy from pull.twohead when its command line names
+// none, and "ours" forbids a fast-forward: with it, --ff-only made a merge
+// commit that keeps the owner's tree and drops the session's changes, so the
+// branch ended at neither the old tip nor the landed commit.
+func TestFinishFastForwardsDespitePullTwohead(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	info := c.info(t)
+	tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+	c.replaceLine(t, "a.txt", 1, "A")
+	c.apply(t, "new", Change{Op: "create", Path: "new.txt", Text: "new"})
+	head := c.head(t)
+	gitCmd(t, c.f.dir, "config", "pull.twohead", "ours")
+
+	fin, err := c.s.Finish(bg, false, "")
+	if err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != head || fin.Commit != head {
+		t.Errorf("main is at %s, Finished.Commit %s; want the session head %s", got, fin.Commit, head)
+	}
+	if got := gitCmd(t, c.f.dir, "rev-list", "--merges", tip+"..refs/heads/main"); got != "" {
+		t.Errorf("a merge commit was made: %s", got)
+	}
+	mustNotContain(t, strings.Join(fin.Notes, "\n"), "WARNING")
+	for p, w := range map[string]string{"a.txt": "A\n", "b.txt": "b\n", "new.txt": "new\n"} {
+		if got := readOr(filepath.Join(c.f.dir, p)); got != w {
+			t.Errorf("the owner's %s is %q, want %q", p, got, w)
+		}
+	}
+	if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("owner's status:\n%s", got)
+	}
+	if got := gitCmd(t, c.f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+		t.Errorf("owner's HEAD is %s", got)
+	}
+	c.sessionDone(t, info)
+}
+
+// The same key reaches the update's merge in the workspace: with "ours" it
+// kept the session's tree and dropped the owner's changes, recorded as an
+// update all the same.
+func TestUpdateMergesDespitePullTwohead(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	before := c.head(t)
+	gitCmd(t, c.f.dir, "config", "pull.twohead", "ours")
+	write(t, c.f.dir, "b.txt", "owner\n")
+	write(t, c.f.dir, "owner.txt", "owner's new\n")
+	tip := commit(t, c.f.dir, "owner's own")
+	owner := ownerState(t, c.f.dir, "a.txt", "b.txt", "owner.txt")
+
+	u, err := c.s.Update(bg)
+	if err != nil {
+		t.Fatalf("Update: %v", err)
+	}
+	head := c.head(t)
+	if got := gitCmd(t, c.ws.Root, "rev-list", "--parents", "-n", "1", "HEAD"); got != head+" "+before+" "+tip {
+		t.Errorf("update parents: %s, want %s %s %s", got, head, before, tip)
+	}
+	if u.Checkpoint.Kind != "update" || u.Checkpoint.ID != head[:12] {
+		t.Errorf("checkpoint %+v, head %s", u.Checkpoint, head)
+	}
+	if got := strings.Join(u.Checkpoint.Files, ","); got != "b.txt,owner.txt" {
+		t.Errorf("update files %q, want b.txt,owner.txt", got)
+	}
+	for p, w := range map[string]string{"a.txt": "A\n", "b.txt": "owner\n", "owner.txt": "owner's new\n"} {
+		if got := readOr(filepath.Join(c.ws.Root, p)); got != w {
+			t.Errorf("the workspace's %s is %q, want %q", p, got, w)
+		}
+	}
+	if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+		t.Errorf("workspace status:\n%s", got)
+	}
+	if after := ownerState(t, c.f.dir, "a.txt", "b.txt", "owner.txt"); after != owner {
+		t.Errorf("Update changed the owner's checkout:\n%s\nwas:\n%s", after, owner)
+	}
+}
+
+// pull.twohead may also name a program: git runs git-merge-<name>, found on
+// its exec path or PATH, as the strategy. Neither merge runs it. (Finish's
+// fast-forward never reached a strategy even before the strategy was named;
+// it is checked here as a guard.)
+func TestMergesRunNoStrategyProgram(t *testing.T) {
+	bin := t.TempDir()
+	marker := filepath.Join(t.TempDir(), "strategy-ran")
+	write(t, bin, "git-merge-probe", "#!/bin/sh\n: > "+marker+"\nexit 2\n")
+	if err := os.Chmod(filepath.Join(bin, "git-merge-probe"), 0o755); err != nil {
+		t.Fatal(err)
+	}
+	t.Setenv("PATH", bin+string(os.PathListSeparator)+os.Getenv("PATH"))
+
+	// The control: plain git, told nothing else, runs the program.
+	ctl := newDir(t)
+	gitCmd(t, ctl, "config", "user.name", "Ada")
+	gitCmd(t, ctl, "config", "user.email", "ada@example.com")
+	write(t, ctl, "a.txt", "a\n")
+	commit(t, ctl, "start")
+	gitCmd(t, ctl, "checkout", "-q", "-b", "side")
+	write(t, ctl, "b.txt", "b\n")
+	commit(t, ctl, "side")
+	gitCmd(t, ctl, "checkout", "-q", "main")
+	write(t, ctl, "c.txt", "c\n")
+	commit(t, ctl, "main")
+	gitCmd(t, ctl, "config", "pull.twohead", "probe")
+	out, _ := shOut(ctl, "git -c core.hooksPath=/dev/null merge --no-edit side")
+	if !exists(marker) {
+		t.Fatalf("the control: git did not run git-merge-probe for pull.twohead=probe:\n%s", out)
+	}
+	os.Remove(marker)
+
+	t.Run("finish", func(t *testing.T) {
+		c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+		c.replaceLine(t, "a.txt", 1, "A")
+		head := c.head(t)
+		gitCmd(t, c.f.dir, "config", "pull.twohead", "probe")
+		fin, err := c.s.Finish(bg, false, "")
+		if exists(marker) {
+			t.Error("Finish ran the strategy program pull.twohead names")
+			os.Remove(marker)
+		}
+		if err != nil {
+			t.Fatalf("Finish: %v", err)
+		}
+		if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != head || fin.Commit != head {
+			t.Errorf("main is at %s, Finished.Commit %s; want the session head %s", got, fin.Commit, head)
+		}
+		for p, w := range map[string]string{"a.txt": "A\n", "b.txt": "b\n"} {
+			if got := readOr(filepath.Join(c.f.dir, p)); got != w {
+				t.Errorf("the owner's %s is %q, want %q", p, got, w)
+			}
+		}
+		if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "" {
+			t.Errorf("owner's status:\n%s", got)
+		}
+	})
+
+	t.Run("update", func(t *testing.T) {
+		c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+		c.replaceLine(t, "a.txt", 1, "A")
+		gitCmd(t, c.f.dir, "config", "pull.twohead", "probe")
+		write(t, c.f.dir, "b.txt", "owner\n")
+		commit(t, c.f.dir, "owner's own")
+		_, err := c.s.Update(bg)
+		if exists(marker) {
+			t.Error("Update ran the strategy program pull.twohead names")
+			os.Remove(marker)
+		}
+		if err != nil {
+			t.Fatalf("Update: %v", err)
+		}
+		for p, w := range map[string]string{"a.txt": "A\n", "b.txt": "owner\n"} {
+			if got := readOr(filepath.Join(c.ws.Root, p)); got != w {
+				t.Errorf("the workspace's %s is %q, want %q", p, got, w)
+			}
+		}
+		if got := gitCmd(t, c.ws.Root, "status", "--porcelain", "--untracked-files=all"); got != "" {
+			t.Errorf("workspace status:\n%s", got)
+		}
+	})
+}
+
 // What git 2.25 and 2.43 print (LC_MESSAGES=C) when they refuse a merge
 // before writing anything, and what they print otherwise.
 func TestPreWriteRefusalTexts(t *testing.T) {
