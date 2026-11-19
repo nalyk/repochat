@@ -775,7 +775,13 @@ func (s *Server) runTool(ctx context.Context, tool *Tool, rawArgs map[string]any
 	if err != nil {
 		msg := err.Error()
 		if errors.Is(ctx.Err(), context.DeadlineExceeded) {
-			msg = fmt.Sprintf("%s timed out after %s; narrow the request (smaller range, path filter, fewer results)", tool.Name, s.CallTimeout)
+			if tool.Write {
+				// A write may have changed state on the way, and its own
+				// message says what (and how to recover): it is kept.
+				msg = fmt.Sprintf("%s timed out after %s. It reported: %s", tool.Name, s.CallTimeout, msg)
+			} else {
+				msg = fmt.Sprintf("%s timed out after %s; narrow the request (smaller range, path filter, fewer results)", tool.Name, s.CallTimeout)
+			}
 		}
 		ev.Err = msg
 		return msg, true

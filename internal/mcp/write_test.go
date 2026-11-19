@@ -3,9 +3,11 @@ package mcp
 import (
 	"context"
 	"encoding/json"
+	"errors"
 	"reflect"
 	"strings"
 	"testing"
+	"time"
 )
 
 func TestWriteToolsAreAnnotatedAsWrites(t *testing.T) {
@@ -94,5 +96,23 @@ func TestObjectArgumentIsAdvertisedAndBounded(t *testing.T) {
 
 	if sig := s.Signature(); !strings.Contains(sig, "changes: object") {
 		t.Errorf("Signature = %q", sig)
+	}
+}
+
+// A write tool that runs past the call's time limit may still have changed
+// state, and what it reports (a recovery procedure, for one) is kept: the
+// timeout is stated in front of it, not in its place.
+func TestTimedOutWriteToolKeepsItsMessage(t *testing.T) {
+	s := &Server{Name: "t", Version: "1", CallTimeout: 50 * time.Millisecond, Tools: []Tool{{
+		Name: "finish", Description: "d", Write: true, Destructive: true,
+		Handler: func(ctx context.Context, _ Args) (Result, error) {
+			<-ctx.Done()
+			return Result{}, errors.New("the checkout may be partly updated: run these commands")
+		},
+	}}}
+	rs := run(t, s, legacyInit, `{"jsonrpc":"2.0","id":1,"method":"tools/call","params":{"name":"finish"}}`)
+	got := text(byID(t, rs, "1"))
+	if !strings.Contains(got, "timed out") || !strings.Contains(got, "may be partly updated: run these commands") || strings.Contains(got, "narrow the request") {
+		t.Fatalf("timed-out write tool: %q", got)
 	}
 }
