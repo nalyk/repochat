@@ -1003,3 +1003,46 @@ func TestCancellationAtTheUpdatesRefMoveIsDecidedFromTheBranch(t *testing.T) {
 		t.Errorf("undo to the update: %v", err)
 	}
 }
+
+// F9: a plan kept for apply_changes holds the operations and a digest of
+// each file it was made from, not the files: 32 plans of 100 files of 2 MiB
+// would otherwise sit in memory twice over.
+func TestStoredPlansHoldNoFileContent(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{
+		"a.txt":    strings.Repeat("UNIQUE-OLD-CONTENT\n", 2000),
+		"gone.txt": "GONE-CONTENT\n",
+		"keep.txt": "k\n",
+	}, nil)
+	plan := c.accept(t,
+		Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 2), Text: "two"},
+		Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")},
+		Change{Op: "create", Path: "n.txt", Text: "new"},
+	)
+	sp := c.s.plans[plan.ID]
+	if sp == nil {
+		t.Fatal("the plan was not kept")
+	}
+	// Whatever is kept per file is small and is not the file: 40 KB of
+	// a.txt would show here, as text or as its bytes.
+	dump := fmt.Sprintf("%v %+v", sp.befores, sp.changes)
+	if strings.Contains(dump, "UNIQUE-OLD-CONTENT") || strings.Contains(dump, "GONE-CONTENT") || len(dump) > 4096 {
+		t.Errorf("the stored plan holds file content (%d bytes kept)", len(dump))
+	}
+	if len(sp.befores) != 3 {
+		t.Errorf("the stored plan knows %d files, want 3", len(sp.befores))
+	}
+	// It still applies while the files are as they were …
+	twin := c.accept(t, Change{Op: "replace", Path: "keep.txt", From: c.anchor(t, "keep.txt", 1), Text: "K"})
+	if _, err := c.s.Apply(bg, plan.ID, nil, "by plan"); err != nil {
+		t.Fatalf("Apply by plan: %v", err)
+	}
+	if got := mustRead(t, filepath.Join(c.ws.Root, "n.txt")); got != "new\n" || exists(filepath.Join(c.ws.Root, "gone.txt")) {
+		t.Errorf("the plan was not applied as proposed: n.txt %q", got)
+	}
+	// … and is refused once one of them is not: here, a path the plan saw
+	// as a one-line file is now another one-line file of the same size.
+	write(t, c.ws.Root, "keep.txt", "x\n")
+	if _, err := c.s.Apply(bg, twin.ID, nil, ""); err == nil {
+		t.Error("a plan was applied to a file that changed since it was made")
+	}
+}

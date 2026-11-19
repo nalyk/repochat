@@ -157,3 +157,22 @@ func TestEachServerSyncsTheWorkspaceToItsOwnPolicy(t *testing.T) {
 		t.Errorf("A's plan survived a re-sync: %v", err)
 	}
 }
+
+// A plan is looked up after the workspace was brought in line, not before:
+// one made before another server synced the workspace to its own options is
+// gone, and is not applied from a pointer taken earlier.
+func TestPlanIsLookedUpAfterTheWorkspaceIsBroughtInLine(t *testing.T) {
+	f := newSessionFixture(t, withSecret)
+	a, _ := f.start(t, Options{Deny: []string{"plans.txt"}})
+	b := f.sessions(t, Options{})
+	plan, err := a.Propose(bg, []Change{{Op: "create", Path: "n.txt", Text: "x"}})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := b.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := a.Apply(bg, plan.ID, nil, "m"); err == nil || !strings.Contains(err.Error(), "unknown or has expired") {
+		t.Errorf("A's plan was applied across a re-sync: %v", err)
+	}
+}

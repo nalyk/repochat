@@ -3,6 +3,7 @@ package repo
 import (
 	"bytes"
 	"context"
+	"crypto/sha256"
 	"errors"
 	"fmt"
 	"io"
@@ -76,14 +77,29 @@ func (a *Applied) clone() *Applied {
 
 // storedPlan is a plan Propose made, kept so that Apply can take its
 // identifier. It is tied to the session and to the content of every file it
-// touches.
+// touches, of which it keeps a digest only: Apply validates the stored
+// operations again against the files as they are, and the digests say
+// whether those are the files the plan was made from.
 type storedPlan struct {
 	session string
 	changes []Change
-	befores map[string][]byte // path → its content when the plan was made; nil: absent
+	befores map[string]planBefore // path → what it held when the plan was made
 	made    time.Time
 	seq     uint64   // order of making, for eviction among equal times
 	applied *Applied // set once applied: a second apply returns it
+}
+
+// planBefore identifies the content a touched path had when a plan was made.
+type planBefore struct {
+	exists bool
+	sum    [sha256.Size]byte // of the content; zero when the path did not exist
+}
+
+func planBeforeOf(content []byte) planBefore {
+	if content == nil {
+		return planBefore{}
+	}
+	return planBefore{exists: true, sum: sha256.Sum256(content)}
 }
 
 func (s *Sessions) clock() time.Time {
@@ -121,9 +137,9 @@ func (s *Sessions) storePlan(rec *sessionRecord, changes []Change, plan *Plan) {
 		}
 		delete(s.plans, oldestID)
 	}
-	befores := map[string][]byte{}
+	befores := map[string]planBefore{}
 	for _, f := range plan.Files {
-		befores[f.Path] = bytes.Clone(f.Before) // nil stays nil
+		befores[f.Path] = planBeforeOf(f.Before)
 	}
 	s.planSeq++
 	s.plans[plan.ID] = &storedPlan{
@@ -136,14 +152,14 @@ func (s *Sessions) storePlan(rec *sessionRecord, changes []Change, plan *Plan) {
 }
 
 // matches checks that a fresh validation of the stored changes touches the
-// same files, each with byte-identical content before.
+// same files, each with the content it had when the plan was made.
 func (sp *storedPlan) matches(plan *Plan) error {
 	if len(plan.Files) != len(sp.befores) {
 		return refusal("", "the files the plan touches changed since the plan was made; propose the change set again")
 	}
 	for _, f := range plan.Files {
 		before, ok := sp.befores[f.Path]
-		if !ok || (before == nil) != (f.Before == nil) || !bytes.Equal(before, f.Before) {
+		if !ok || before != planBeforeOf(f.Before) {
 			return refusal(f.Path, "changed since the plan was made; propose the change set again")
 		}
 	}
@@ -168,6 +184,16 @@ func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, m
 	}
 	defer release()
 
+	rec, err := s.ensure(ctx)
+	if err != nil {
+		return nil, err
+	}
+	if rec == nil {
+		return nil, ErrNoSession
+	}
+	s.freshPolicy()
+	// Looked up only now: ensure drops the plans made before the workspace
+	// was last brought in line with other options or rules.
 	var sp *storedPlan
 	if planID != "" {
 		s.prunePlans()
@@ -180,14 +206,6 @@ func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, m
 			return nil, refusal("", "plan %q is unknown or has expired (plans are kept for 30 minutes, at most %d at a time); propose the change set again, or pass it to apply_changes directly", SanitizeLine(shown), maxPlans)
 		}
 	}
-	rec, err := s.ensure(ctx)
-	if err != nil {
-		return nil, err
-	}
-	if rec == nil {
-		return nil, ErrNoSession
-	}
-	s.freshPolicy()
 	if sp != nil {
 		if sp.session != rec.ID {
 			return nil, refusal("", "the plan belongs to an earlier session; propose the change set again")
