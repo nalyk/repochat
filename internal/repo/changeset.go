@@ -309,7 +309,8 @@ type PlannedFile struct {
 }
 
 // Propose validates a change set against the open session's workspace and
-// returns its plan. It writes nothing.
+// returns its plan, which is kept for Apply (see storePlan). It writes
+// nothing to the workspace.
 func (s *Sessions) Propose(ctx context.Context, changes []Change) (*Plan, error) {
 	release, err := s.acquire()
 	if err != nil {
@@ -323,7 +324,12 @@ func (s *Sessions) Propose(ctx context.Context, changes []Change) (*Plan, error)
 	if rec == nil {
 		return nil, ErrNoSession
 	}
-	return s.ws.planChanges(ctx, changes)
+	plan, err := s.ws.planChanges(ctx, changes)
+	if err != nil {
+		return nil, err
+	}
+	s.storePlan(rec, changes, plan)
+	return plan, nil
 }
 
 // changeWork collects what the change set does, path by path.
@@ -835,29 +841,35 @@ func (r *Repo) staleError(key []byte, stale []staleAnchor, srcs map[string]*sour
 		byPath[s.path] = append(byPath[s.path], [2]int{from, to})
 	}
 	for _, p := range order {
-		wins := byPath[p]
-		sort.Slice(wins, func(i, j int) bool { return wins[i][0] < wins[j][0] })
-		var merged [][2]int
-		for _, wi := range wins {
-			if k := len(merged); k > 0 && wi[0] <= merged[k-1][1]+1 {
-				merged[k-1][1] = max(merged[k-1][1], wi[1])
-				continue
-			}
-			merged = append(merged, wi)
-		}
 		fmt.Fprintf(&b, "FILE %s\n", Sanitize(p))
-		lines := srcs[p].shown
-		for k, wi := range merged {
-			if k > 0 {
-				b.WriteString("…\n")
-			}
-			width := len(strconv.Itoa(wi[1]))
-			for n := wi[0]; n <= wi[1]; n++ {
-				fmt.Fprintf(&b, "%*d:%s| %s\n", width, n, lineAnchor(key, lines[n-1]), displayShown(lines[n-1]))
-			}
-		}
+		writeWindows(&b, key, srcs[p].shown, byPath[p])
 	}
 	return &ChangeError{Path: SanitizeLine(first.path), Reason: reason, Fresh: b.String()}
+}
+
+// writeWindows writes the shown lines of windows (1-based, inclusive, within
+// lines) with their anchors, as read_file shows them; windows that overlap or
+// meet are merged, and "…" separates the rest.
+func writeWindows(b *strings.Builder, key []byte, lines []shownLine, wins [][2]int) {
+	wins = append([][2]int(nil), wins...)
+	sort.Slice(wins, func(i, j int) bool { return wins[i][0] < wins[j][0] })
+	var merged [][2]int
+	for _, wi := range wins {
+		if k := len(merged); k > 0 && wi[0] <= merged[k-1][1]+1 {
+			merged[k-1][1] = max(merged[k-1][1], wi[1])
+			continue
+		}
+		merged = append(merged, wi)
+	}
+	for k, wi := range merged {
+		if k > 0 {
+			b.WriteString("…\n")
+		}
+		width := len(strconv.Itoa(wi[1]))
+		for n := wi[0]; n <= wi[1]; n++ {
+			fmt.Fprintf(b, "%*d:%s| %s\n", width, n, lineAnchor(key, lines[n-1]), displayShown(lines[n-1]))
+		}
+	}
 }
 
 // displayShown is a shown line as read_file prints it.

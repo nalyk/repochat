@@ -610,7 +610,7 @@ func runGitInput(ctx context.Context, dir string, pre []string, input []byte, li
 	}
 	werr := cmd.Wait()
 	if ctx.Err() != nil && !truncated {
-		return nil, false, -1, fmt.Errorf("git %s: %w", args[0], ctx.Err())
+		return nil, false, -1, fmt.Errorf("git %s: %w", subcommand(args), ctx.Err())
 	}
 	if truncated {
 		return buf, true, 0, nil
@@ -623,6 +623,18 @@ func runGitInput(ctx context.Context, dir string, pre []string, input []byte, li
 		return nil, false, -1, werr
 	}
 	return buf, false, 0, nil
+}
+
+// subcommand names the git command in args, past any leading
+// "-c name=value" options.
+func subcommand(args []string) string {
+	for len(args) >= 2 && args[0] == "-c" {
+		args = args[2:]
+	}
+	if len(args) == 0 {
+		return "git"
+	}
+	return args[0]
 }
 
 type cappedBuffer struct {
@@ -671,7 +683,7 @@ func (r *Repo) gitInput(ctx context.Context, input []byte, limit int, args ...st
 		return nil, err
 	}
 	if code != 0 {
-		return nil, r.gitFailure(args[0], out)
+		return nil, r.gitFailure(subcommand(args), out)
 	}
 	if truncated {
 		return nil, fmt.Errorf("git %s produced more than %d bytes; refusing to work from incomplete data", args[0], limit)

@@ -73,6 +73,14 @@ type Sessions struct {
 	lock *os.File   // nil once closed
 	rec  *sessionRecord
 	ws   *Repo // the open workspace, for rec
+
+	plans   map[string]*storedPlan // Propose's plans, by ID (see apply.go)
+	planSeq uint64
+	// Test seams, nil in production: the clock for plan expiry, and a hook
+	// called before the i-th file of an apply is written; an error it
+	// returns fails the apply there.
+	now        func() time.Time
+	applyFault func(i int) error
 }
 
 const (
