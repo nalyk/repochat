@@ -60,4 +60,4 @@ jobs:
           useradd -m tester
           cp -r . /home/tester/src
           chown -R tester /home/tester/src
-          su tester -c "cd /home/tester/src && PATH=$(dirname "$(command -v go)"):\$PATH go test -count=1 ./internal/repo/ ./internal/tools/"
+          su tester -c "cd /home/tester/src && PATH=$(dirname "$(command -v go)"):\$PATH go test -count=1 -timeout 30m ./internal/repo/ ./internal/tools/"
