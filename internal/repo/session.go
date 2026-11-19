@@ -81,6 +81,9 @@ const (
 	sessionKeySize = 32
 )
 
+// errDamagedRecord marks a session.json that cannot be trusted.
+var errDamagedRecord = errors.New("session.json is damaged; start a new session with --new-session")
+
 var (
 	sessionIDRe  = regexp.MustCompile(`^[0-9a-f]{8}$`)
 	objectIDRe   = regexp.MustCompile(`^(?:[0-9a-f]{40}|[0-9a-f]{64})$`)
@@ -94,6 +97,12 @@ func NewSessions(owner *Repo, o SessionOptions) (*Sessions, error) {
 		return nil, errors.New("the session state directory must be an absolute path")
 	}
 	dir := filepath.Join(o.StateDir, owner.ID)
+	// The workspace must lie outside the owner's checkout: checked before
+	// anything is created, and again once the directory exists.
+	inside := errors.New("the session state directory is inside the repository's checkout; workspaces must lie outside it")
+	if within(owner.Root, resolveExisting(dir)) {
+		return nil, inside
+	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, fmt.Errorf("cannot create the session state directory: %w", err)
 	}
@@ -101,11 +110,37 @@ func NewSessions(owner *Repo, o SessionOptions) (*Sessions, error) {
 	if err != nil {
 		return nil, err
 	}
+	if within(owner.Root, dir) {
+		return nil, inside
+	}
 	lock, err := os.OpenFile(filepath.Join(dir, "lock"), os.O_RDWR|os.O_CREATE|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("cannot open the session lock: %w", err)
 	}
 	return &Sessions{owner: owner, opts: o, dir: dir, lock: lock}, nil
+}
+
+// within reports whether p is dir or lies beneath it.
+func within(dir, p string) bool {
+	rel, err := filepath.Rel(dir, p)
+	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+}
+
+// resolveExisting resolves the symbolic links of the longest part of p that
+// exists and appends the rest unchanged.
+func resolveExisting(p string) string {
+	rest := ""
+	for {
+		if resolved, err := filepath.EvalSymlinks(p); err == nil {
+			return filepath.Join(resolved, rest)
+		}
+		parent := filepath.Dir(p)
+		if parent == p {
+			return filepath.Join(p, rest)
+		}
+		rest = filepath.Join(filepath.Base(p), rest)
+		p = parent
+	}
 }
 
 // acquire takes both locks and returns the function that releases them.
@@ -203,7 +238,8 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 	}
 	defer release()
 	rec, err := s.readRecord()
-	if err != nil {
+	damaged := fresh && errors.Is(err, errDamagedRecord)
+	if err != nil && !damaged {
 		return nil, err
 	}
 	if rec != nil && !fresh {
@@ -238,6 +274,15 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		return nil, fmt.Errorf("the branch %s has no commits yet; a session starts from a commit", SanitizeLine(startBranch))
 	}
 
+	if damaged {
+		// Nothing in a damaged record is trusted, so nothing it names is
+		// removed: it is set aside for the owner to look at.
+		s.closeWorkspace()
+		if err := os.Rename(filepath.Join(s.dir, sessionFile), filepath.Join(s.dir, sessionFile+".damaged")); err != nil {
+			return nil, fmt.Errorf("cannot set the damaged session.json aside: %v", pathErrCause(err))
+		}
+		s.notify("The session record was damaged; it was kept as session.json.damaged and a new session was started. An earlier workspace may remain under repochat's state directory.")
+	}
 	if rec != nil { // fresh: the old session's branch stays, its workspace goes
 		s.closeWorkspace()
 		s.removeWorkspace(ctx, rec.Workspace)
@@ -612,19 +657,22 @@ func (s *Sessions) readRecord() (*sessionRecord, error) {
 	if errors.Is(err, os.ErrNotExist) {
 		return nil, nil
 	}
+	if errors.Is(err, syscall.ELOOP) {
+		return nil, errDamagedRecord
+	}
 	if err != nil {
 		return nil, fmt.Errorf("cannot read session.json: %v", pathErrCause(err))
 	}
 	defer f.Close()
 	if fi, err := f.Stat(); err != nil || !fi.Mode().IsRegular() {
-		return nil, errors.New("session.json is not a regular file")
+		return nil, errDamagedRecord
 	}
 	data, err := io.ReadAll(io.LimitReader(f, 64<<10))
 	if err != nil {
 		return nil, err
 	}
 	var rec sessionRecord
-	damaged := errors.New("session.json is damaged; start a new session with --new-session")
+	damaged := errDamagedRecord
 	if err := json.Unmarshal(data, &rec); err != nil {
 		return nil, damaged
 	}

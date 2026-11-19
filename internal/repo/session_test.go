@@ -533,6 +533,90 @@ func TestNoRepositoryHookRunsOnStart(t *testing.T) {
 	if got := mustRead(t, filepath.Join(info.Workspace, "a.txt")); got != "a\n" {
 		t.Errorf("a.txt = %q", got)
 	}
+
+	// Resuming a dirtied workspace restores it (status, read-tree, clean)
+	// with the same programs configured: still none of them runs.
+	s.Close()
+	write(t, info.Workspace, "a.txt", "dirty\n")
+	write(t, info.Workspace, "stray.txt", "stray\n")
+	f.notes = nil
+	s2 := f.sessions(t, Options{})
+	if _, err := s2.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	if len(f.notes) == 0 {
+		t.Error("the dirty workspace was not restored")
+	}
+	if exists(marker) {
+		t.Fatal("a repository-configured program ran while the workspace was restored")
+	}
+	if got := mustRead(t, filepath.Join(info.Workspace, "a.txt")); got != "a\n" {
+		t.Errorf("a.txt after restore = %q", got)
+	}
+}
+
+func TestDamagedRecordIsSetAsideOnlyByAFreshStart(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, old := f.start(t, Options{})
+	// A damaged record whose fields point at things outside the state
+	// directory: none of them may be acted on.
+	victim := t.TempDir()
+	write(t, victim, "precious.txt", "keep\n")
+	record := filepath.Join(f.state, f.owner.ID, "session.json")
+	for _, garbage := range []string{
+		"{not json",
+		`{"id":"zz","branch":"main","workspace":"` + victim + `","base":"x","anchor_key":"x"}`,
+	} {
+		if err := os.WriteFile(record, []byte(garbage), 0o600); err != nil {
+			t.Fatal(err)
+		}
+		if _, err := s.Start(bg, false); err == nil || !strings.Contains(err.Error(), "--new-session") {
+			t.Errorf("Start(false) on a damaged record: %v", err)
+		}
+		if _, err := s.Serve(bg); err == nil || !strings.Contains(err.Error(), "--new-session") {
+			t.Errorf("Serve on a damaged record: %v", err)
+		}
+		info, err := s.Start(bg, true)
+		if err != nil {
+			t.Fatalf("Start(true) on a damaged record: %v", err)
+		}
+		if info.ID == old.ID {
+			t.Error("the fresh start resumed")
+		}
+		if got, err := os.ReadFile(record + ".damaged"); err != nil || string(got) != garbage {
+			t.Errorf("the damaged record was not set aside: %q, %v", got, err)
+		}
+		if got := mustRead(t, filepath.Join(victim, "precious.txt")); got != "keep\n" {
+			t.Errorf("a file named by the damaged record changed: %q", got)
+		}
+		if !strings.Contains(branches(t, f.dir), "refs/heads/main") {
+			t.Error("the owner's branch is gone")
+		}
+		ws, err := s.Serve(bg)
+		if err != nil || ws.Root != info.Workspace {
+			t.Errorf("Serve after the fresh start = %v, %v", ws, err)
+		}
+		old = info
+	}
+}
+
+func TestStateDirMustBeOutsideTheCheckout(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	for _, state := range []string{filepath.Join(f.dir, "state"), f.dir} {
+		if s, err := NewSessions(f.owner, SessionOptions{StateDir: state}); err == nil {
+			s.Close()
+			t.Errorf("a state directory inside the checkout (%s) was accepted", state)
+		}
+	}
+	// Reached through a symbolic link, too.
+	link := filepath.Join(t.TempDir(), "link")
+	if err := os.Symlink(f.dir, link); err != nil {
+		t.Fatal(err)
+	}
+	if s, err := NewSessions(f.owner, SessionOptions{StateDir: filepath.Join(link, "state")}); err == nil {
+		s.Close()
+		t.Error("a state directory inside the checkout through a link was accepted")
+	}
 }
 
 func TestOwnersIgnoreFileMustBeARegularFile(t *testing.T) {
