@@ -496,6 +496,98 @@ func onDisk(root, p string) bool {
 	return !(err != nil && (errors.Is(err, os.ErrNotExist) || errors.Is(err, syscall.ENOTDIR)))
 }
 
+// checkInTheWay refuses a merge from tip to land that adds a file where the
+// owner's checkout already holds something git does not track at tip, or
+// where a directory the new file needs is anything but a directory there.
+// git's fast-forward refuses an untracked file in its way, but replaces an
+// ignored one, or an ignored file or link where it needs a directory,
+// without asking; to the owner that is uncommitted work all the same. A
+// tracked file the merge itself removes is git's to check.
+func (s *Sessions) checkInTheWay(ctx context.Context, rec *sessionRecord, tip, land string) error {
+	diff, err := s.reader().treeDiff(ctx, tip, land)
+	if err != nil {
+		return err
+	}
+	removed := map[string]bool{}
+	for _, d := range diff {
+		if d.newMode == "000000" {
+			removed[d.path] = true
+		}
+	}
+	seen := map[string]bool{}
+	var blocked []string
+	for _, d := range diff {
+		if d.oldMode != "000000" || d.newMode == "000000" {
+			continue
+		}
+		for _, q := range append(dirsOf(d.path), d.path) {
+			if removed[q] {
+				break
+			}
+			fi, err := os.Lstat(filepath.Join(s.owner.Root, filepath.FromSlash(q)))
+			if errors.Is(err, os.ErrNotExist) {
+				break
+			}
+			if err == nil && q != d.path && fi.IsDir() {
+				continue
+			}
+			// A directory of tip's files that the merge replaces with a file
+			// holds nothing else of the owner's: git removes those files.
+			if err == nil && q == d.path && fi.IsDir() && s.onlyRemoved(q, removed) {
+				break
+			}
+			if !seen[q] {
+				seen[q] = true
+				blocked = append(blocked, q)
+			}
+			break
+		}
+	}
+	if len(blocked) == 0 {
+		return nil
+	}
+	sort.Strings(blocked)
+	pol, err := s.policy(ctx, rec)
+	if err != nil {
+		return err
+	}
+	_ = pol.Prime(ctx, blocked) // a failure withholds every name below
+	var shown []string
+	hidden := 0
+	for _, p := range blocked {
+		if pol.Check(p) != "" {
+			hidden++
+		} else {
+			shown = append(shown, p)
+		}
+	}
+	return finishRefused("the checkout already holds something where the merge would write a new file: %s. It is not tracked by %s (an untracked or ignored file, a link, or a directory), and git would replace an ignored one without asking. The owner can move it aside and finish again, or merge by hand: git merge --ff-only %s",
+		listPaths(shown, hidden), rec.StartBranch, rec.Branch)
+}
+
+// onlyRemoved reports whether every entry under the owner's directory rel,
+// other than directories, is a file of tip that the merge removes. Anything
+// else, or a walk that fails, is the owner's.
+func (s *Sessions) onlyRemoved(rel string, removed map[string]bool) bool {
+	root := filepath.Join(s.owner.Root, filepath.FromSlash(rel))
+	err := filepath.WalkDir(root, func(p string, e os.DirEntry, err error) error {
+		if err != nil {
+			return err
+		}
+		if e.IsDir() {
+			return nil
+		}
+		r, err := filepath.Rel(s.owner.Root, p)
+		if err != nil || !removed[filepath.ToSlash(r)] {
+			return errInTheWay
+		}
+		return nil
+	})
+	return err == nil
+}
+
+var errInTheWay = errors.New("something of the owner's is in the way")
+
 // finishRefused is the error of a Finish that changed nothing.
 func finishRefused(format string, a ...any) error {
 	return fmt.Errorf("finish refused: "+format+" (nothing was changed)", a...)
@@ -508,7 +600,8 @@ func finishRefused(format string, a ...any) error {
 // nothing, when the session has nothing to merge, when the owner's checkout
 // is not on the start branch, when the owner's configuration asks for
 // signed commits, when the start branch has commits the session lacks, and
-// when git would have to overwrite uncommitted changes in the checkout.
+// when git would have to overwrite uncommitted changes in the checkout,
+// ignored files included.
 func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Finished, error) {
 	release, err := s.acquire()
 	if err != nil {
@@ -583,6 +676,10 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	if err != nil {
 		return nil, err
 	}
+	// 5. Nothing of the owner's where the merge adds a file.
+	if err := s.checkInTheWay(ctx, rec, tip, head); err != nil {
+		return nil, err
+	}
 
 	// From here on the call's cancellation no longer applies: a merge into
 	// the owner's checkout cut off halfway would leave it neither merged nor
@@ -611,6 +708,9 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		return nil, err
 	} else if !ok {
 		return nil, finishRefused("the commit to land does not descend from %s", rec.StartBranch)
+	}
+	if err := s.checkInTheWay(wctx, rec, tip, land); err != nil {
+		return nil, err
 	}
 	if ownerIndexLocked(owner) {
 		return nil, finishRefused("another git command is running in the repository's checkout (its git index is locked by %s); retry once it has finished, or, if no git command is running, the owner can remove that file", SanitizeLine(ownerIndexLock(owner)))

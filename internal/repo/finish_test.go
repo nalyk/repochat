@@ -281,6 +281,61 @@ func TestFinishRefusesToOverwriteUncommittedChanges(t *testing.T) {
 	c.refuseFinish(t, false, "n.txt", "a.txt", "n.txt")
 }
 
+// git's fast-forward replaces an ignored file in its way without asking, and
+// an ignored file is the owner's own uncommitted work as much as any other.
+func TestFinishRefusesToOverwriteIgnoredFiles(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", ".gitignore": "build/\ncache\nlinked\n"}, nil)
+	c.apply(t, "new", Change{Op: "create", Path: "build/out.txt", Text: "session"})
+	write(t, c.f.dir, "build/out.txt", "owner's ignored\n")
+	c.refuseFinish(t, false, "build/out.txt", "build/out.txt")
+	c.refuseFinish(t, true, "build/out.txt", "build/out.txt")
+
+	// An ignored file where the merge needs a directory.
+	os.RemoveAll(filepath.Join(c.f.dir, "build"))
+	c.apply(t, "deeper", Change{Op: "create", Path: "cache/data.txt", Text: "session"})
+	write(t, c.f.dir, "cache", "owner's ignored file\n")
+	c.refuseFinish(t, false, "cache", "cache")
+
+	// An ignored symbolic link where the merge needs a directory.
+	os.Remove(filepath.Join(c.f.dir, "cache"))
+	c.apply(t, "through", Change{Op: "create", Path: "linked/x.txt", Text: "session"})
+	elsewhere := t.TempDir()
+	if err := os.Symlink(elsewhere, filepath.Join(c.f.dir, "linked")); err != nil {
+		t.Fatal(err)
+	}
+	c.refuseFinish(t, false, "linked", "linked/x.txt")
+	if entries, _ := os.ReadDir(elsewhere); len(entries) != 0 {
+		t.Errorf("a refused Finish wrote through the owner's link: %v", entries)
+	}
+
+	// Ignored files beside the merged ones are left alone.
+	os.Remove(filepath.Join(c.f.dir, "linked"))
+	write(t, c.f.dir, "build/other.txt", "owner's ignored, beside\n")
+	if _, err := c.s.Finish(bg, false, ""); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if mustRead(t, filepath.Join(c.f.dir, "build/other.txt")) != "owner's ignored, beside\n" || mustRead(t, filepath.Join(c.f.dir, "build/out.txt")) != "session\n" {
+		t.Error("the merge did not land beside the owner's ignored file")
+	}
+}
+
+// A file may take the place of a directory of tracked files, but not of one
+// that also holds an ignored file of the owner's.
+func TestFinishReplacesADirectoryOnlyWhenNothingElseIsInIt(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"d/y": "y\n", ".gitignore": "*.log\n"}, nil)
+	c.apply(t, "no directory", Change{Op: "remove", Path: "d/y", FileTag: c.tag(t, "d/y")})
+	c.apply(t, "a file", Change{Op: "create", Path: "d", Text: "file"})
+	write(t, c.f.dir, "d/keep.log", "owner's ignored\n")
+	c.refuseFinish(t, false, "d", "d/keep.log", "d/y")
+	os.Remove(filepath.Join(c.f.dir, "d/keep.log"))
+	if _, err := c.s.Finish(bg, false, ""); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+	if mustRead(t, filepath.Join(c.f.dir, "d")) != "file\n" {
+		t.Error("d did not become a file")
+	}
+}
+
 func TestFinishKeepsUnrelatedUncommittedChanges(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
 	c.replaceLine(t, "a.txt", 1, "A")
