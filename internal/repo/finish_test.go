@@ -1486,3 +1486,82 @@ func TestSessionBranchBeingRebasedElsewhereIsKept(t *testing.T) {
 		t.Error("the branch being rebased was deleted")
 	}
 }
+
+// F3 / C1 / C7a: git reads branch.<name>.mergeOptions as more command-line
+// options of the merge, and with them the fast-forward stops being one: it
+// stashes and leaves conflict markers, stages without moving the branch, or
+// makes a merge commit and runs the signing program. Finish refuses while the
+// option is set, and changes nothing.
+func TestFinishRefusesWhenMergeOptionsAreSet(t *testing.T) {
+	for _, opts := range []string{"--autostash", "--squash", "-s ours --gpg-sign"} {
+		t.Run(opts, func(t *testing.T) {
+			c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+			c.replaceLine(t, "a.txt", 1, "A")
+			marker := filepath.Join(t.TempDir(), "signing-ran")
+			prog := filepath.Join(t.TempDir(), "sign-probe")
+			if err := os.WriteFile(prog, []byte("#!/bin/sh\n: > "+marker+"\nexit 1\n"), 0o755); err != nil {
+				t.Fatal(err)
+			}
+			gitCmd(t, c.f.dir, "config", "commit.gpgsign", "false")
+			gitCmd(t, c.f.dir, "config", "merge.verifySignatures", "false")
+			gitCmd(t, c.f.dir, "config", "gpg.program", prog)
+			gitCmd(t, c.f.dir, "config", "branch.main.mergeOptions", opts)
+			// The owner's own uncommitted edit of a file the session changed.
+			if opts == "--autostash" {
+				write(t, c.f.dir, "a.txt", "owner's edit\n")
+			}
+			refs := func() string {
+				return gitCmd(t, c.f.dir, "for-each-ref") + "\nstash: " + gitCmd(t, c.f.dir, "stash", "list")
+			}
+			before := refs()
+			c.refuseFinish(t, false, "mergeOptions", "a.txt", "b.txt")
+			c.refuseFinish(t, true, "git merge --ff-only "+c.branch(t), "a.txt", "b.txt")
+			if after := refs(); after != before {
+				t.Errorf("refs or stashes changed:\n%s\nwas:\n%s", after, before)
+			}
+			if exists(marker) {
+				t.Error("the configured signing program ran")
+			}
+			for _, f := range []string{"MERGE_HEAD", "SQUASH_MSG", "MERGE_MSG", "AUTO_MERGE"} {
+				if exists(filepath.Join(c.f.dir, ".git", f)) {
+					t.Errorf("%s was left in the owner's git directory", f)
+				}
+			}
+		})
+	}
+
+	// Another branch's options, or none, are no obstacle.
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	gitCmd(t, c.f.dir, "config", "branch.other.mergeOptions", "--squash")
+	if _, err := c.s.Finish(bg, false, ""); err != nil {
+		t.Fatalf("Finish with another branch's mergeOptions: %v", err)
+	}
+}
+
+// C7b: an ignored file of the owner's that appears where the merge adds a
+// file after the last check is not replaced: git itself refuses.
+func TestFinishDoesNotReplaceAnIgnoredFileThatAppearsLate(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", ".gitignore": "new.txt\nbuild/\n"}, nil)
+	c.apply(t, "new", Change{Op: "create", Path: "new.txt", Text: "session"}, Change{Op: "create", Path: "build/out.txt", Text: "session"})
+	c.s.beforeOwnerMerge = func() {
+		write(t, c.f.dir, "new.txt", "owner's ignored, late\n")
+		write(t, c.f.dir, "build/out.txt", "owner's ignored, late\n")
+	}
+	c.refuseFinish(t, false, "nothing was changed", "a.txt")
+	for _, p := range []string{"new.txt", "build/out.txt"} {
+		if got := mustRead(t, filepath.Join(c.f.dir, p)); got != "owner's ignored, late\n" {
+			t.Errorf("the owner's ignored %s was replaced: %q", p, got)
+		}
+	}
+	if exists(filepath.Join(c.f.dir, ".git", "index.lock")) {
+		t.Error("an index lock was left")
+	}
+	// Once the files are out of the way the same session lands.
+	c.s.beforeOwnerMerge = nil
+	os.Remove(filepath.Join(c.f.dir, "new.txt"))
+	os.RemoveAll(filepath.Join(c.f.dir, "build"))
+	if _, err := c.s.Finish(bg, false, ""); err != nil {
+		t.Fatalf("Finish: %v", err)
+	}
+}

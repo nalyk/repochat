@@ -599,9 +599,9 @@ func finishRefused(format string, a ...any) error {
 // workspace, the session branch and the record. It refuses, changing
 // nothing, when the session has nothing to merge, when the owner's checkout
 // is not on the start branch, when the owner's configuration asks for
-// signed commits, when the start branch has commits the session lacks, and
-// when git would have to overwrite uncommitted changes in the checkout,
-// ignored files included.
+// signed commits or sets branch.<start branch>.mergeOptions, when the start
+// branch has commits the session lacks, and when git would have to overwrite
+// uncommitted changes in the checkout, ignored files included.
 func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Finished, error) {
 	release, err := s.acquire()
 	if err != nil {
@@ -661,6 +661,13 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 			return nil, finishRefused("%s in the repository's git configuration cannot be read as true or false. %s", c.key, byHand)
 		}
 	}
+	// git reads branch.<name>.mergeOptions as more options of every merge
+	// into that branch, after its command line's: a strategy, --squash,
+	// --autostash, --gpg-sign. With any of them the merge below is no longer
+	// the fast-forward that lands or changes nothing.
+	if err := s.checkMergeOptions(ctx, rec, byHand); err != nil {
+		return nil, err
+	}
 	// 4. The session contains the start branch.
 	tip, err := s.ownerTip(ctx, rec)
 	if err != nil {
@@ -712,6 +719,9 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	if err := s.checkInTheWay(wctx, rec, tip, land); err != nil {
 		return nil, err
 	}
+	if err := s.checkMergeOptions(wctx, rec, byHand); err != nil {
+		return nil, err
+	}
 	if ownerIndexLocked(owner) {
 		return nil, finishRefused("another git command is running in the repository's checkout (its git index is locked by %s); retry once it has finished, or, if no git command is running, the owner can remove that file", SanitizeLine(ownerIndexLock(owner)))
 	}
@@ -724,8 +734,10 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		s.beforeOwnerMerge()
 	}
 	mctx := context.WithValue(wctx, gitTimeoutKey{}, ownerMergeTimeout)
-	out, _, code, err := owner.gitRaw(mctx, 1<<20, "-c", "merge.autoStash=false",
-		"merge", "--ff-only", "--no-stat", "--no-verify-signatures", land)
+	// --no-overwrite-ignore: an ignored file that appears in the merge's way
+	// after checkInTheWay makes git refuse instead of replacing it.
+	out, _, code, err := owner.gitRaw(mctx, 1<<20, "-c", "merge.autoStash=false", "-c", "commit.gpgsign=false",
+		"merge", "--ff-only", "--no-stat", "--no-verify-signatures", "--no-gpg-sign", "--no-overwrite-ignore", land)
 	var notes []string
 	if err != nil || code != 0 {
 		if err != nil && s.owner.Logf != nil {
@@ -791,6 +803,23 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		fin.Notes = append(fin.Notes, "The session record could not be deleted; the next call reports the session as broken, and --new-session starts another.")
 	}
 	return fin, nil
+}
+
+// checkMergeOptions refuses a Finish while branch.<start branch>.mergeOptions
+// is set, with any value, in the owner's effective configuration, or while
+// that cannot be read.
+func (s *Sessions) checkMergeOptions(ctx context.Context, rec *sessionRecord, byHand string) error {
+	key := "branch." + rec.StartBranch + ".mergeOptions"
+	out, _, code, err := s.owner.gitRaw(ctx, 64<<10, "config", "-z", "--get-all", key)
+	switch {
+	case err != nil:
+		return err
+	case code == 1 && len(out) == 0:
+		return nil
+	case code == 0:
+		return finishRefused("the repository's git configuration sets %s, options git adds to every merge into %s (they can make the merge something other than a fast-forward, stash or stage changes, or run a signing program), and repochat merges only as a plain fast-forward. %s, or remove the setting and finish again", key, rec.StartBranch, byHand)
+	}
+	return finishRefused("whether the repository's git configuration sets %s could not be read. %s", key, byHand)
 }
 
 // ownerMergeTimeout bounds the one git command that writes the owner's
