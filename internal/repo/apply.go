@@ -10,7 +10,6 @@ import (
 	"path/filepath"
 	"slices"
 	"sort"
-	"strconv"
 	"strings"
 	"syscall"
 	"time"
@@ -485,10 +484,18 @@ func (r *Repo) commitPaths(ctx context.Context, cfg []string, msg []byte, files 
 	}
 
 	// Whatever the index holds besides the touched paths goes into the
-	// commit: it must be exactly old's tree.
+	// commit: it must be exactly old's tree. An index git cannot even write
+	// a tree from (unmerged entries, an entry whose object is missing) is
+	// out of step as well, and is restored from the branch the same way.
 	base, err := treeOf(ictx)
 	if err != nil {
-		return "", err
+		if ctx.Err() != nil {
+			return "", err
+		}
+		if r.Logf != nil {
+			r.Logf("apply: the session workspace's index holds no writable tree: %v", err)
+		}
+		return "", errIndexOutOfStep
 	}
 	if want, code, err := r.gitText(ctx, "rev-parse", "--verify", "-q", old+"^{tree}"); err != nil || code != 0 || want != base {
 		if err != nil {
@@ -629,28 +636,8 @@ func lockIndex(index string) (string, error) {
 
 // commitTime reads the committer time of a commit.
 func (r *Repo) commitTime(ctx context.Context, id string) (time.Time, error) {
-	out, err := r.git(ctx, 64<<10, "cat-file", "commit", id)
-	if err != nil {
-		return time.Time{}, err
-	}
-	for _, l := range strings.Split(string(out), "\n") {
-		if l == "" {
-			break // end of the header
-		}
-		if !strings.HasPrefix(l, "committer ") {
-			continue
-		}
-		f := strings.Fields(l)
-		if len(f) < 3 {
-			break
-		}
-		sec, err := strconv.ParseInt(f[len(f)-2], 10, 64)
-		if err != nil {
-			break
-		}
-		return time.Unix(sec, 0).UTC(), nil
-	}
-	return time.Time{}, errors.New("the commit has no committer time")
+	t, _, err := r.commitInfo(ctx, id)
+	return t, err
 }
 
 // identity returns the git options that make the owner's identity, as git
