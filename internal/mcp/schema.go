@@ -6,6 +6,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"unicode/utf8"
 )
 
 // Kind is the JSON type of a tool parameter.
@@ -50,6 +51,9 @@ func (s Schema) JSON() map[string]any {
 			}
 			if p.MaxLen > 0 {
 				prop["maxLength"] = p.MaxLen
+			}
+			if p.Required {
+				prop["minLength"] = 1
 			}
 		case Integer:
 			prop["type"] = "integer"
@@ -167,7 +171,9 @@ func (s Schema) Validate(raw map[string]any) (Args, error) {
 			if err := checkString(p, str); err != nil {
 				return nil, err
 			}
-			if p.Required && strings.TrimSpace(str) == "" {
+			// Only the empty string is refused, as advertised (minLength 1):
+			// whitespace is a value, and a search for a tab is a search.
+			if p.Required && str == "" {
 				return nil, fmt.Errorf("argument %q must not be empty", p.Name)
 			}
 			out[p.Name] = str
@@ -232,8 +238,12 @@ func (s Schema) Validate(raw map[string]any) (Args, error) {
 }
 
 func checkString(p Param, s string) error {
+	// maxLength counts characters (code points), as JSON Schema defines it;
+	// counting bytes would refuse non-ASCII text the schema allows.
 	if p.MaxLen > 0 && len(s) > p.MaxLen {
-		return fmt.Errorf("argument %q is too long (%d bytes, max %d)", p.Name, len(s), p.MaxLen)
+		if n := utf8.RuneCountInString(s); n > p.MaxLen {
+			return fmt.Errorf("argument %q is too long (%d characters, max %d)", p.Name, n, p.MaxLen)
+		}
 	}
 	if strings.ContainsRune(s, 0) {
 		return fmt.Errorf("argument %q must not contain NUL bytes", p.Name)

@@ -48,6 +48,10 @@ const (
 	maxBatch       = 32 // messages per JSON-RPC batch (revision 2025-03-26 only)
 )
 
+// DefaultCallTimeout is how long one tool call may run when Server.CallTimeout
+// is not set.
+const DefaultCallTimeout = 60 * time.Second
+
 // Result is what a tool hands back to the model.
 type Result struct {
 	Text       string
@@ -180,7 +184,7 @@ func (s *Server) init(w io.Writer) {
 		s.MaxPendingBytes = 16 << 20
 	}
 	if s.CallTimeout <= 0 {
-		s.CallTimeout = 60 * time.Second
+		s.CallTimeout = DefaultCallTimeout
 	}
 	if s.MaxMessageBytes <= 0 {
 		s.MaxMessageBytes = 4 << 20
@@ -408,38 +412,104 @@ func (s *Server) handleBatch(ctx context.Context, raw []byte) {
 			fmt.Sprintf("Invalid Request: a batch may hold at most %d messages", maxBatch), nil))
 		return
 	}
-	// The whole batch is answered with one array, so every call in it keeps
-	// its admission reservation until that array has been queued.
-	var out []*response
+	// Every element is admitted or answered here, in order, on the reader.
+	// The tool calls among them then run in workers like any other call, so
+	// the reader stays free while they do: a cancellation of one of them, a
+	// ping and the end of input are all handled in the meantime. The batch is
+	// answered with one array, in request order, when its last call is done,
+	// and every call keeps its admission reservation until that array has
+	// been queued.
+	type slot struct {
+		resp  *response
+		async func() *response
+	}
+	var slots []slot
 	var releases []func()
 	for _, item := range items {
+		// The lifecycle forbids initialize inside a batch: it would
+		// renegotiate the session half way through one array. It is refused
+		// here, before anything can change state. (A standalone repeated
+		// initialize is still honoured, deliberately: some clients send one
+		// after reconnect logic of their own.)
+		var peek struct {
+			ID     json.RawMessage `json:"id"`
+			Method string          `json:"method"`
+		}
+		if json.Unmarshal(item, &peek) == nil && peek.Method == "initialize" {
+			if kind := classifyID(peek.ID); kind != idAbsent {
+				slots = append(slots, slot{resp: errResp(replyID(peek.ID, kind), codeInvalidRequest, "Invalid Request: initialize must not be part of a batch", nil)})
+			}
+			continue
+		}
 		o := s.process(ctx, item)
 		if o.resp != nil {
-			out = append(out, o.resp)
+			slots = append(slots, slot{resp: o.resp})
 		}
 		if o.async != nil {
-			if r := o.async(); r != nil {
-				out = append(out, r)
-			}
+			slots = append(slots, slot{async: o.async})
 			releases = append(releases, o.release)
 		}
 	}
-	if len(out) > 0 {
-		s.writeValue(out)
+	answer := func(write func(any)) {
+		var out []*response
+		for _, sl := range slots {
+			if sl.resp != nil {
+				out = append(out, sl.resp)
+			}
+		}
+		if len(out) > 0 {
+			write(out)
+		}
 	}
-	for _, release := range releases {
-		release()
+	if len(releases) == 0 {
+		answer(s.writeValue)
+		return
 	}
+	s.wg.Add(1)
+	go func() {
+		defer s.wg.Done()
+		var calls sync.WaitGroup
+		for i := range slots {
+			if slots[i].async == nil {
+				continue
+			}
+			calls.Add(1)
+			go func(sl *slot) {
+				defer calls.Done()
+				sl.resp = sl.async()
+			}(&slots[i])
+		}
+		calls.Wait()
+		answer(s.writeAsync)
+		for _, release := range releases {
+			release()
+		}
+	}()
 }
 
 func (s *Server) process(ctx context.Context, raw []byte) outcome {
-	var req request
-	if err := json.Unmarshal(raw, &req); err != nil {
+	// Member names are taken exactly as JSON-RPC spells them. Decoding into
+	// a struct would also accept "ID" or "Method" (encoding/json matches
+	// field names without regard to case), turning a notification into a
+	// request and the other way round.
+	var members map[string]json.RawMessage
+	if err := json.Unmarshal(raw, &members); err != nil || members == nil {
 		var syn *json.SyntaxError
 		if errors.As(err, &syn) || errors.Is(err, io.ErrUnexpectedEOF) {
 			return outcome{resp: errResp(nullID, codeParse, "Parse error: "+err.Error(), nil)}
 		}
 		return outcome{resp: errResp(nullID, codeInvalidRequest, "Invalid Request: a JSON-RPC object is required", nil)}
+	}
+	req := request{ID: members["id"], Params: members["params"], Result: members["result"], Error: members["error"]}
+	if v, ok := members["jsonrpc"]; ok && json.Unmarshal(v, &req.JSONRPC) != nil {
+		req.JSONRPC = ""
+	}
+	if v, ok := members["method"]; ok && string(bytes.TrimSpace(v)) != "null" {
+		var method string
+		if json.Unmarshal(v, &method) != nil {
+			return outcome{resp: errResp(replyID(req.ID, classifyID(req.ID)), codeInvalidRequest, "Invalid Request: method must be a string", nil)}
+		}
+		req.Method = &method
 	}
 	idKind := classifyID(req.ID)
 	if req.Method == nil {
