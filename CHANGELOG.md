@@ -2,6 +2,20 @@
 
 Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
 
+## Nelansat: modul de scriere (experimental)
+
+Inversează, la cererea proprietarului, regula „doar citire pentru totdeauna” din designul 1.0, pentru un mod pornit explicit. Fără `--write` totul rămâne ca în 1.0.0: aceleași 13 instrumente, cu aceleași texte. Nefolosit încă dintr-o sesiune reală ChatGPT. Designul: [`docs/superpowers/specs/2026-11-19-write-mode-edits-design.md`](docs/superpowers/specs/2026-11-19-write-mode-edits-design.md).
+
+- `repochat --write` (și `repochat mcp --write`): ChatGPT poate modifica fișiere într-o sesiune, adică un `git worktree` pe o ramură `repochat/<dată>-<id>`, sub directorul de stare al repochat, niciodată în checkout-ul proprietarului. `--new-session` pornește o sesiune nouă, `--confirm-merge` lasă merge-ul în seama terminalului.
+- Nouă instrumente noi: `start_session`, `session_status`, `propose_changes`, `apply_changes`, `list_checkpoints`, `undo_to_checkpoint`, `update_session`, `finish_session`, `abandon_session`. Cele de citire servesc spațiul de lucru al sesiunii cât timp e deschisă.
+- Liniile citite într-o sesiune poartă ancore (`12:abc|`, un hash cu cheie al liniei așa cum o vede modelul, după mascare); o modificare pe o ancoră depășită este refuzată și primește liniile actuale.
+- Un set de modificări se aplică complet sau deloc și devine un checkpoint (un commit făcut cu comenzi git de nivel jos, fără hookuri și fără semnare); `undo_to_checkpoint` nu șterge nimic din istoric și nu trece înapoi peste o actualizare din ramura proprietarului.
+- Refuzate: căile protejate (`.git`, definițiile de CI, directoarele de hookuri, `.gitmodules`, `.gitattributes`, `.repochatignore`), fișierele reținute (inclusiv după un `.repochatignore` necomis), symlink-urile și submodulele pe drum, fișierele cu atribut `filter`, liniile cu valori mascate, Go sau JSON invalid, marcajele de conflict.
+- Fișierele reținute nu sunt scrise deloc în spațiul de lucru (sparse checkout), iar absența lor e verificată pe disc după fiecare sincronizare.
+- `finish_session` face fast-forward sau un commit comprimat și refuză, fără să schimbe ceva, pe altă ramură, după ce ramura proprietarului s-a mișcat, la commituri semnate cerute și când ar suprascrie modificări necomise. Listează fișierele schimbate care rulează mai târziu pe calculatorul proprietarului; dacă git eșuează la mijlocul merge-ului, tipărește comenzile de revenire.
+- `repochat session` (cu `finish` și `abandon`) arată și închide sesiunea din terminal, fără să-i atingă fișierele.
+- Un test de frontieră trece fiecare instrument de scriere prin căi și valori ostile împotriva unor fișiere-martor (în checkout, în `.git`, în afara repository-ului, în fișierele reținute și protejate) și verifică după fiecare apel că nimic din afara spațiului de lucru nu s-a schimbat. A găsit un defect, reparat cu un test care a picat înainte: `finish_session` lăsa fast-forward-ul lui git să suprascrie un fișier ignorat al proprietarului aflat pe o cale pe care sesiunea o crease; acum refuză.
+
 ## 1.0.0
 
 Rescriere completă a MVP-ului 0.1.0 (păstrat în istoricul git, în primul commit).

@@ -36,3 +36,7 @@ Consensul din runda 3 privește designul. Corectitudinea implementării a fost v
 | `audit/round2-prompt.txt`, `audit/round2-codex.md` | concesii și două contrapropuneri; consens pe toate punctele |
 
 Codex a schimbat patru decizii: repornirea serverului MCP eșuează închis, lista albă de mediu folosește nume explicite, sondarea blocării unui tunel are propria blocare de coordonare, iar garda pentru directorul personal se aplică și comenzii `mcp`. A acceptat, în schimb, păstrarea unui `initialize` repetat în afara unui lot.
+
+## Regula K2, inversată (19 noiembrie 2026)
+
+Regula K2 din [`00-design-brief.md`](00-design-brief.md), „Read-only forever” (niciun instrument care scrie), a fost inversată de proprietar pe 19 noiembrie 2026, pentru un mod de scriere pornit doar explicit, cu `--write`. Fără `--write` regula rămâne în vigoare neschimbată: aceleași 13 instrumente doar-citire. Restul lui K2 rămâne valabil și în modul de scriere: nicio comandă arbitrară, iar modelul nu furnizează niciodată argumente brute pentru git. Designul și ce se schimbă în garanții: [`../superpowers/specs/2026-11-19-write-mode-edits-design.md`](../superpowers/specs/2026-11-19-write-mode-edits-design.md).
