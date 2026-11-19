@@ -731,21 +731,29 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 	}
 	// git refuses a fast-forward when a path it touches has local changes, so
 	// every path that differs between tip and land held exactly tip's content
-	// before the merge: those paths, and only those, are set to one side.
-	// Renames are listed as a deletion and an addition (--no-renames); -r
-	// keeps xargs from running git checkout without paths, which would switch
-	// the checkout to the commit.
-	diff := func(filter string) string {
-		return fmt.Sprintf("git diff -z --no-renames --name-only --diff-filter=%s %s %s", filter, tip, land)
+	// before the merge: those paths, and only those, are put back to tip,
+	// whether git was cut off before or after it wrote the index. The paths
+	// land adds are taken out of the index and off the disk, the others
+	// checked out from tip. Completing is going back and then the merge.
+	// Renames are listed as a deletion and an addition (--no-renames). Each
+	// step runs through sh, which does nothing for an empty list: GNU xargs
+	// runs its command once even without input, and git checkout without
+	// paths would switch the checkout to the commit. Paths are literal, never
+	// patterns.
+	step := func(filter, cmd string) string {
+		return fmt.Sprintf(`git diff -z --no-renames --name-only --diff-filter=%s %s %s | xargs -0 sh -c 'test $# -gt 0 || exit 0; %s -- "$@"' sh`, filter, tip, land, cmd)
 	}
 	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only did not complete. %s is still at %s; the commit being landed is %s. The session, its branch and its workspace are kept. "+
 		"To recover, in the checkout, first, if no git command is running, remove the lock file %s. "+
-		"Then, to complete the merge, run `%s | xargs -0 -r git checkout --no-overlay %s --` and then `git merge --ff-only %s`. "+
-		"Or, to go back to %s, run `%s | xargs -0 -r rm -f --` and then `%s | xargs -0 -r git checkout --no-overlay %s --`. "+
-		"Both touch only the paths the merge changes: git refuses a fast-forward when one of them has uncommitted changes, so before the merge each of them held exactly %s's content, and other uncommitted changes are kept",
+		"Then, to go back to %s, run these three commands in order: `%s`, then `%s`, then `%s`. "+
+		"To complete the merge instead, run the same three and then `git merge --ff-only %s`. "+
+		"They touch only the paths the merge changes: git refuses a fast-forward when one of them has uncommitted changes, so before the merge each of them held exactly %s's content, and other uncommitted changes are kept",
 		rec.StartBranch, tip, land, SanitizeLine(ownerIndexLock(s.owner)),
-		diff("ADMT"), land, land,
-		tip, diff("A"), diff("DMT"), tip, tip)
+		tip,
+		step("A", "git --literal-pathspecs rm -q --cached --ignore-unmatch"),
+		step("A", "rm -f"),
+		step("DMT", "git --literal-pathspecs checkout --no-overlay "+tip),
+		land, tip)
 }
 
 // deleteBranch deletes the session branch, unless a worktree other than the

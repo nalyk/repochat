@@ -748,7 +748,7 @@ func TestFinishSaysWhenTheCheckoutMayBePartlyUpdated(t *testing.T) {
 	if err == nil {
 		t.Fatal("Finish succeeded")
 	}
-	mustContain(t, err.Error(), "partly updated", "index.lock", "git merge --ff-only", "git checkout --no-overlay")
+	mustContain(t, err.Error(), "partly updated", "index.lock", "git merge --ff-only", "checkout --no-overlay")
 	mustNotContain(t, err.Error(), "git reset --merge")
 	mustNotContain(t, err.Error(), "nothing was changed")
 	now := c.info(t)
@@ -896,71 +896,104 @@ func shCmd(t *testing.T, dir, line string) {
 var backticked = regexp.MustCompile("`([^`]+)`")
 
 func TestPartlyUpdatedCheckoutRecoveryCommandsWork(t *testing.T) {
-	for _, way := range []string{"complete", "go back"} {
-		t.Run(way, func(t *testing.T) {
-			c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n", "gone.txt": "g\n", "u.txt": "u\n"}, nil)
-			c.apply(t, "work",
-				Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
-				Change{Op: "replace", Path: "b.txt", From: c.anchor(t, "b.txt", 1), Text: "B"},
-				Change{Op: "create", Path: "new.txt", Text: "new"},
-				Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
-			tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
-			land := c.head(t)
-			write(t, c.f.dir, "u.txt", "owner's edit\n") // unrelated, uncommitted
-			lock := filepath.Join(c.f.dir, ".git", "index.lock")
-			// A merge killed while writing files: some of them written, the
-			// index and the branch at the old tip, git's lock left behind.
-			c.s.beforeOwnerMerge = func() {
-				write(t, c.f.dir, ".git/index.lock", "")
-				write(t, c.f.dir, "a.txt", "A\n")
-				write(t, c.f.dir, "new.txt", "new\n")
-				os.Remove(filepath.Join(c.f.dir, "gone.txt"))
-			}
-			_, err := c.s.Finish(bg, false, "")
-			if err == nil {
-				t.Fatal("Finish succeeded")
-			}
-			msg := err.Error()
-			mustContain(t, msg, "partly updated", tip, land, lock)
-			cmds := backticked.FindAllStringSubmatch(msg, -1)
-			if len(cmds) != 4 {
-				t.Fatalf("want two commands to complete and two to go back, got %d in:\n%s", len(cmds), msg)
-			}
-			os.Remove(lock) // "if no git command is running, remove the lock"
-			run := cmds[:2]
-			if way == "go back" {
-				run = cmds[2:]
-			}
-			for _, m := range run {
-				shCmd(t, c.f.dir, m[1])
-			}
-			if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "M u.txt" {
-				t.Errorf("status after %s:\n%s", way, got)
-			}
-			if mustRead(t, filepath.Join(c.f.dir, "u.txt")) != "owner's edit\n" {
-				t.Error("the owner's unrelated edit was lost")
-			}
-			if way == "complete" {
-				if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != land {
-					t.Errorf("main at %s, want %s", got, land)
+	type state struct {
+		name     string
+		addsOnly bool
+		// leave builds what a cut-off merge left in the owner's checkout.
+		leave func(t *testing.T, dir, tip, land string)
+	}
+	states := []state{
+		{"index at tip", false, func(t *testing.T, dir, tip, land string) {
+			write(t, dir, "a.txt", "A\n")
+			write(t, dir, "new.txt", "new\n")
+			os.Remove(filepath.Join(dir, "gone.txt"))
+		}},
+		{"index at land", false, func(t *testing.T, dir, tip, land string) {
+			gitCmd(t, dir, "read-tree", "-m", "-u", tip, land)
+		}},
+		{"only additions", true, func(t *testing.T, dir, tip, land string) {
+			write(t, dir, "-new.txt", "n\n")
+		}},
+	}
+	for _, st := range states {
+		for _, way := range []string{"go back", "complete"} {
+			t.Run(st.name+", "+way, func(t *testing.T) {
+				c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n", "u.txt": "u\n"}, nil)
+				want := map[string]string{"a.txt": "a\n", "-dash.txt": "d\n", "gone.txt": "g\n"}
+				var added []string
+				if st.addsOnly {
+					c.apply(t, "adds", Change{Op: "create", Path: "-new.txt", Text: "n"}, Change{Op: "create", Path: "with space.txt", Text: "s"})
+					added = []string{"-new.txt", "with space.txt"}
+				} else {
+					c.apply(t, "work",
+						Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+						Change{Op: "replace", Path: "-dash.txt", From: c.anchor(t, "-dash.txt", 1), Text: "D"},
+						Change{Op: "create", Path: "new.txt", Text: "new"},
+						Change{Op: "create", Path: "with space.txt", Text: "s"},
+						Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
+					added = []string{"new.txt", "with space.txt"}
 				}
-				return
-			}
-			if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != tip {
-				t.Errorf("main at %s, want %s", got, tip)
-			}
-			if gitCmd(t, c.f.dir, "symbolic-ref", "HEAD") != "refs/heads/main" {
-				t.Error("HEAD left main")
-			}
-			for p, want := range map[string]string{"a.txt": "a\n", "b.txt": "b\n", "gone.txt": "g\n"} {
-				if got := mustRead(t, filepath.Join(c.f.dir, p)); got != want {
-					t.Errorf("%s = %q, want %q", p, got, want)
+				tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+				land := c.head(t)
+				write(t, c.f.dir, "u.txt", "owner's edit\n") // unrelated, uncommitted
+				lock := filepath.Join(c.f.dir, ".git", "index.lock")
+				c.s.beforeOwnerMerge = func() {
+					st.leave(t, c.f.dir, tip, land)
+					write(t, c.f.dir, ".git/index.lock", "") // the merge fails on it
 				}
-			}
-			if exists(filepath.Join(c.f.dir, "new.txt")) {
-				t.Error("new.txt is still there")
-			}
-		})
+				_, err := c.s.Finish(bg, false, "")
+				if err == nil {
+					t.Fatal("Finish succeeded")
+				}
+				msg := err.Error()
+				mustContain(t, msg, "partly updated", tip, land, lock)
+				cmds := backticked.FindAllStringSubmatch(msg, -1)
+				if len(cmds) != 4 {
+					t.Fatalf("want three commands to go back and one more to complete, got %d in:\n%s", len(cmds), msg)
+				}
+				os.Remove(lock) // "if no git command is running, remove the lock"
+				run := cmds[:3]
+				if way == "complete" {
+					run = cmds
+				}
+				for _, m := range run {
+					shCmd(t, c.f.dir, m[1])
+				}
+
+				if got := gitCmd(t, c.f.dir, "symbolic-ref", "HEAD"); got != "refs/heads/main" {
+					t.Fatalf("HEAD is %s", got)
+				}
+				if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "M u.txt" {
+					t.Errorf("status after %s:\n%s", way, got)
+				}
+				if got := gitCmd(t, c.f.dir, "diff", "--cached", "--name-only"); got != "" {
+					t.Errorf("staged after %s:\n%s", way, got)
+				}
+				if mustRead(t, filepath.Join(c.f.dir, "u.txt")) != "owner's edit\n" {
+					t.Error("the owner's unrelated edit was lost")
+				}
+				main := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main")
+				if way == "complete" {
+					if main != land {
+						t.Errorf("main at %s, want %s", main, land)
+					}
+					return
+				}
+				if main != tip {
+					t.Errorf("main at %s, want %s", main, tip)
+				}
+				for p, w := range want {
+					if got := mustRead(t, filepath.Join(c.f.dir, p)); got != w {
+						t.Errorf("%s = %q, want %q", p, got, w)
+					}
+				}
+				for _, p := range added {
+					if exists(filepath.Join(c.f.dir, p)) {
+						t.Errorf("%s is still there", p)
+					}
+				}
+			})
+		}
 	}
 }
 
