@@ -526,54 +526,12 @@ func (s *Sessions) sync(ctx context.Context) error {
 	if err := ws.refreshFilterArgs(ctx); err != nil {
 		return err
 	}
-	tree, err := ws.git(ctx, 256<<20, "ls-tree", "-r", "-z", "--full-tree", "HEAD")
-	if err != nil {
-		return fmt.Errorf("cannot list the session's files: %w", err)
-	}
-	var paths []string
-	ignoreText := ""
-	for _, rec := range bytes.Split(tree, []byte{0}) {
-		if len(rec) == 0 {
-			continue
-		}
-		meta, path, ok := strings.Cut(string(rec), "\t")
-		f := strings.Fields(meta)
-		if !ok || len(f) != 3 || path == "" {
-			return errors.New("unexpected output from git ls-tree; refusing to continue")
-		}
-		if len(paths) >= maxFilesetEntries {
-			return fmt.Errorf("the repository has more than %d files; repochat refuses to build a partial workspace", maxFilesetEntries)
-		}
-		paths = append(paths, path)
-		if path == ignoreFileName {
-			if ignoreText, err = ws.ignoreBlob(ctx, f[0], f[2]); err != nil {
-				return err
-			}
-		}
-	}
-	pol, err := ws.newPolicy(ignoreText)
+	withheld, err := ws.withheldAt(ctx, "HEAD")
 	if err != nil {
 		return err
 	}
-	if err := pol.Prime(ctx, paths); err != nil {
-		return fmt.Errorf(".repochatignore could not be evaluated (%v); refusing to build the workspace without the policy it defines", err)
-	}
-	var withheld []string
-	var sparse strings.Builder
-	sparse.WriteString("/*\n")
-	for _, p := range paths {
-		if pol.Check(p) == "" {
-			continue
-		}
-		esc, err := sparseEscape(p)
-		if err != nil {
-			return err
-		}
-		withheld = append(withheld, p)
-		sparse.WriteString("!/" + esc + "\n")
-	}
-	if err := writeFileAtomic(filepath.Join(ws.GitDir, "info"), "sparse-checkout", []byte(sparse.String())); err != nil {
-		return fmt.Errorf("cannot write the workspace's sparse-checkout file: %w", err)
+	if err := ws.writeSparse(withheld); err != nil {
+		return err
 	}
 	if _, err := ws.git(ctx, 1<<20, "read-tree", "-mu", "HEAD"); err != nil {
 		return err
@@ -599,6 +557,70 @@ func (s *Sessions) sync(ctx context.Context) error {
 	return nil
 }
 
+// withheldAt lists the tracked files of rev that the exposure policy
+// withholds, the policy being the one of this run around rev's own
+// .repochatignore.
+func (ws *Repo) withheldAt(ctx context.Context, rev string) ([]string, error) {
+	tree, err := ws.git(ctx, 256<<20, "ls-tree", "-r", "-z", "--full-tree", rev)
+	if err != nil {
+		return nil, fmt.Errorf("cannot list the session's files: %w", err)
+	}
+	var paths []string
+	ignoreText := ""
+	for _, rec := range bytes.Split(tree, []byte{0}) {
+		if len(rec) == 0 {
+			continue
+		}
+		meta, path, ok := strings.Cut(string(rec), "\t")
+		f := strings.Fields(meta)
+		if !ok || len(f) != 3 || path == "" {
+			return nil, errors.New("unexpected output from git ls-tree; refusing to continue")
+		}
+		if len(paths) >= maxFilesetEntries {
+			return nil, fmt.Errorf("the repository has more than %d files; repochat refuses to build a partial workspace", maxFilesetEntries)
+		}
+		paths = append(paths, path)
+		if path == ignoreFileName {
+			if ignoreText, err = ws.ignoreBlob(ctx, f[0], f[2]); err != nil {
+				return nil, err
+			}
+		}
+	}
+	pol, err := ws.newPolicy(ignoreText)
+	if err != nil {
+		return nil, err
+	}
+	if err := pol.Prime(ctx, paths); err != nil {
+		return nil, fmt.Errorf(".repochatignore could not be evaluated (%v); refusing to build the workspace without the policy it defines", err)
+	}
+	var withheld []string
+	for _, p := range paths {
+		if pol.Check(p) != "" {
+			withheld = append(withheld, p)
+		}
+	}
+	return withheld, nil
+}
+
+// writeSparse makes the workspace's sparse-checkout file leave exactly the
+// given paths out of the checkout. git applies it at the next command that
+// updates the files.
+func (ws *Repo) writeSparse(withheld []string) error {
+	var sparse strings.Builder
+	sparse.WriteString("/*\n")
+	for _, p := range withheld {
+		esc, err := sparseEscape(p)
+		if err != nil {
+			return err
+		}
+		sparse.WriteString("!/" + esc + "\n")
+	}
+	if err := writeFileAtomic(filepath.Join(ws.GitDir, "info"), "sparse-checkout", []byte(sparse.String())); err != nil {
+		return fmt.Errorf("cannot write the workspace's sparse-checkout file: %w", err)
+	}
+	return nil
+}
+
 // sparseEscape writes a path as a pattern that matches exactly that path,
 // in the syntax of .gitignore (the leading "/" and "!" are added by the
 // caller). A name that ends a line early cannot be written at all.
@@ -620,17 +642,28 @@ func sparseEscape(p string) (string, error) {
 }
 
 // removeWorkspace removes a workspace and its registration in the owner's
-// repository; the branch stays. Failures are logged: what remains is a
+// repository; the branch stays. Failures are logged, and returned for the
+// callers that report them: what remains is a
 // directory under repochat's state and, at worst, a stale worktree entry
 // that `git worktree prune` clears.
-func (s *Sessions) removeWorkspace(ctx context.Context, path string) {
+func (s *Sessions) removeWorkspace(ctx context.Context, path string) error {
+	var first error
 	out, _, code, err := s.owner.gitRaw(ctx, 64<<10, "worktree", "remove", "--force", "--force", path)
-	if (err != nil || code != 0) && s.owner.Logf != nil {
-		s.owner.Logf("session: git worktree remove failed: %v %s", err, firstErr(nil, out))
+	if err != nil || code != 0 {
+		if s.owner.Logf != nil {
+			s.owner.Logf("session: git worktree remove failed: %v %s", err, firstErr(nil, out))
+		}
+		first = errors.New("git worktree remove failed")
 	}
-	if err := os.RemoveAll(filepath.Dir(path)); err != nil && s.owner.Logf != nil {
-		s.owner.Logf("session: cannot remove the workspace: %v", err)
+	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
+		if s.owner.Logf != nil {
+			s.owner.Logf("session: cannot remove the workspace: %v", err)
+		}
+		if first == nil {
+			first = pathErrCause(err)
+		}
 	}
+	return first
 }
 
 // checkOwnerIgnore refuses an owner's .repochatignore that is not a regular
