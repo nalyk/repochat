@@ -189,9 +189,20 @@ func (c *catalog) writeFail(err error, whole bool) (mcp.Result, error) {
 		if errors.As(err, &ce) && ce.Fresh != "" {
 			note = "[error cut at the size budget: read the files again for the current lines and their anchors]"
 		}
-		msg, _ = clip(msg, c.r.Budget(), note)
+		msg, _ = clip(msg, c.r.Budget()-len(newSessionHint)-1, note)
 	}
-	return mcp.Result{}, errors.New(msg)
+	return mcp.Result{}, errors.New(withSessionHint(msg))
+}
+
+// newSessionHint translates the engine's advice to restart with
+// --new-session, a command-line flag, into what the model can do.
+const newSessionHint = "From here: call start_session with fresh=true."
+
+func withSessionHint(msg string) string {
+	if strings.Contains(msg, "--new-session") {
+		return msg + "\n" + newSessionHint
+	}
+	return msg
 }
 
 func short(id string) string {
@@ -433,7 +444,7 @@ func (c *catalog) update(ctx context.Context, _ mcp.Args) (mcp.Result, error) {
 
 func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	branch := "the user's branch"
-	if info, err := c.s.Current(ctx); err == nil {
+	if info, err := c.currentInfo(ctx); err == nil {
 		branch = info.StartBranch
 	}
 	fin, err := c.s.Finish(ctx, a.Bool("squash"), a.String("message"))
@@ -442,9 +453,48 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 		// recover: they reach the user whole.
 		return c.writeFail(err, true)
 	}
-	_, cerr := c.s.Current(ctx)
-	open := cerr == nil
+	open, known := c.sessionOpen(ctx)
+	warnings := 0
+	for _, n := range fin.Notes {
+		if strings.HasPrefix(n, "WARNING") {
+			warnings++
+		}
+	}
+	m := meta{"commit": fin.Commit, "squashed": fin.Squashed, "files": len(fin.Files),
+		"warnings": warnings, "complete": true}
+	if known {
+		m["session_open"] = open
+	} else {
+		m["session_state"] = "unknown"
+	}
+	footerList(m, "runs_later", fin.RunsLater)
+	return c.finish("finish_session", finishText(branch, fin, open, known), 0, m), nil
+}
 
+// currentInfo is Sessions.Current, or the test seam.
+func (c *catalog) currentInfo(ctx context.Context) (*repo.SessionInfo, error) {
+	if c.current != nil {
+		return c.current(ctx)
+	}
+	return c.s.Current(ctx)
+}
+
+// sessionOpen reports whether a session is open, and whether that is known.
+// It is asked after a merge that may have run past the call's deadline, so
+// it does not take the call's cancellation; only "no session" means closed.
+func (c *catalog) sessionOpen(ctx context.Context) (open, known bool) {
+	_, err := c.currentInfo(context.WithoutCancel(ctx))
+	switch {
+	case err == nil:
+		return true, true
+	case errors.Is(err, repo.ErrNoSession):
+		return false, true
+	}
+	return false, false
+}
+
+// finishText is the result of a Finish: what needs telling first, first.
+func finishText(branch string, fin *repo.Finished, open, known bool) string {
 	var warnings, notes []string
 	for _, n := range fin.Notes {
 		if strings.HasPrefix(n, "WARNING") {
@@ -457,7 +507,19 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 	if len(warnings) > 0 {
 		b.WriteString("WARNING: the merge did not end cleanly. Tell the user this first:\n")
 		bullets(&b, warnings)
-		fmt.Fprintf(&b, "%s is at %s.\n", branch, short(fin.Commit))
+		// When where the branch is could not be read, Commit is the commit
+		// that was being landed, not the branch's position.
+		positionUnknown := false
+		for _, w := range warnings {
+			if strings.HasPrefix(w, "WARNING: git reported the merge of ") {
+				positionUnknown = true
+			}
+		}
+		if positionUnknown {
+			fmt.Fprintf(&b, "Where %s is now is not known; the merged commit is %s.\n", branch, short(fin.Commit))
+		} else {
+			fmt.Fprintf(&b, "%s is at %s.\n", branch, short(fin.Commit))
+		}
 	} else {
 		how := "fast-forward"
 		if fin.Squashed {
@@ -475,24 +537,24 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 		b.WriteString("Notes:\n")
 		bullets(&b, notes)
 	}
-	if open {
+	switch {
+	case !known:
+		b.WriteString("Whether the session is still open could not be determined; call session_status to find out.\n")
+	case open:
 		b.WriteString("The session is still open.\n")
-	} else {
+	default:
 		b.WriteString("The session is closed: the read tools serve the user's checkout again, without anchors; start_session opens a new session.\n")
 	}
 	if len(fin.Files) > 0 {
 		b.WriteString("Files changed:\n")
 		bullets(&b, fin.Files)
 	}
-	m := meta{"commit": fin.Commit, "squashed": fin.Squashed, "files": len(fin.Files), "session_open": open,
-		"warnings": len(warnings), "complete": true}
-	footerList(m, "runs_later", fin.RunsLater)
-	return c.finish("finish_session", b.String(), 0, m), nil
+	return b.String()
 }
 
 func (c *catalog) abandon(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	branch := ""
-	if info, err := c.s.Current(ctx); err == nil {
+	if info, err := c.currentInfo(ctx); err == nil {
 		branch = info.Branch
 	}
 	del := a.Bool("delete_branch")
@@ -501,10 +563,15 @@ func (c *catalog) abandon(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	}
 	var b strings.Builder
 	b.WriteString("The session was abandoned: its workspace was removed and nothing reached the user's branch.\n")
-	if del {
+	switch {
+	case del && branch != "":
 		fmt.Fprintf(&b, "The session branch %s was deleted.\n", branch)
-	} else {
+	case del:
+		b.WriteString("The session branch was deleted.\n")
+	case branch != "":
 		fmt.Fprintf(&b, "The session branch %s is kept; the user can still merge it by hand: git merge --ff-only %s\n", branch, branch)
+	default:
+		b.WriteString("The session branch is kept; the user can still merge it by hand with git.\n")
 	}
 	b.WriteString("The read tools serve the user's checkout again, without anchors; start_session opens a new session.\n")
 	return c.finish("abandon_session", b.String(), 0, meta{"branch": branch, "branch_deleted": del, "complete": true}), nil

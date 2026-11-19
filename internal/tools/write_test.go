@@ -1,9 +1,11 @@
 package tools
 
 import (
+	"context"
 	"encoding/json"
 	"errors"
 	"fmt"
+	"maps"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -141,13 +143,14 @@ func TestWriteCatalogueAddsNineToolsWithHonestAnnotations(t *testing.T) {
 	if got := catalogueJSON(t, f.list[:13]); string(got) != string(want) {
 		t.Fatalf("the read tools changed in write mode:\n%s", got)
 	}
+	pending := maps.Clone(writeAnnotations)
 	for _, tool := range f.list[13:] {
-		ann, ok := writeAnnotations[tool.Name]
+		ann, ok := pending[tool.Name]
 		if !ok {
 			t.Errorf("unexpected tool %s", tool.Name)
 			continue
 		}
-		delete(writeAnnotations, tool.Name)
+		delete(pending, tool.Name)
 		if tool.Write != ann[0] || tool.Destructive != ann[1] {
 			t.Errorf("%s: write=%v destructive=%v, want %v %v", tool.Name, tool.Write, tool.Destructive, ann[0], ann[1])
 		}
@@ -164,8 +167,8 @@ func TestWriteCatalogueAddsNineToolsWithHonestAnnotations(t *testing.T) {
 			}
 		}
 	}
-	if len(writeAnnotations) > 0 {
-		t.Errorf("missing tools: %v", writeAnnotations)
+	if len(pending) > 0 {
+		t.Errorf("missing tools: %v", pending)
 	}
 
 	// changes: an array of objects with exactly the members of repo.Change.
@@ -532,4 +535,146 @@ func mustArgs(t *testing.T, tool mcp.Tool, raw map[string]any) mcp.Args {
 		t.Fatal(err)
 	}
 	return a
+}
+
+// ---------------------------------------------------------------------------
+// Review round 1
+// ---------------------------------------------------------------------------
+
+func TestReadModeInstructionsAreUnchanged(t *testing.T) {
+	want, err := os.ReadFile("testdata/instructions.txt")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if Instructions != string(want) {
+		t.Fatalf("Instructions changed:\n%s", Instructions)
+	}
+}
+
+func TestWriteModeInstructionsDoNotContradictThemselves(t *testing.T) {
+	if !strings.Contains(WriteModeInstructions, WriteInstructions) {
+		t.Error("WriteModeInstructions must contain WriteInstructions verbatim")
+	}
+	for _, bad := range []string{"Read-only access", "Nothing can be modified"} {
+		if strings.Contains(WriteModeInstructions, bad) {
+			t.Errorf("WriteModeInstructions says %q", bad)
+		}
+	}
+	shared := 0
+	for _, l := range strings.Split(Instructions, "\n") {
+		if strings.HasPrefix(l, "- ") && !strings.Contains(l, "Nothing can be modified") {
+			shared++
+			if !strings.Contains(WriteModeInstructions, l+"\n") {
+				t.Errorf("WriteModeInstructions lacks the detail line %q", l)
+			}
+		}
+	}
+	if shared < 4 || !strings.Contains(WriteModeInstructions, "Start with repo_overview.") {
+		t.Errorf("shared parts missing (%d detail lines)", shared)
+	}
+}
+
+// probeCatalog is the write-mode catalogue of f with Current replaced.
+func probeCatalog(f *writeFixture, current func(context.Context) (*repo.SessionInfo, error)) *catalog {
+	c := &catalog{src: served{f.s}, owner: f.owner, s: f.s, current: current}
+	return c.at(f.owner)
+}
+
+func TestFinishNeverCallsAnOpenSessionClosed(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	f.must(t, "apply_changes", map[string]any{
+		"changes": changesJSON(t, map[string]string{"op": "create", "path": "a.txt", "text": "a"}),
+	})
+	// The probe after the merge fails with something other than "no session".
+	calls := 0
+	c := probeCatalog(f, func(ctx context.Context) (*repo.SessionInfo, error) {
+		calls++
+		if calls == 1 {
+			return f.s.Current(ctx)
+		}
+		return nil, errors.New("git: signal: killed")
+	})
+	res, err := c.finishSession(bg, mcp.Args{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "session is closed") || strings.Contains(res.Text, `"session_open":false`) ||
+		!strings.Contains(res.Text, "could not be determined") || !strings.Contains(res.Text, "session_status") {
+		t.Fatalf("finish with an unknown session state:\n%s", res.Text)
+	}
+
+	// The probe itself is not bound to the call's deadline.
+	g := newWriteFixture(t, repo.Options{}, nil)
+	g.must(t, "start_session", map[string]any{})
+	expired, cancel := context.WithCancel(bg)
+	cancel()
+	if open, known := probeCatalog(g, nil).sessionOpen(expired); !open || !known {
+		t.Fatalf("an expired call context must not make an open session look closed: open=%v known=%v", open, known)
+	}
+}
+
+func TestFinishTextWhenTheBranchCannotBeRead(t *testing.T) {
+	land := strings.Repeat("ab", 20)
+	fin := &repo.Finished{Commit: land, Files: []string{"a.txt"}, Notes: []string{
+		"WARNING: git reported the merge of " + land + " as done, but where main is now could not be read (boom); the session, its branch and its workspace are kept. Check the checkout with git status and git log.",
+	}}
+	text := finishText("main", fin, true, true)
+	if strings.Contains(text, "main is at") || !strings.Contains(text, "the merged commit is "+land[:12]) {
+		t.Fatalf("finish text:\n%s", text)
+	}
+	// Otherwise the branch position is known and stated.
+	fin.Notes = []string{"WARNING: git reported the merge as done, but main is at " + land + ", not at the merged commit x; kept."}
+	if text := finishText("main", fin, true, true); !strings.Contains(text, "main is at "+land[:12]) {
+		t.Fatalf("finish text:\n%s", text)
+	}
+}
+
+func TestAbandonWithoutABranchNameOmitsTheMergeCommand(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	c := probeCatalog(f, func(context.Context) (*repo.SessionInfo, error) { return nil, errors.New("boom") })
+	res, err := c.abandon(bg, mcp.Args{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Contains(res.Text, "git merge") || strings.Contains(res.Text, "branch  ") {
+		t.Fatalf("abandon without a branch name:\n%s", res.Text)
+	}
+}
+
+func TestNewSessionFlagIsTranslatedForTheModel(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	info, err := f.s.Current(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := os.RemoveAll(info.Workspace); err != nil {
+		t.Fatal(err)
+	}
+	// repochat restarted: the recorded session is resumed and found broken.
+	f.s.Close()
+	s2, err := repo.NewSessions(f.owner, repo.SessionOptions{StateDir: filepath.Dir(filepath.Dir(filepath.Dir(info.Workspace)))})
+	if err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { s2.Close() })
+	f.tools = map[string]mcp.Tool{}
+	for _, tool := range NewWrite(f.owner, s2) {
+		f.tools[tool.Name] = tool
+	}
+	const hint = "From here: call start_session with fresh=true."
+	for _, name := range []string{"list_checkpoints", "read_file"} {
+		args := map[string]any{}
+		if name == "read_file" {
+			args["path"] = "notes.txt"
+		}
+		_, _, err := f.call(t, name, args)
+		if err == nil || !strings.Contains(err.Error(), "--new-session") || !strings.HasSuffix(err.Error(), hint) {
+			t.Errorf("%s with the workspace gone: %v", name, err)
+		}
+	}
+	f.must(t, "start_session", map[string]any{"fresh": true})
+	f.must(t, "read_file", map[string]any{"path": "notes.txt"})
 }
