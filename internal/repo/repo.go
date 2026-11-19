@@ -9,6 +9,7 @@ import (
 	"encoding/hex"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -29,10 +30,17 @@ type Options struct {
 	Allow             []string // patterns exempt from the built-in secret-file rules
 	Deny              []string // extra patterns to withhold
 	MaxOutputBytes    int      // per tool result (default DefaultMaxOutput)
+	// Own lists absolute directories that belong to the program serving the
+	// repository (its configuration with the API key, its state, its helper).
+	// Whatever lies under them is withheld before any pattern is consulted.
+	Own []string
 }
 
 const (
-	DefaultMaxOutput  = 200 << 10
+	// DefaultMaxOutput is provisional: small enough that a chain of several
+	// tool calls does not fill the caller's context with one of them, but not
+	// yet measured against real ChatGPT sessions.
+	DefaultMaxOutput  = 32 << 10
 	MinOutput         = 16 << 10
 	MaxOutput         = 2 << 20
 	maxFilesetEntries = 500_000
@@ -56,6 +64,10 @@ type Repo struct {
 	Name   string // sanitized directory name
 	ID     string // stable identifier: name plus a short hash of the root path
 	Opts   Options
+	// Warnings are one-line notices about how the repository was found,
+	// established when it was opened and meant for the person who started
+	// repochat. They contain no paths.
+	Warnings []string
 	// Logf, when set, receives diagnostics that must stay on this machine
 	// (git's own error output). It is never part of a tool result.
 	Logf func(format string, args ...any)
@@ -65,6 +77,7 @@ type Repo struct {
 	red      *Redactor
 	allow    []*Glob
 	deny     []*Glob
+	own      []string // Options.Own as repository-relative prefixes, lower case
 	version  [3]int
 
 	mu         sync.Mutex
@@ -148,6 +161,7 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 	if r.deny, err = CompileGlobs(opts.Deny); err != nil {
 		return nil, fmt.Errorf("--deny %w", err)
 	}
+	r.own = ownPrefixes(root, opts.Own)
 
 	if out, _, code, err := runGit(ctx, root, nil, 1024, "version"); err != nil || code != 0 {
 		return nil, fmt.Errorf("cannot run git: %v", firstErr(err, out))
@@ -187,6 +201,9 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 	if resolved, err := filepath.EvalSymlinks(top); err != nil || resolved != root {
 		return fail(fmt.Errorf("git reports working tree %q but repochat located %q; refusing to continue", top, root))
 	}
+	if w := gitDirWarning(ctx, root, r.GitDir); w != "" {
+		r.Warnings = append(r.Warnings, w)
+	}
 	// The name appears in every result footer, so a directory whose name
 	// looks like a secret is given a neutral one.
 	r.Name = safeName(filepath.Base(root))
@@ -198,6 +215,118 @@ func Open(ctx context.Context, start string, opts Options) (*Repo, error) {
 	sum := sha256.Sum256([]byte(root))
 	r.ID = r.Name + "-" + hex.EncodeToString(sum[:])[:8]
 	return r, nil
+}
+
+// gitDirWarning returns a one-line warning when the git directory is not
+// evidently this working tree's own, and "" when it is. A ".git" file can
+// name any git directory. Linked worktrees and submodule checkouts refer
+// back to their working tree; a git directory that refers somewhere else, or
+// is another folder's .git, means this folder is being served with that
+// repository's history. `git init --separate-git-dir` leaves no reference at
+// all, so that layout cannot be told apart and gets a milder notice.
+func gitDirWarning(ctx context.Context, root, gitDir string) string {
+	if resolved, err := filepath.EvalSymlinks(gitDir); err == nil {
+		gitDir = resolved
+	}
+	elsewhere := false // the git directory names a working tree, and it is not this one
+	within := func(dir, p string) bool {
+		rel, err := filepath.Rel(dir, p)
+		return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+	}
+	isRoot := func(p string) bool {
+		resolved, err := filepath.EvalSymlinks(p)
+		return err == nil && resolved == root
+	}
+	from := func(p string) string { // paths recorded in a git directory are relative to it
+		if !filepath.IsAbs(p) {
+			p = filepath.Join(gitDir, p)
+		}
+		return p
+	}
+	// The ordinary layout: the git directory is inside the working tree.
+	if within(root, gitDir) {
+		return ""
+	}
+	// A linked worktree: its git directory records where its .git file is.
+	if data, err := os.ReadFile(filepath.Join(gitDir, "gitdir")); err == nil {
+		back := from(strings.TrimRight(string(data), "\r\n"))
+		if filepath.Base(back) == ".git" && isRoot(filepath.Dir(back)) {
+			return ""
+		}
+		elsewhere = true
+	}
+	// A submodule checkout: the git directory's own configuration names the
+	// working tree.
+	out, _, code, err := runGit(ctx, root, []string{"--git-dir=" + gitDir}, 8192, "config", "--local", "--get", "core.worktree")
+	if err == nil && code == 0 {
+		if wt := strings.TrimRight(string(out), "\r\n"); wt != "" {
+			if isRoot(from(wt)) {
+				return ""
+			}
+			elsewhere = true
+		}
+	}
+	// A submodule's git directory kept inside its superproject, for a
+	// checkout that lies inside the same superproject.
+	modules := string(filepath.Separator) + filepath.Join(".git", "modules") + string(filepath.Separator)
+	if i := strings.Index(gitDir, modules); i > 0 {
+		if within(gitDir[:i], root) {
+			return ""
+		}
+		elsewhere = true
+	}
+	// A directory called .git is the git directory of the folder it is in.
+	if elsewhere || filepath.Base(gitDir) == ".git" {
+		return "the .git file in this folder names a git directory that belongs to another working tree and does not point back here: the history, branches and staged state served are that repository's, applied to this folder's files"
+	}
+	return "the .git file in this folder names a git directory outside it that records no working tree: this is expected after `git init --separate-git-dir`; otherwise the history, branches and staged state served belong to another repository"
+}
+
+// ownPrefixes turns the program's own directories into repository-relative
+// prefixes. A directory is taken both as written and with its symbolic links
+// resolved, so that neither spelling of it escapes; one that does not exist
+// yet is resolved through its nearest existing parent. Prefixes are lower
+// case and compared so: on a file system that ignores case, a path spelled
+// differently is the same file. "" means the repository root itself.
+func ownPrefixes(root string, dirs []string) []string {
+	var out []string
+	seen := map[string]bool{}
+	add := func(dir string) {
+		rel, err := filepath.Rel(root, dir)
+		if err != nil || rel == ".." || strings.HasPrefix(rel, ".."+string(filepath.Separator)) {
+			return
+		}
+		if rel == "." {
+			rel = ""
+		}
+		rel = strings.ToLower(filepath.ToSlash(rel))
+		if !seen[rel] {
+			seen[rel] = true
+			out = append(out, rel)
+		}
+	}
+	for _, dir := range dirs {
+		abs, err := filepath.Abs(dir)
+		if err != nil {
+			continue
+		}
+		add(abs)
+		// Resolve as much of the path as exists.
+		rest := ""
+		for p := abs; ; {
+			if resolved, err := filepath.EvalSymlinks(p); err == nil {
+				add(filepath.Join(resolved, rest))
+				break
+			}
+			parent := filepath.Dir(p)
+			if parent == p {
+				break
+			}
+			rest = filepath.Join(filepath.Base(p), rest)
+			p = parent
+		}
+	}
+	return out
 }
 
 // Close releases the directory handle.
@@ -284,6 +413,20 @@ var gitBaseConfig = []string{
 	"-c", "log.showSignature=false",
 	"-c", "protocol.allow=never",
 	"-c", "submodule.recurse=false",
+	// A submodule is another repository: its files are not in the served set
+	// and its configuration is as untrusted as this one's. These defaults
+	// keep git from printing a submodule's commits or files and from running
+	// git inside it, whatever the repository or the user configured. The
+	// commands that compare states repeat them as command-line options,
+	// which also outrank .gitmodules and submodule.<name>.ignore.
+	"-c", "diff.submodule=short",
+	"-c", "diff.ignoreSubmodules=dirty",
+	"-c", "status.submoduleSummary=false",
+	// A split index keeps a shared part in the git directory, which git
+	// rewrites there even when the index itself is a private copy (see
+	// withPrivateIndex). With this off git reads a split index as usual and
+	// writes a whole one.
+	"-c", "core.splitIndex=false",
 	"-c", "gc.auto=0",
 	"-c", "maintenance.auto=false",
 	// Settings that make git read a file named by the repository's own
@@ -330,6 +473,70 @@ func gitEnv() []string {
 	return env
 }
 
+// gitIndexKey is the context key under which withPrivateIndex stores the
+// path of the index file that git must use instead of the repository's own.
+type gitIndexKey struct{}
+
+// withPrivateIndex returns a context whose git commands work on a private
+// copy of the index, and a function that removes the copy.
+//
+// `git diff` against the working tree finishes by writing fresh file
+// timestamps back to the index when it met a file whose timestamp changed
+// but whose content did not. It does so under index.lock and regardless of
+// GIT_OPTIONAL_LOCKS, so a read tool would modify the repository and could
+// make the owner's own git command fail on the lock. Skipping that refresh
+// (diff.autoRefreshIndex=false) would report every such file as changed, so
+// git keeps its behaviour and is given a copy to write to instead.
+func (r *Repo) withPrivateIndex(ctx context.Context) (context.Context, func(), error) {
+	fail := func(err error) (context.Context, func(), error) {
+		if r.Logf != nil {
+			r.Logf("private index copy failed: %v", err)
+		}
+		// The cause names local paths, so it stays in the local log.
+		return nil, nil, errors.New("could not prepare a private copy of the git index; the reason is in repochat's local log on the user's machine")
+	}
+	dir, err := os.MkdirTemp("", "repochat-index-")
+	if err != nil {
+		return fail(err)
+	}
+	release := func() { os.RemoveAll(dir) }
+	private := filepath.Join(dir, "index")
+	// No index yet (a repository without commits or staged files) is the
+	// same for git as an empty one, so there is nothing to copy.
+	if err := copyIndex(filepath.Join(r.GitDir, "index"), private); err != nil && !errors.Is(err, os.ErrNotExist) {
+		release()
+		return fail(err)
+	}
+	return context.WithValue(ctx, gitIndexKey{}, private), release, nil
+}
+
+// copyIndex copies an index file together with its modification time: git
+// compares that time with each file's to decide which files it must re-read
+// instead of trusting their recorded size and timestamp.
+func copyIndex(from, to string) error {
+	src, err := os.Open(from)
+	if err != nil {
+		return err
+	}
+	defer src.Close()
+	fi, err := src.Stat()
+	if err != nil {
+		return err
+	}
+	dst, err := os.OpenFile(to, os.O_WRONLY|os.O_CREATE|os.O_EXCL, 0o600)
+	if err != nil {
+		return err
+	}
+	if _, err := io.Copy(dst, src); err != nil {
+		dst.Close()
+		return err
+	}
+	if err := dst.Close(); err != nil {
+		return err
+	}
+	return os.Chtimes(to, fi.ModTime(), fi.ModTime())
+}
+
 // runGit runs git in dir and returns at most limit bytes of stdout. When the
 // output is larger the process group is killed and truncated=true. A non-zero
 // exit is reported through code with stderr as out; err is reserved for
@@ -344,6 +551,9 @@ func runGit(ctx context.Context, dir string, pre []string, limit int, args ...st
 	cmd := exec.CommandContext(ctx, "git", full...)
 	cmd.Dir = dir
 	cmd.Env = gitEnv()
+	if index, ok := ctx.Value(gitIndexKey{}).(string); ok {
+		cmd.Env = append(cmd.Env, "GIT_INDEX_FILE="+index)
+	}
 	cmd.Stdin = nil
 	cmd.SysProcAttr = &syscall.SysProcAttr{Setpgid: true}
 	cmd.Cancel = func() error { return syscall.Kill(-cmd.Process.Pid, syscall.SIGKILL) }

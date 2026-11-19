@@ -13,6 +13,7 @@ import (
 	"fmt"
 	"sort"
 	"strings"
+	"unicode/utf8"
 
 	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
@@ -192,23 +193,45 @@ func New(r *repo.Repo) []mcp.Tool {
 
 type meta map[string]any
 
+const (
+	metaPrefix = "@meta "
+	cutNotice  = "\n[result cut at the size budget; narrow the request]\n"
+	// The footer's share of the budget. It normally needs a few hundred
+	// bytes; the limit matters when it lists long paths.
+	maxFooterShare = 8       // at most budget/maxFooterShare …
+	maxFooterBytes = 4 << 10 // … and never more than this
+	footerListCap  = 50      // entries of one list handed to the footer
+	footerStringTo = 96      // bytes kept of a long footer string
+)
+
+// continuationHints are the footer values that tell a caller where to go on.
+var continuationHints = []string{"cursor", "next_start_line", "next_skip", "last_line"}
+
+// footerLimit is the room set aside for the @meta line of every result.
+func (c *catalog) footerLimit() int {
+	return min(c.r.Budget()/maxFooterShare, maxFooterBytes)
+}
+
+// bodyBudget is what a handler may spend on text so that the text and the
+// largest possible footer still fit the result budget together. finish cuts
+// whatever exceeds it, but a cut made there cannot move the continuation
+// hints (next_start_line, cursor) that were computed for the uncut text, so
+// handlers that page their output stay within this instead.
+func (c *catalog) bodyBudget() int {
+	return c.r.Budget() - c.footerLimit() - len(metaPrefix) - 1
+}
+
 // finish applies the final safety passes (masking, control characters, size
-// budget) and appends the @meta line.
+// budget) and appends the @meta line. The budget bounds the whole result,
+// footer included.
 func (c *catalog) finish(tool, text string, redactions int, m meta) mcp.Result {
 	masked, extra := c.r.Redactor().Text(text, false)
 	text = repo.Sanitize(masked)
 	redactions += extra
-
-	budget := c.r.Budget()
-	truncated := false
-	if len(text) > budget-512 {
-		cut := strings.LastIndexByte(text[:budget-512], '\n')
-		if cut < 0 {
-			cut = budget - 512
-		}
-		text = text[:cut] + "\n[result cut at the size budget; narrow the request]"
-		truncated = true
+	if !strings.HasSuffix(text, "\n") {
+		text += "\n"
 	}
+
 	// The footer carries repository-derived strings too (paths, branch
 	// names), so it gets the same masking and escaping as the body. The
 	// cursor is generated here and must stay byte-exact.
@@ -222,18 +245,134 @@ func (c *catalog) finish(tool, text string, redactions int, m meta) mcp.Result {
 		}
 		out[k] = v
 	}
-	if truncated {
-		out["truncated"] = true
-		out["complete"] = false
-	}
 	if redactions > 0 {
 		out["redactions"] = redactions
 	}
-	raw, _ := json.Marshal(out)
-	if !strings.HasSuffix(text, "\n") {
-		text += "\n"
+
+	budget, limit := c.r.Budget(), c.footerLimit()
+	footer := fitFooter(out, limit)
+	if len(text)+len(metaPrefix)+len(footer) > budget {
+		// The footer of a cut result says so, which makes it longer: it is
+		// sized again before the room left for the body is known. The
+		// hints for continuing describe the uncut text; following them
+		// would skip what is cut here, so they are withdrawn and the caller
+		// has to narrow the request instead.
+		out["truncated"] = true
+		out["complete"] = false
+		for _, hint := range continuationHints {
+			delete(out, hint)
+		}
+		if _, perFile := out["files"].([]meta); perFile {
+			delete(out, "files")
+		}
+		footer = fitFooter(out, limit)
+		// Without the hints the footer can be shorter than the one that
+		// did not fit, so the room may now exceed the text.
+		room := min(max(budget-len(metaPrefix)-len(footer)-len(cutNotice), 0), len(text))
+		cut := strings.LastIndexByte(text[:room], '\n')
+		if cut < 0 {
+			for cut = room; cut > 0 && !utf8.RuneStart(text[cut]); cut-- {
+			}
+		}
+		text = text[:cut] + cutNotice
 	}
-	return mcp.Result{Text: text + "@meta " + string(raw), Redactions: redactions}
+	return mcp.Result{Text: text + metaPrefix + string(footer), Redactions: redactions}
+}
+
+// fitFooter encodes the footer in at most limit bytes. A footer that is too
+// large is shortened in place, largest value first: lists are halved and long
+// strings cut, each time recording "<key>_truncated": true (and, for a list,
+// "<key>_count" with its full length) so the reader knows what is missing.
+func fitFooter(out meta, limit int) []byte {
+	for {
+		raw, _ := json.Marshal(out)
+		if len(raw) <= limit {
+			return raw
+		}
+		if !shrinkFooter(out) {
+			break
+		}
+	}
+	// Nothing left to shorten (not reachable with the values the tools put
+	// here, which are a bounded number of scalars): keep what identifies the
+	// result and what a caller needs to continue.
+	minimal := meta{"meta_truncated": true}
+	for k, v := range out {
+		switch v.(type) {
+		case string, []string, []meta, meta:
+			if k != "tool" && k != "repo" && k != "cursor" {
+				continue
+			}
+		}
+		minimal[k] = v
+	}
+	raw, _ := json.Marshal(minimal)
+	return raw
+}
+
+// shrinkFooter shortens the footer value that takes the most room and
+// reports whether there was one to shorten.
+func shrinkFooter(out meta) bool {
+	size := func(v any) int {
+		raw, _ := json.Marshal(v)
+		return len(raw)
+	}
+	key, largest := "", 0
+	for k, v := range out {
+		shrinkable := false
+		switch t := v.(type) {
+		case []string:
+			shrinkable = len(t) > 0
+		case []meta:
+			shrinkable = len(t) > 0
+		case string:
+			// A string that was already cut (footerStringTo bytes and the
+			// ellipsis) is not a candidate again.
+			shrinkable = len(t) > footerStringTo+len("…") && k != "tool" && k != "repo" && k != "cursor"
+		}
+		// Ties are broken by name so the result does not depend on map order.
+		if n := size(v); shrinkable && (n > largest || n == largest && k < key) {
+			key, largest = k, n
+		}
+	}
+	if key == "" {
+		return false
+	}
+	count := func(n int) {
+		if _, set := out[key+"_count"]; !set {
+			out[key+"_count"] = n
+		}
+	}
+	switch t := out[key].(type) {
+	case []string:
+		count(len(t))
+		out[key] = t[:len(t)/2]
+	case []meta:
+		count(len(t))
+		out[key] = t[:len(t)/2]
+	case string:
+		cut := footerStringTo
+		for cut > 0 && !utf8.RuneStart(t[cut]) {
+			cut--
+		}
+		out[key] = t[:cut] + "…"
+	}
+	out[key+"_truncated"] = true
+	return true
+}
+
+// footerList puts a list of names into the footer, at most footerListCap of
+// them, with the full count and a flag when some were left out.
+func footerList(m meta, key string, list []string) {
+	if len(list) == 0 {
+		return
+	}
+	if len(list) > footerListCap {
+		m[key+"_count"] = len(list)
+		m[key+"_truncated"] = true
+		list = list[:footerListCap]
+	}
+	m[key] = list
 }
 
 // maskValue masks and escapes every string inside a footer value.
@@ -388,7 +527,7 @@ func readMeta(res *repo.ReadResult) meta {
 }
 
 func (c *catalog) read(ctx context.Context, a mcp.Args) (mcp.Result, error) {
-	res, err := c.r.ReadFile(ctx, a.String("path"), a.Int("start_line", 1), a.Int("max_lines", 0), a.String("rev"), c.r.Budget()-1024)
+	res, err := c.r.ReadFile(ctx, a.String("path"), a.Int("start_line", 1), a.Int("max_lines", 0), a.String("rev"), c.bodyBudget())
 	if err != nil {
 		return c.fail(err)
 	}
@@ -400,7 +539,7 @@ func (c *catalog) readMany(ctx context.Context, a mcp.Args) (mcp.Result, error) 
 	if len(paths) == 0 {
 		return c.fail(errors.New("paths must list at least one file"))
 	}
-	remaining := c.r.Budget() - 2048
+	remaining := c.bodyBudget()
 	var b strings.Builder
 	var files []meta
 	var notRead []string
@@ -452,7 +591,7 @@ func (c *catalog) search(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 		Query: a.String("query"), Regex: a.Bool("regex"), CaseSensitive: a.Bool("case_sensitive"), WholeWord: a.Bool("whole_word"),
 		Include: a.Strings("include"), Exclude: a.Strings("exclude"), Context: a.Int("context_lines", 0), MaxResults: a.Int("max_results", 0),
 		FromFile: pos[0], FromLine: pos[1], FromFingerprint: fp,
-	}, c.r.Budget()-1024)
+	}, c.bodyBudget())
 	if err != nil {
 		return c.fail(err)
 	}
@@ -468,7 +607,7 @@ func (c *catalog) outline(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	if err != nil {
 		return c.fail(err)
 	}
-	return c.finish("file_outline", res.Text, res.Redactions, meta{"language": res.Language, "exact": res.Exact, "definitions": res.Items, "complete": true}), nil
+	return c.finish("file_outline", res.Text, res.Redactions, meta{"language": res.Language, "exact": res.Exact, "definitions": res.Items, "complete": !res.Truncated}), nil
 }
 
 func (c *catalog) status(ctx context.Context, _ mcp.Args) (mcp.Result, error) {
@@ -478,7 +617,7 @@ func (c *catalog) status(ctx context.Context, _ mcp.Args) (mcp.Result, error) {
 	}
 	return c.finish("git_status", res.Text, 0, meta{
 		"head": res.Head, "branch": res.Branch, "staged": res.Staged, "unstaged": res.Unstaged,
-		"untracked": res.Untracked, "conflicts": res.Conflicts, "withheld": res.Withheld, "complete": true,
+		"untracked": res.Untracked, "conflicts": res.Conflicts, "withheld": res.Withheld, "complete": !res.Truncated,
 	}), nil
 }
 
@@ -491,28 +630,29 @@ func (c *catalog) log(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	if err != nil {
 		return c.fail(err)
 	}
-	m := meta{"commits": res.Count, "complete": !res.More}
+	m := meta{"commits": res.Count, "complete": !res.More && !res.StatsCut}
 	if res.More {
 		m["next_skip"] = res.NextSkip
+	}
+	if res.StatsCut {
+		m["stats_truncated"] = true
 	}
 	return c.finish("git_log", res.Text, res.Redactions, m), nil
 }
 
 func diffMeta(d *repo.DiffResult) meta {
-	m := meta{"files": d.Files, "patches_shown": d.Shown, "withheld": d.Withheld, "complete": len(d.Omitted) == 0}
+	// Complete means the caller got every patch it asked for, whole: nothing
+	// left out for size, nothing cut short, nothing held back.
+	m := meta{"files": d.Files, "patches_shown": d.Shown, "withheld": d.Withheld,
+		"complete": len(d.Omitted) == 0 && len(d.Cut) == 0 && !d.Incomplete}
 	if d.BaseOID != "" {
 		m["base"] = d.BaseOID
 	}
 	if d.TargetOID != "" {
 		m["target"] = d.TargetOID
 	}
-	if len(d.Omitted) > 0 {
-		omitted := d.Omitted
-		if len(omitted) > 50 {
-			omitted = omitted[:50]
-		}
-		m["patches_omitted"] = omitted
-	}
+	footerList(m, "patches_omitted", d.Omitted)
+	footerList(m, "patches_cut", d.Cut)
 	return m
 }
 
@@ -527,7 +667,7 @@ func (c *catalog) diff(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	res, err := c.r.Diff(ctx, repo.DiffOptions{
 		Mode: a.String("mode"), Base: a.String("base"), Target: a.String("target"), MergeBase: a.Bool("merge_base"),
 		Paths: a.Strings("paths"), StatOnly: a.Bool("stat_only"), Context: contextArg(a),
-	}, c.r.Budget()-1024)
+	}, c.bodyBudget())
 	if err != nil {
 		return c.fail(err)
 	}
@@ -535,7 +675,7 @@ func (c *catalog) diff(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 }
 
 func (c *catalog) show(ctx context.Context, a mcp.Args) (mcp.Result, error) {
-	res, err := c.r.Show(ctx, a.String("rev"), a.Strings("paths"), a.Bool("stat_only"), contextArg(a), c.r.Budget()-1024)
+	res, err := c.r.Show(ctx, a.String("rev"), a.Strings("paths"), a.Bool("stat_only"), contextArg(a), c.bodyBudget())
 	if err != nil {
 		return c.fail(err)
 	}
@@ -564,5 +704,5 @@ func (c *catalog) refs(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	if err != nil {
 		return c.fail(err)
 	}
-	return c.finish("git_refs", res.Text, 0, meta{"local": res.Local, "remote": res.Remote, "tags": res.TagRefs, "complete": true}), nil
+	return c.finish("git_refs", res.Text, 0, meta{"local": res.Local, "remote": res.Remote, "tags": res.TagRefs, "complete": !res.Truncated}), nil
 }

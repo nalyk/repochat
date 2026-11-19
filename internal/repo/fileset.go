@@ -143,6 +143,8 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	if s.Policy, err = NewPolicy(ignoreText, r.deny, r.allow); err != nil {
 		return nil, err
 	}
+	s.Policy.own = r.own
+	s.Policy.hash += "+" + strings.Join(r.own, "|")
 
 	const listLimit = 256 << 20
 	cached, err := r.git(ctx, listLimit, "ls-files", "-z", "--stage")
@@ -258,10 +260,88 @@ func CheckPath(p string) (string, error) {
 	return p, nil
 }
 
+// exactPath reports whether p, unchanged, is a well-formed repository-relative
+// path that stays outside .git. Unlike CheckPath it repairs nothing, so a
+// blank at either end, a backslash or a leading "~" is part of the name.
+func exactPath(p string) bool {
+	if strings.HasPrefix(p, "/") || !SupportedName(p) { // SupportedName rules out empty, "." and ".." segments
+		return false
+	}
+	for _, seg := range strings.Split(p, "/") {
+		if seg == ".git" {
+			return false
+		}
+	}
+	return true
+}
+
+// pathForms returns the readings of a model-supplied path, most literal
+// first: the string exactly as given, when CheckPath would change or reject
+// it, and then its cleaned form. Listings print names as they are, and a
+// name that a listing shows must work when it is passed back; cleaning alone
+// turns " notes.txt" or `a\b.txt` into the name of a different file. Both
+// readings are well-formed relative paths outside .git; neither can name
+// anything that git does not list.
+func pathForms(p string) ([]string, error) {
+	clean, err := CheckPath(p)
+	var forms []string
+	if exactPath(p) && (err != nil || p != clean) {
+		forms = append(forms, p)
+	}
+	if err == nil {
+		forms = append(forms, clean)
+	}
+	if len(forms) == 0 {
+		return nil, err
+	}
+	return forms, nil
+}
+
+// gitPath resolves a model-supplied path for a git command. The working tree
+// decides between the readings: the string exactly as given when git lists a
+// file or directory by that name (a listing printed it), otherwise the
+// cleaned form, which is also what a path that exists only in history gets.
+// A reading that the policy withholds is refused, whichever would be used.
+func (r *Repo) gitPath(ctx context.Context, p string) (string, error) {
+	forms, err := pathForms(p)
+	if err != nil {
+		return "", err
+	}
+	s, err := r.Snapshot(ctx)
+	if err != nil {
+		return "", err
+	}
+	for _, rel := range forms {
+		if reason := s.Policy.Check(rel); reason != "" {
+			return "", withheldError(rel, reason)
+		}
+	}
+	for _, rel := range forms {
+		if _, ok := s.Lookup(rel); ok || s.hasVisibleBelow(rel, false) {
+			return rel, nil
+		}
+	}
+	return forms[len(forms)-1], nil
+}
+
+// hasVisibleBelow reports whether a path the caller may see lies beneath dir.
+func (s *Snapshot) hasVisibleBelow(dir string, withheldToo bool) bool {
+	prefix := dir + "/"
+	i := sort.Search(len(s.Entries), func(i int) bool { return s.Entries[i].Path >= prefix })
+	for ; i < len(s.Entries) && strings.HasPrefix(s.Entries[i].Path, prefix); i++ {
+		if withheldToo || s.Entries[i].Withheld == "" {
+			return true
+		}
+	}
+	return false
+}
+
 // authorizeFile resolves a model-supplied path to a served working-tree
-// entry, distinguishing "withheld" from "not found".
+// entry, distinguishing "withheld" from "not found". Whether a reading is
+// withheld is decided from the string alone, before looking whether such a
+// file exists, so the answer never confirms that a withheld file is there.
 func (r *Repo) authorizeFile(ctx context.Context, p string) (string, Entry, *Snapshot, error) {
-	rel, err := CheckPath(p)
+	forms, err := pathForms(p)
 	if err != nil {
 		return "", Entry{}, nil, err
 	}
@@ -269,17 +349,26 @@ func (r *Repo) authorizeFile(ctx context.Context, p string) (string, Entry, *Sna
 	if err != nil {
 		return "", Entry{}, nil, err
 	}
-	e, ok := s.Lookup(rel)
-	if !ok {
+	for _, rel := range forms {
 		if reason := s.Policy.Check(rel); reason != "" {
 			return "", Entry{}, s, withheldError(rel, reason)
 		}
-		return "", Entry{}, s, notFoundError(s, rel)
+		if e, ok := s.Lookup(rel); ok {
+			return rel, e, s, nil
+		}
 	}
-	if e.Withheld != "" {
-		return "", Entry{}, s, withheldError(rel, e.Withheld)
+	// Not a listed file under any reading: say so for the reading that is a
+	// directory, if one is. Otherwise, when the string could only be read
+	// literally, the reason CheckPath rejects it is the useful answer.
+	for _, rel := range forms {
+		if s.hasVisibleBelow(rel, false) {
+			return "", Entry{}, s, notFoundError(s, rel)
+		}
 	}
-	return rel, e, s, nil
+	if _, err := CheckPath(p); err != nil {
+		return "", Entry{}, s, err
+	}
+	return "", Entry{}, s, notFoundError(s, forms[len(forms)-1])
 }
 
 func withheldError(rel, reason string) error {
@@ -288,10 +377,11 @@ func withheldError(rel, reason string) error {
 }
 
 func notFoundError(s *Snapshot, rel string) error {
-	prefix := rel + "/"
-	i := sort.Search(len(s.Entries), func(i int) bool { return s.Entries[i].Path >= prefix })
-	if i < len(s.Entries) && strings.HasPrefix(s.Entries[i].Path, prefix) {
-		return fmt.Errorf("%s is a directory; use list_files with path=%q", rel, rel)
+	// Only a served file makes its directory known: saying "is a directory"
+	// for one that holds nothing but withheld files would confirm a guessed
+	// name of something the policy hides.
+	if s.hasVisibleBelow(rel, false) {
+		return fmt.Errorf("%s is a directory; use list_files with path=\"%s\"", rel, rel)
 	}
 	return fmt.Errorf("%s is not a file in this repository's working tree (not tracked, or ignored by .gitignore). Use find_files or list_files to locate it", rel)
 }

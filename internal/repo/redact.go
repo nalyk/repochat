@@ -28,7 +28,7 @@ var redactRules = []redactRule{
 	{name: "github-token", re: regexp.MustCompile(`\b(?:gh[pousr]_[A-Za-z0-9]{36,255}|github_pat_[A-Za-z0-9_]{22,255})`)},
 	{name: "gitlab-token", re: regexp.MustCompile(`\bglpat-[A-Za-z0-9_\-]{20,}`)},
 	{name: "slack-token", re: regexp.MustCompile(`\bxox[abeprs]-[A-Za-z0-9\-]{10,}`)},
-	{name: "slack-webhook", re: regexp.MustCompile(`https://hooks\.slack\.com/services/[A-Za-z0-9/_\-]{20,}`)},
+	{name: "slack-webhook", re: regexp.MustCompile(`(?:https://)?hooks\.slack\.com/services/[A-Za-z0-9/_\-]{20,}`)},
 	{name: "api-key", re: regexp.MustCompile(`\bsk-(?:proj|svcacct|admin|ant)-[A-Za-z0-9_\-]{20,}|\bsk-[A-Za-z0-9]{32,}`)},
 	{name: "google-api-key", re: regexp.MustCompile(`\bAIza[0-9A-Za-z_\-]{35}`)},
 	{name: "stripe-key", re: regexp.MustCompile(`\b(?:sk|rk)_live_[0-9A-Za-z]{16,}`)},
@@ -42,9 +42,13 @@ var redactRules = []redactRule{
 }
 
 // Every rule above needs at least one of these literals to match, so text
-// without any of them can skip the regular expressions entirely.
+// without any of them can skip the regular expressions entirely. A rule whose
+// literal is missing here is not applied at all unless another rule's literal
+// happens to be near: "github" does not contain "gh", so fine-grained tokens
+// need their own entry. TestEveryMaskingRuleFiresOnItsOwn holds each rule to
+// this list.
 var redactTriggers = []string{
-	"PRIVATE KEY", "AKIA", "ASIA", "gh", "glpat-", "xox", "hooks.slack.com",
+	"PRIVATE KEY", "AKIA", "ASIA", "gh", "github_pat_", "glpat-", "xox", "hooks.slack.com",
 	"sk-", "AIza", "_live_", "SG.", "npm_", "pypi-", "hf_", "dop_v1_", "eyJ", "://",
 }
 
@@ -55,8 +59,12 @@ var (
 	// punctuation follows it on the line (so code that merely mentions the
 	// marker, e.g. strings.HasPrefix(s, "-----BEGIN …-----"), is left alone).
 	pemBeginTail = regexp.MustCompile(`^(?:\\n|\\r|["'` + "`" + `\s,+])*$`)
-	pemBodyLine  = regexp.MustCompile(`^[+\- ]?\s*["'` + "`" + `]?(?:[A-Za-z0-9+/=]+|Proc-Type:.*|DEK-Info:.*|Version:.*|Comment:.*)?(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?\s*$`)
-	base64Line   = regexp.MustCompile(`^[+\- ]?\s*[A-Za-z0-9+/]{40,}={0,2}\s*$`)
+	// A line inside a key block: base64 data, or one of the headers a block
+	// may carry (RFC 1421 for PEM, RFC 4880 for OpenPGP armor). The headers
+	// are named one by one: any other line ends the masking, so text that
+	// merely follows a marker is not swallowed.
+	pemBodyLine = regexp.MustCompile(`^[+\- ]?\s*["'` + "`" + `]?(?:[A-Za-z0-9+/=]+|(?:Proc-Type|DEK-Info|Version|Comment|MessageID|Hash|Charset):.*)?(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?\s*$`)
+	base64Line  = regexp.MustCompile(`^[+\- ]?\s*[A-Za-z0-9+/]{40,}={0,2}\s*$`)
 )
 
 const pemPlaceholder = "[REDACTED:private-key]"
@@ -159,16 +167,31 @@ func keyEdge(b []byte) int {
 }
 
 func (st *RedactState) Line(s string) string {
+	out, _ := st.Masked(s)
+	return out
+}
+
+// Masked is Line that also reports how many masks the returned line carries
+// (a line inside a key block carries one). Callers that show only some lines
+// count from this instead of looking for the marker's spelling in their
+// output, which ordinary source text can contain.
+func (st *RedactState) Masked(s string) (string, int) {
 	if !st.r.Enabled() {
-		return s
+		return s, 0
 	}
 	if st.inPEM {
 		if pemEnd.MatchString(s) {
 			st.inPEM = false
-			return diffPrefix(s) + pemPlaceholder
+			return diffPrefix(s) + pemPlaceholder, 1
 		}
 		if pemBodyLine.MatchString(s) {
-			return diffPrefix(s) + pemPlaceholder
+			return diffPrefix(s) + pemPlaceholder, 1
+		}
+		// The markers git writes into an unresolved merge conflict are not
+		// key material, but they do not end the block either: both sides of
+		// the conflict are still the key.
+		if keyConflictMarker.MatchString(s) {
+			return s, 0
 		}
 		st.inPEM = false // not key material after all: stop masking
 	}
@@ -177,9 +200,65 @@ func (st *RedactState) Line(s string) string {
 	if loc := pemBegin.FindStringIndex(out); loc != nil && pemBeginTail.MatchString(out[loc[1]:]) {
 		st.inPEM = true
 		st.count++
-		return out[:loc[0]] + pemPlaceholder
+		return out[:loc[0]] + pemPlaceholder, n + 1
 	}
-	return out
+	return out, n
+}
+
+// keyConflictMarker matches a line git inserts around the sides of a merge
+// conflict, optionally behind a diff or blame prefix.
+var keyConflictMarker = regexp.MustCompile(`^[ +\-]?(?:<{7}|={7}|>{7}|\|{7})(?: .*)?\r?$`)
+
+// maskMarker matches a marker as the rules above write it.
+var maskMarker = regexp.MustCompile(`\[REDACTED:[a-z0-9-]{1,40}\]`)
+
+// maskMarkerMax bounds the length of a marker, so looking for one around a
+// position never has to examine the whole line.
+const maskMarkerMax = len("[REDACTED:]") + 40
+
+// shownMasks is the number of masked values visible in an excerpt of a line
+// on which the redactor masked n values. The redactor's count is the upper
+// limit, so text that merely spells a marker out is never counted on its
+// own; the excerpt lowers it when it leaves a marker out.
+func shownMasks(excerpt string, n int) int {
+	if n == 0 {
+		return 0
+	}
+	return min(n, len(maskMarker.FindAllStringIndex(excerpt, -1)))
+}
+
+// cutPoint returns where to cut already masked text to at most limit bytes:
+// on a character boundary and never inside a mask marker. Text must be
+// masked before it is shortened, never after: a secret that loses its end to
+// the cut is no longer recognised and would be shown in part.
+func cutPoint(s string, limit int) int {
+	if limit >= len(s) {
+		return len(s)
+	}
+	cut := max(limit, 0)
+	for cut > 0 && !utf8.RuneStart(s[cut]) {
+		cut--
+	}
+	if start, _, ok := markerAround(s, cut); ok {
+		cut = start
+	}
+	return cut
+}
+
+// markerAround returns the bounds of the mask marker that pos falls strictly
+// inside, so text is never cut through a marker (half a marker reads like
+// leftover secret text). ok is false when pos is not inside one.
+func markerAround(s string, pos int) (start, end int, ok bool) {
+	if pos <= 0 || pos >= len(s) {
+		return 0, 0, false
+	}
+	lo, hi := max(0, pos-maskMarkerMax), min(len(s), pos+maskMarkerMax)
+	for _, loc := range maskMarker.FindAllStringIndex(s[lo:hi], -1) {
+		if lo+loc[0] < pos && pos < lo+loc[1] {
+			return lo + loc[0], lo + loc[1], true
+		}
+	}
+	return 0, 0, false
 }
 
 func diffPrefix(s string) string {
@@ -223,9 +302,28 @@ func (r *Redactor) Text(s string, hunks bool) (string, int) {
 	return strings.Join(lines, "\n"), count
 }
 
+// invisibleControl reports the characters beyond the C0/C1 controls that
+// Sanitize shows as an escape: line and paragraph separators, the
+// bidirectional embedding, override and isolate controls (they reorder what a
+// reader sees), and the Unicode tag characters U+E0000–U+E007F (invisible, and
+// a known way to carry a hidden copy of ASCII text to a model). Zero-width
+// joiners and variation selectors are left alone: ordinary text needs them.
+func invisibleControl(r rune) bool {
+	switch {
+	case r == 0x2028 || r == 0x2029: // line and paragraph separator
+		return true
+	case r >= 0x202A && r <= 0x202E, r >= 0x2066 && r <= 0x2069: // embeddings, overrides, isolates
+		return true
+	case r >= 0xE0000 && r <= 0xE007F: // tags
+		return true
+	}
+	return false
+}
+
 // Sanitize makes text safe to show to a model and to print on a terminal:
-// invalid UTF-8 becomes U+FFFD and control characters other than newline and
-// tab (including ESC, DEL and the C1 range) become visible \xNN escapes.
+// invalid UTF-8 becomes U+FFFD, control characters other than newline and
+// tab (including ESC, DEL and the C1 range) become visible \xNN escapes, and
+// the characters of invisibleControl become \uNNNN or \UNNNNNNNN escapes.
 func Sanitize(s string) string {
 	clean := true
 	for i := 0; i < len(s); i++ {
@@ -251,9 +349,15 @@ func Sanitize(s string) string {
 			b.WriteString(`\x`)
 			b.WriteByte(hex[(r>>4)&0xf])
 			b.WriteByte(hex[r&0xf])
-		case r == '\u2028' || r == '\u2029' || r == '\u202e' || r == '\u2066' || r == '\u2067' || r == '\u2068' || r == '\u2069' || r == '\u202a' || r == '\u202b' || r == '\u202d' || r == '\u202c':
-			b.WriteString(`\u`)
-			for shift := 12; shift >= 0; shift -= 4 {
+		case invisibleControl(r):
+			shift := 12
+			if r > 0xFFFF {
+				b.WriteString(`\U`)
+				shift = 28
+			} else {
+				b.WriteString(`\u`)
+			}
+			for ; shift >= 0; shift -= 4 {
 				b.WriteByte(hex[(r>>shift)&0xf])
 			}
 		default:

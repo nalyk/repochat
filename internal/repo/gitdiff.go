@@ -42,11 +42,16 @@ type DiffOptions struct {
 
 // DiffResult is the rendered comparison.
 type DiffResult struct {
-	Text       string
-	Files      int      // changed paths that may be shown
-	Withheld   int      // changed paths withheld by policy
-	Shown      int      // patches included
-	Omitted    []string // allowed paths whose patch was left out (size budget)
+	Text     string
+	Files    int      // changed paths that may be shown
+	Withheld int      // changed paths withheld by policy
+	Shown    int      // patches included
+	Omitted  []string // allowed paths whose patch was left out (size budget)
+	Cut      []string // paths whose patch was included but cut short
+	// Incomplete reports anything else that a caller asking for patches did
+	// not get: changed files beyond the listing limit, a patch held back
+	// because it could not be examined for key material, a conflicted file.
+	Incomplete bool
 	Redactions int
 	BaseOID    string
 	TargetOID  string
@@ -80,12 +85,29 @@ type diffPlan struct {
 	title    string
 }
 
-var diffFlags = []string{"--no-color", "--no-ext-diff", "--no-textconv", "-M"}
+// diffFlags go on every diff command, whichever sides it compares.
+//
+// A submodule is a separate repository with its own untrusted configuration
+// and files that are not in the served set, so git must never enter one:
+// --submodule=short keeps a changed gitlink a two-line "Subproject commit"
+// patch (the "log" and "diff" formats print the submodule's commit subjects
+// or run `git diff` inside it, under its configuration), and
+// --ignore-submodules=dirty stops git from running `git status` inside it.
+// Both are given on the command line because that is the only level that
+// outranks .gitmodules and submodule.<name>.* settings.
+var diffFlags = []string{"--no-color", "--no-ext-diff", "--no-textconv", "--submodule=short", "--ignore-submodules=dirty", "-M"}
 
 // Diff compares two states of the repository. Only changes to served paths
 // are ever shown; a change set that touches nothing but withheld paths yields
 // counts and no content, and never widens into an unrestricted diff.
 func (r *Repo) Diff(ctx context.Context, o DiffOptions, budget int) (*DiffResult, error) {
+	// Every mode has a commit or the index on its old side, and the removed
+	// lines of a patch are content that exists only there. (The index is
+	// refused as well: without history it is the last commit plus whatever
+	// was staged, and the two cannot be told apart from here.)
+	if r.Opts.NoHistory {
+		return nil, ErrNoHistory
+	}
 	plan, err := r.planDiff(ctx, o)
 	if err != nil {
 		return nil, err
@@ -94,6 +116,12 @@ func (r *Repo) Diff(ctx context.Context, o DiffOptions, budget int) (*DiffResult
 		if err := r.beforeWorktreeRead(ctx); err != nil {
 			return nil, err
 		}
+		private, release, err := r.withPrivateIndex(ctx)
+		if err != nil {
+			return nil, err
+		}
+		defer release()
+		ctx = private
 	}
 	res := &DiffResult{}
 	if plan.old.kind == sideTree {
@@ -135,18 +163,17 @@ func (r *Repo) planDiff(ctx context.Context, o DiffOptions) (*diffPlan, error) {
 		headSide = diffSide{kind: sideTree, oid: empty}
 		headName = "(no commits yet)"
 	}
-	const submodules = "--ignore-submodules=dirty"
 	switch mode {
 	case DiffHead:
-		return &diffPlan{cmd: []string{"diff", submodules}, revs: []string{headSide.oid},
+		return &diffPlan{cmd: []string{"diff"}, revs: []string{headSide.oid},
 			old: headSide, new: diffSide{kind: sideWorktree},
 			title: "all uncommitted changes: " + headName + " → working tree"}, nil
 	case DiffStaged:
-		return &diffPlan{cmd: []string{"diff", "--cached", submodules}, revs: []string{headSide.oid},
+		return &diffPlan{cmd: []string{"diff", "--cached"}, revs: []string{headSide.oid},
 			old: headSide, new: diffSide{kind: sideIndex},
 			title: "staged changes: " + headName + " → index"}, nil
 	case DiffWorktree:
-		return &diffPlan{cmd: []string{"diff", submodules},
+		return &diffPlan{cmd: []string{"diff"},
 			old: diffSide{kind: sideIndex}, new: diffSide{kind: sideWorktree},
 			title: "unstaged changes: index → working tree"}, nil
 	case DiffRange:
@@ -220,6 +247,11 @@ func (r *Repo) diffEntries(ctx context.Context, p *diffPlan, paths []string) ([]
 	malformed := errors.New("unexpected output from git diff; refusing to continue")
 	toks := splitNUL(out)
 	var entries []diffEntry
+	// A path with unresolved merge conflicts has several versions in the
+	// index. When the index is one side of the comparison git reports it as
+	// "U", and reports it again as "M" when a working-tree file exists. It is
+	// one changed path: the unmerged state is kept, the duplicate dropped.
+	at := map[string]int{}
 	for i := 0; i < len(toks); {
 		st := toks[i]
 		i++
@@ -240,6 +272,15 @@ func (r *Repo) diffEntries(ctx context.Context, p *diffPlan, paths []string) ([]
 			e.Path = toks[i]
 			i++
 		}
+		if j, dup := at[e.Path]; dup {
+			if e.Status == 'U' {
+				entries[j] = e
+			} else if entries[j].Status != 'U' {
+				return nil, malformed
+			}
+			continue
+		}
+		at[e.Path] = len(entries)
 		entries = append(entries, e)
 	}
 	if len(entries) == 0 {
@@ -277,7 +318,8 @@ func (r *Repo) diffEntries(ctx context.Context, p *diffPlan, paths []string) ([]
 		stats[path] = s
 	}
 	for i := range entries {
-		if s, ok := stats[entries[i].Path]; ok {
+		// An unmerged path has no single old version to count lines against.
+		if s, ok := stats[entries[i].Path]; ok && entries[i].Status != 'U' {
 			entries[i].Add, entries[i].Del, entries[i].Binary, entries[i].HasStat = s[0], s[1], s[2] == 1, true
 		}
 	}
@@ -307,12 +349,9 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 	}
 	var paths []string
 	for _, p := range o.Paths {
-		rel, err := CheckPath(p)
+		rel, err := r.gitPath(ctx, p)
 		if err != nil {
 			return "", err
-		}
-		if reason := pol.Check(rel); reason != "" {
-			return "", withheldError(rel, reason)
 		}
 		paths = append(paths, rel)
 	}
@@ -352,6 +391,7 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 	for i, e := range allowed {
 		if i == maxDiffListed {
 			fmt.Fprintf(&b, "  … %d more changed file(s) not listed; narrow with paths=[…]\n", len(allowed)-i)
+			res.Incomplete = true
 			break
 		}
 		name := SanitizeLine(e.Path)
@@ -359,6 +399,8 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 			name = SanitizeLine(e.Orig) + " → " + name
 		}
 		switch {
+		case e.Status == 'U':
+			fmt.Fprintf(&b, "  %c  %s  (unresolved merge conflict)\n", e.Status, name)
 		case e.Binary:
 			fmt.Fprintf(&b, "  %c  %s  (binary)\n", e.Status, name)
 		default:
@@ -392,8 +434,17 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 		context = 3
 	}
 	perFile := max(minPerFilePatch, budget/2)
-	var skippedType []string
+	var skippedType, unmerged []string
 	for i, e := range allowed {
+		if e.Status == 'U' {
+			// git would print a combined ("diff --cc") patch against the
+			// versions in the index. Its hunks have another shape than the
+			// masking of key material follows, so it is never shown; the
+			// conflict can be read as an ordinary patch against HEAD.
+			unmerged = append(unmerged, e.Path)
+			res.Incomplete = true
+			continue
+		}
 		if i >= maxDiffPatches || b.Len() >= budget {
 			res.Omitted = append(res.Omitted, e.Path)
 			continue
@@ -430,6 +481,7 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 		masked, n, ok := r.maskPatch(ctx, plan, e, patch)
 		if !ok {
 			fmt.Fprintf(&b, "\n── %s ──\n[patch omitted: it may contain private-key material and the full file versions could not be examined]\n", SanitizeLine(e.Path))
+			res.Incomplete = true
 			continue
 		}
 		res.Redactions += n
@@ -440,10 +492,20 @@ func (r *Repo) renderDiff(ctx context.Context, plan *diffPlan, o DiffOptions, bu
 		if truncated {
 			fmt.Fprintf(&b, "[patch for %s cut at %s; read the file or request it alone with paths=[…] and a smaller context]\n",
 				SanitizeLine(e.Path), humanSize(int64(room)))
+			res.Cut = append(res.Cut, e.Path)
 		}
 	}
 	if len(skippedType) > 0 {
 		fmt.Fprintf(&b, "\n[patch not shown for %s: it changed between a file and a directory; see the entries beneath it]\n", SanitizeLine(strings.Join(skippedType, ", ")))
+	}
+	if len(unmerged) > 0 {
+		list, more := unmerged, ""
+		if len(list) > 30 {
+			more = fmt.Sprintf(" and %d more", len(list)-30)
+			list = list[:30]
+		}
+		fmt.Fprintf(&b, "\n[no patch for %s%s: unresolved merge conflict, so the index holds several versions. Use git_diff with mode=head to see the file against HEAD, or read_file to see the conflict markers]\n",
+			SanitizeLine(strings.Join(list, ", ")), more)
 	}
 	if len(res.Omitted) > 0 {
 		list := res.Omitted
@@ -468,6 +530,9 @@ func (o DiffOptions) hasContext() bool { return o.Context >= 0 }
 var (
 	hunkHeader = regexp.MustCompile(`^@@ -(\d+)(?:,\d+)? \+(\d+)(?:,\d+)? @@`)
 	base64Only = regexp.MustCompile(`^["'` + "`" + `]?[A-Za-z0-9+/=]{4,}(?:\\n|\\r)*["'` + "`" + `]?\s*[+,]?$`)
+	// conflictMarker matches the lines git writes around the versions of a
+	// conflicted region (including the "|||||||" of the diff3 style).
+	conflictMarker = regexp.MustCompile(`^(?:<{7}|={7}|>{7}|\|{7})(?: .*)?$`)
 )
 
 // keyish reports whether a patch line, or the context text git appends to a
@@ -593,6 +658,12 @@ func pemLineSet(text string) map[int]bool {
 			}
 			if pemBodyLine.MatchString(l) {
 				set[i+1] = true
+				continue
+			}
+			// A merge conflict inside a key leaves git's markers between
+			// two versions of its lines. Both versions are key material, so
+			// a marker does not end the block.
+			if conflictMarker.MatchString(l) {
 				continue
 			}
 			in = false

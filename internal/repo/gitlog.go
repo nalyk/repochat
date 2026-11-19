@@ -42,6 +42,7 @@ type LogResult struct {
 	More       bool
 	NextSkip   int
 	Redactions int
+	StatsCut   bool // with stats: a commit changed more files than are listed
 }
 
 type logCommit struct {
@@ -150,17 +151,16 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 		if r.red.Enabled() {
 			return nil, errors.New("pickaxe is unavailable while secret masking is on, because it would let a search test for masked text. Use grep (commit messages) or search_code (current files) instead; the repository owner can start repochat with --no-redact to enable it")
 		}
-		args = append(args, "-S"+o.Pickaxe)
+		// -S compares file versions; without --no-textconv git first runs
+		// them through the textconv program the repository configured.
+		args = append(args, "--no-textconv", "-S"+o.Pickaxe)
 		filters = append(filters, "pickaxe="+strconv.Quote(o.Pickaxe))
 	}
 	var pathArgs []string
 	if o.Path != "" {
-		rel, err := CheckPath(o.Path)
+		rel, err := r.gitPath(ctx, o.Path)
 		if err != nil {
 			return nil, err
-		}
-		if reason := pol.Check(rel); reason != "" {
-			return nil, withheldError(rel, reason)
 		}
 		pathArgs = []string{rel}
 		filters = append(filters, "path="+rel)
@@ -262,11 +262,12 @@ func (r *Repo) Log(ctx context.Context, o LogOptions) (*LogResult, error) {
 		}
 		b.WriteString(line + "\n    " + SanitizeLine(subject) + "\n")
 		if o.WithStats {
-			stat, err := r.commitStat(ctx, c, pol)
+			stat, cut, err := r.commitStat(ctx, c, pol)
 			if err != nil {
 				return nil, err
 			}
 			b.WriteString(stat)
+			res.StatsCut = res.StatsCut || cut
 		}
 	}
 	if len(commits) == 0 {
@@ -299,14 +300,16 @@ func (r *Repo) firstParentPlan(ctx context.Context, oid, parents string) (*diffP
 	return r.treePlan(base, oid, ""), nil
 }
 
-func (r *Repo) commitStat(ctx context.Context, c logCommit, pol *Policy) (string, error) {
+// commitStat lists the served files a commit changed. cut reports that the
+// commit changed more of them than are listed.
+func (r *Repo) commitStat(ctx context.Context, c logCommit, pol *Policy) (text string, cut bool, err error) {
 	plan, err := r.firstParentPlan(ctx, c.oid, c.parents)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	entries, err := r.diffEntries(ctx, plan, nil)
 	if err != nil {
-		return "", err
+		return "", false, err
 	}
 	var b strings.Builder
 	shown, withheld := 0, 0
@@ -335,7 +338,7 @@ func (r *Repo) commitStat(ctx context.Context, c logCommit, pol *Policy) (string
 	if withheld > 0 {
 		fmt.Fprintf(&b, "      (+ %d withheld path(s))\n", withheld)
 	}
-	return b.String(), nil
+	return b.String(), shown > maxLogStatFiles, nil
 }
 
 // pickaxeTouchesServedPath reports whether the commit adds or removes the
@@ -366,11 +369,36 @@ type BlameResult struct {
 	Total      int
 	Rev        string
 	Redactions int
+	// Truncated reports that git's output was cut and Last is therefore
+	// earlier than the line that was asked for.
+	Truncated bool
 }
 
 type blameCommit struct {
 	author, summary string
 	when            int64
+	zone            *time.Location // from author-tz; UTC when absent or malformed
+}
+
+// maxBlameOutput bounds what is read from `git blame --porcelain`, which
+// repeats the content of every line it attributes.
+const maxBlameOutput = 8 << 20
+
+// parseGitZone turns git's "+HHMM" / "-HHMM" into a fixed zone.
+func parseGitZone(s string) *time.Location {
+	if len(s) != 5 || (s[0] != '+' && s[0] != '-') {
+		return time.UTC
+	}
+	hh, err1 := strconv.Atoi(s[1:3])
+	mm, err2 := strconv.Atoi(s[3:5])
+	if err1 != nil || err2 != nil || hh > 14 || mm > 59 {
+		return time.UTC
+	}
+	offset := hh*3600 + mm*60
+	if s[0] == '-' {
+		offset = -offset
+	}
+	return time.FixedZone(s, offset)
 }
 
 // Blame attributes lines [start, end] of a file to the commits that last
@@ -380,7 +408,7 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 	if r.Opts.NoHistory {
 		return nil, ErrNoHistory
 	}
-	rel, err := CheckPath(p)
+	rel, err := r.gitPath(ctx, p)
 	if err != nil {
 		return nil, err
 	}
@@ -401,7 +429,7 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 			return nil, err
 		}
 	} else {
-		_, entry, _, err := r.authorizeFile(ctx, p)
+		_, entry, _, err := r.authorizeFile(ctx, rel)
 		if err != nil {
 			return nil, err
 		}
@@ -464,7 +492,7 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 		args = append(args, oid)
 	}
 	args = append(args, "--", rel)
-	out, _, code, err := r.gitRaw(ctx, 8<<20, args...)
+	out, truncated, code, err := r.gitRaw(ctx, maxBlameOutput, args...)
 	if err != nil {
 		return nil, err
 	}
@@ -472,22 +500,36 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 		return nil, r.gitFailure("blame", out)
 	}
 
+	// A record is "<commit> <orig> <final> [<n>]", the commit's details the
+	// first time it appears, then the line itself after a tab. A line counts
+	// as attributed only once its record is complete: the output may have
+	// been cut anywhere, including inside a header.
 	commits := map[string]*blameCommit{}
 	lineCommit := map[int]string{}
 	var cur *blameCommit
-	for _, l := range strings.Split(string(out), "\n") {
+	pending, pendingID := 0, ""
+	records := strings.Split(string(out), "\n")
+	if truncated {
+		records = records[:len(records)-1] // the last one is incomplete
+	}
+	for _, l := range records {
 		switch {
-		case l == "" || l[0] == '\t':
+		case l == "":
 			continue
+		case l[0] == '\t':
+			if pending > 0 {
+				lineCommit[pending] = pendingID
+			}
+			pending = 0
 		case len(l) >= 40 && isHex(l[:40]):
 			f := strings.Fields(l)
 			if len(f) < 3 {
 				continue
 			}
-			n, _ := strconv.Atoi(f[2])
-			lineCommit[n] = f[0]
+			pending, _ = strconv.Atoi(f[2])
+			pendingID = f[0]
 			if commits[f[0]] == nil {
-				commits[f[0]] = &blameCommit{}
+				commits[f[0]] = &blameCommit{zone: time.UTC}
 			}
 			cur = commits[f[0]]
 		case cur == nil:
@@ -495,12 +537,40 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 			cur.author = l[len("author "):]
 		case strings.HasPrefix(l, "author-time "):
 			cur.when, _ = strconv.ParseInt(l[len("author-time "):], 10, 64)
+		case strings.HasPrefix(l, "author-tz "):
+			cur.zone = parseGitZone(l[len("author-tz "):])
 		case strings.HasPrefix(l, "summary "):
 			cur.summary = l[len("summary "):]
 		}
 	}
+	// Only the lines git attributed are shown. A gap is never filled in with
+	// a guess: when the output was cut the range ends at the cut, and for any
+	// other gap there is no result at all.
+	attributed := start - 1
+	for attributed < end && lineCommit[attributed+1] != "" {
+		attributed++
+	}
+	wanted := end
+	if attributed < end {
+		if !truncated {
+			return nil, errors.New("unexpected output from git blame")
+		}
+		if attributed < start {
+			return nil, fmt.Errorf("line %d of %s is too long for blame (git's output for it alone exceeds %s)", start, rel, humanSize(maxBlameOutput))
+		}
+		end = attributed
+		for id := range commits { // drop commits seen only in the incomplete record
+			used := false
+			for n := start; n <= end && !used; n++ {
+				used = lineCommit[n] == id
+			}
+			if !used {
+				delete(commits, id)
+			}
+		}
+	}
 
-	res := &BlameResult{First: start, Last: end, Total: total, Rev: oid}
+	res := &BlameResult{First: start, Last: end, Total: total, Rev: oid, Truncated: end < wanted}
 	label := func(id string) string {
 		if strings.Trim(id, "0") == "" {
 			return "uncommitted"
@@ -542,10 +612,17 @@ func (r *Repo) Blame(ctx context.Context, p string, start, end int, rev string) 
 		}
 		summary, n := r.red.Line(c.summary)
 		res.Redactions += n
-		fmt.Fprintf(&b, "  %s  %s  %s  %s\n", short(id), time.Unix(c.when, 0).UTC().Format("2006-01-02"),
+		// The day is the one on the author's calendar: the author time in
+		// the zone recorded in the commit, which is what git_log prints
+		// (--date=short). Neither UTC nor this machine's zone is used, so a
+		// commit shows the same date in every tool and on every machine.
+		fmt.Fprintf(&b, "  %s  %s  %s  %s\n", short(id), time.Unix(c.when, 0).In(c.zone).Format("2006-01-02"),
 			SanitizeLine(c.author), SanitizeLine(summary))
 	}
-	if end < total {
+	if res.Truncated {
+		fmt.Fprintf(&b, "[blame output was cut at %s (very long lines): lines %d-%d were NOT attributed. Call git_blame again with start_line=%d]\n",
+			humanSize(maxBlameOutput), end+1, wanted, end+1)
+	} else if end < total {
 		fmt.Fprintf(&b, "[more lines: call git_blame again with start_line=%d]\n", end+1)
 	}
 	res.Redactions += st.Count()
@@ -583,6 +660,7 @@ func isHex(s string) bool {
 type RefsResult struct {
 	Text                   string
 	Local, Remote, TagRefs int
+	Truncated              bool // a section listed fewer refs than it counted
 }
 
 // Refs lists local branches, remote branches and tags. filter is an optional
@@ -637,6 +715,7 @@ func (r *Repo) Refs(ctx context.Context, filter string) (*RefsResult, error) {
 		for i, x := range refs {
 			if i == maxRefsPerKind {
 				fmt.Fprintf(&b, "  … %d more; narrow with filter\n", len(refs)-i)
+				res.Truncated = true
 				break
 			}
 			mark := " "

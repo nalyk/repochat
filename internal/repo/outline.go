@@ -22,6 +22,7 @@ const (
 type OutlineResult struct {
 	Text       string
 	Items      int
+	Truncated  bool // more definitions were found than are listed
 	Language   string
 	Exact      bool // true when produced by a real parser
 	Redactions int
@@ -63,8 +64,15 @@ func (r *Repo) Outline(ctx context.Context, p string) (*OutlineResult, error) {
 	}
 	st := r.red.NewState()
 	masked := make([]string, len(lines))
+	masks := map[int]int{} // line number → values masked on that line
 	for i, l := range lines {
-		masked[i] = st.Line(strings.TrimSuffix(l, "\r"))
+		if i&1023 == 0 && ctx.Err() != nil {
+			return nil, ctx.Err() // the caller gave up; do not keep its worker slot
+		}
+		var n int
+		if masked[i], n = st.Masked(strings.TrimSuffix(l, "\r")); n > 0 {
+			masks[i+1] = n
+		}
 	}
 
 	ext := strings.ToLower(path.Ext(rel))
@@ -77,6 +85,14 @@ func (r *Repo) Outline(ctx context.Context, p string) (*OutlineResult, error) {
 		items, note = goOutline(data)
 		if items == nil {
 			res.Exact = false
+		}
+		// These lines are rendered from the syntax tree of the raw source,
+		// so they are masked here; each is a single line by construction.
+		masks = map[int]int{}
+		for i := range items {
+			var n int
+			items[i].text, n = r.red.Line(items[i].text)
+			masks[items[i].line] = max(masks[items[i].line], n) // several names can share a line
 		}
 	}
 	if items == nil {
@@ -106,11 +122,13 @@ func (r *Repo) Outline(ctx context.Context, p string) (*OutlineResult, error) {
 			fmt.Fprintf(&b, "[… %d more definitions not listed]\n", len(items)-i)
 			break
 		}
+		// Shortened only now that it is masked; see cutPoint.
 		t := it.text
 		if len(t) > 220 {
-			t = t[:220] + " …"
+			t = t[:cutPoint(t, 220)] + " …"
 		}
 		fmt.Fprintf(&b, "%*d| %s\n", width, it.line, Sanitize(t))
+		res.Redactions += shownMasks(t, masks[it.line])
 	}
 	if len(items) == 0 {
 		b.WriteString("[no definitions recognised; use read_file]\n")
@@ -118,7 +136,7 @@ func (r *Repo) Outline(ctx context.Context, p string) (*OutlineResult, error) {
 		b.WriteString("[read a definition with read_file start_line=<line>]\n")
 	}
 	res.Items = len(items)
-	res.Redactions = strings.Count(b.String(), "[REDACTED:")
+	res.Truncated = len(items) > maxOutlineItems
 	res.Text = b.String()
 	return res, nil
 }

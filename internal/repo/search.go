@@ -7,7 +7,9 @@ import (
 	"fmt"
 	"os"
 	"regexp"
+	"regexp/syntax"
 	"runtime"
+	"runtime/debug"
 	"sort"
 	"strings"
 	"sync"
@@ -15,9 +17,12 @@ import (
 	"unicode/utf8"
 )
 
+// searchTimeBudget is how long one call may scan before it returns what it
+// has with a cursor. A variable so a test can make the budget run out.
+var searchTimeBudget = 10 * time.Second
+
 const (
 	searchFileLimit   = 4 << 20
-	searchTimeBudget  = 10 * time.Second
 	searchLineDisplay = 300
 	DefaultSearchHits = 50
 	MaxSearchHits     = 200
@@ -72,8 +77,9 @@ type fileScan struct {
 	matches    int
 	lastMatch  int
 	more       bool   // stopped early because the per-call hit limit was reached
-	skip       string // "", "binary", "oversized", "unreadable", "missing", "changed"
+	skip       string // "", "binary", "oversized", "unreadable", "missing", "changed", "cancelled"
 	redactions int
+	failed     bool // the scan panicked; the whole call is reported as an error
 }
 
 // Search scans the served working-tree files for the query.
@@ -87,7 +93,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 	o.MaxResults = min(o.MaxResults, MaxSearchHits)
 	o.Context = min(max(o.Context, 0), MaxSearchContext)
 
-	re, literal, err := compileQuery(o)
+	m, err := compileQuery(o)
 	if err != nil {
 		return nil, err
 	}
@@ -104,9 +110,20 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 		return nil, err
 	}
 
+	// A count of the withheld files that include/exclude select would let a
+	// caller test patterns against withheld names and recover them one
+	// character at a time. The number reported is therefore the repository's
+	// total, whatever the filters are. Only when the owner lets the model see
+	// withheld names anyway is the count the one for the selected scope.
 	var files []string
-	withheldInScope, notFiles := 0, 0
+	withheld, notFiles := snap.WithheldTotal(), 0
+	if r.Opts.ShowWithheldNames {
+		withheld = 0
+	}
 	for _, e := range snap.Entries {
+		if e.Withheld != "" && !r.Opts.ShowWithheldNames {
+			continue
+		}
 		if len(include) > 0 && !matchAny(include, e.Path) {
 			continue
 		}
@@ -115,7 +132,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 		}
 		switch {
 		case e.Withheld != "":
-			withheldInScope++
+			withheld++
 		case e.Kind != KindRegular:
 			notFiles++
 		default:
@@ -131,6 +148,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 		}
 	}
 
+	caller := ctx
 	ctx, cancel := context.WithCancel(ctx)
 	defer cancel()
 	deadline := time.Now().Add(searchTimeBudget)
@@ -159,7 +177,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 				if i == o.FromFile {
 					from = o.FromLine
 				}
-				slots[i].res = r.scanFile(op, files[i], re, literal, o, from)
+				slots[i].res = r.scan(ctx, op, files[i], m, o, from)
 				close(slots[i].done)
 			}
 		}()
@@ -180,6 +198,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 	var body strings.Builder
 	scanned := 0
 	stop := ""
+	failed := ""
 	for i := o.FromFile; i < len(files) && stop == ""; i++ {
 		select {
 		case <-slots[i].done:
@@ -187,11 +206,17 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 			stop = "cancelled"
 			continue
 		case <-time.After(time.Until(deadline)):
+			// Still inside the file this call resumed in: the line position
+			// must survive, or the next call reports its matches again.
 			stop = "time budget"
-			res.NextFile, res.NextLine, res.Resumable = i, 0, true
+			res.NextFile, res.NextLine, res.Resumable = i, o.fromLineFor(i), true
 			continue
 		}
 		fs := slots[i].res
+		if fs.failed {
+			stop, failed = "error", files[i]
+			continue
+		}
 		scanned++
 		if fs.skip != "" {
 			skipped[fs.skip]++
@@ -218,15 +243,25 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 			o2 := o
 			o2.MaxResults = limit
 			op := r.newOpener()
-			fs = r.scanFile(op, files[i], re, literal, o2, o.fromLineFor(i))
+			fs = r.scan(ctx, op, files[i], m, o2, o.fromLineFor(i))
 			op.Close()
-			if fs.skip != "" || fs.matches == 0 {
+			if fs.failed || fs.skip != "" || fs.matches == 0 {
 				break
 			}
 			block = renderFileHits(files[i], fs.lines)
 		}
-		if fs.skip != "" || fs.matches == 0 {
-			continue // the file changed between the two scans
+		// The file changed between the two scans. One that can no longer be
+		// read was not searched, and the result has to say so.
+		if fs.failed {
+			stop, failed = "error", files[i]
+			continue
+		}
+		if fs.skip != "" {
+			skipped[fs.skip]++
+			continue
+		}
+		if fs.matches == 0 {
+			continue
 		}
 		body.WriteString(block)
 		res.Matches += fs.matches
@@ -246,6 +281,14 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 	}
 	cancel()
 	wg.Wait()
+	if failed != "" {
+		return nil, fmt.Errorf("internal error while searching %s; the search was abandoned (the details are in repochat's local log on the user's machine)", SanitizeLine(failed))
+	}
+	// A caller that gave up gets its own error: files skipped because of the
+	// cancellation must never be presented as a finished search.
+	if err := caller.Err(); err != nil {
+		return nil, err
+	}
 	if stop != "" {
 		res.Complete = false
 	}
@@ -283,8 +326,11 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 	if n := skipped["unreadable"] + skipped["changed"]; n > 0 {
 		details = append(details, fmt.Sprintf("%d unreadable", n))
 	}
-	if withheldInScope > 0 {
-		details = append(details, fmt.Sprintf("%d withheld file(s) not searched", withheldInScope))
+	switch {
+	case withheld > 0 && r.Opts.ShowWithheldNames:
+		details = append(details, fmt.Sprintf("%d withheld file(s) not searched", withheld))
+	case withheld > 0:
+		details = append(details, fmt.Sprintf("%d withheld file(s) not searched (the repository's total, whatever include/exclude select)", withheld))
 	}
 	if notFiles > 0 {
 		details = append(details, fmt.Sprintf("%d symlink/submodule entr(ies) not searched", notFiles))
@@ -294,7 +340,7 @@ func (r *Repo) Search(ctx context.Context, o SearchOptions, budget int) (*Search
 	}
 	if res.Complete {
 		note := ""
-		if skipped["binary"]+skipped["oversized"]+skipped["missing"]+skipped["unreadable"]+skipped["changed"]+withheldInScope > 0 {
+		if skipped["binary"]+skipped["oversized"]+skipped["missing"]+skipped["unreadable"]+skipped["changed"]+withheld > 0 {
 			note = " (of the files that could be searched)"
 		}
 		fmt.Fprintf(&b, "[complete%s for file set %s (file contents are read live): %s]\n", note, snap.Generation, strings.Join(details, "; "))
@@ -332,9 +378,21 @@ func (o SearchOptions) fromLineFor(i int) int {
 	return 0
 }
 
-func compileQuery(o SearchOptions) (*regexp.Regexp, []byte, error) {
+// matcher is the compiled query. One matcher decides whether a line matches
+// and where its excerpt goes, always on the line in the form it is shown in.
+type matcher struct {
+	re  *regexp.Regexp // nil: plain substring search for lit
+	lit string
+	// wholeFile says that a match on some line implies a match on the file
+	// taken as one text, so a file without any match can be rejected before
+	// it is split into lines. It does not hold for a pattern with ^, $, \A
+	// or \z: those mean the edges of a line here, not of the file.
+	wholeFile bool
+}
+
+func compileQuery(o SearchOptions) (*matcher, error) {
 	if !o.Regex && !o.WholeWord && o.CaseSensitive {
-		return nil, []byte(o.Query), nil // plain substring search
+		return &matcher{lit: o.Query, wholeFile: true}, nil // plain substring search
 	}
 	pattern := o.Query
 	if !o.Regex {
@@ -348,15 +406,81 @@ func compileQuery(o SearchOptions) (*regexp.Regexp, []byte, error) {
 	}
 	re, err := regexp.Compile(pattern)
 	if err != nil {
-		return nil, nil, fmt.Errorf("invalid regular expression (RE2 syntax, no look-around or backreferences): %v", err)
+		return nil, fmt.Errorf("invalid regular expression (RE2 syntax, no look-around or backreferences): %v", err)
 	}
-	return re, nil, nil
+	return &matcher{re: re, wholeFile: !anchored(pattern)}, nil
 }
 
-// scanFile finds matches in one file. With redaction on, a file that may
-// contain secret spans is masked first and the predicate runs on the masked
-// text, so hidden bytes can never influence whether or where a match occurs.
-func (r *Repo) scanFile(op *opener, rel string, re *regexp.Regexp, literal []byte, o SearchOptions, afterLine int) fileScan {
+// anchored reports whether a pattern refers to the start or the end of the
+// text it is matched against. When in doubt it says yes: the caller then
+// takes the slower path that looks at every line.
+func anchored(pattern string) bool {
+	tree, err := syntax.Parse(pattern, syntax.Perl)
+	if err != nil {
+		return true
+	}
+	var walk func(*syntax.Regexp) bool
+	walk = func(re *syntax.Regexp) bool {
+		switch re.Op {
+		case syntax.OpBeginLine, syntax.OpEndLine, syntax.OpBeginText, syntax.OpEndText:
+			return true
+		}
+		for _, sub := range re.Sub {
+			if walk(sub) {
+				return true
+			}
+		}
+		return false
+	}
+	return walk(tree)
+}
+
+// find returns the first match in s as byte offsets into s.
+func (m *matcher) find(s string) (start, end int, ok bool) {
+	if m.re == nil {
+		i := strings.Index(s, m.lit)
+		return i, i + len(m.lit), i >= 0
+	}
+	loc := m.re.FindStringIndex(s)
+	if loc == nil {
+		return 0, 0, false
+	}
+	return loc[0], loc[1], true
+}
+
+// inText reports whether the query matches anywhere in data taken as one text.
+func (m *matcher) inText(data []byte) bool {
+	if m.re == nil {
+		return bytes.Contains(data, []byte(m.lit))
+	}
+	return m.re.Match(data)
+}
+
+// scan is scanFile made safe to run in a goroutine of its own: a panic there
+// would end the whole server, so it is turned into a failed result (and the
+// call into an error). What exactly went wrong stays in the local log.
+func (r *Repo) scan(ctx context.Context, op *opener, rel string, m *matcher, o SearchOptions, afterLine int) (fs fileScan) {
+	defer func() {
+		if p := recover(); p != nil {
+			if r.Logf != nil {
+				r.Logf("panic while searching %s: %v\n%s", SanitizeLine(rel), p, debug.Stack())
+			}
+			fs = fileScan{failed: true}
+		}
+	}()
+	return r.scanFile(ctx, op, rel, m, o, afterLine)
+}
+
+// scanFile finds matches in one file. Every line is first brought into the
+// form read_file shows (line terminator removed, invalid UTF-8 replaced,
+// secret-looking values masked) and only that form is used from then on: the
+// predicate runs on it, so hidden bytes can never influence whether or where
+// a match occurs, and the excerpt is cut from it, so match offsets always
+// refer to the text they are applied to.
+func (r *Repo) scanFile(ctx context.Context, op *opener, rel string, m *matcher, o SearchOptions, afterLine int) fileScan {
+	if ctx.Err() != nil {
+		return fileScan{skip: "cancelled"}
+	}
 	data, _, truncated, err := op.ReadAll(rel, searchFileLimit)
 	switch {
 	case errors.Is(err, os.ErrNotExist):
@@ -372,72 +496,71 @@ func (r *Repo) scanFile(op *opener, rel string, re *regexp.Regexp, literal []byt
 		return fileScan{skip: "binary"}
 	}
 	text := string(data)
+	valid := utf8.Valid(data)
 	masked := r.red.MayContain(text)
-	if !masked {
-		// Fast reject on the raw bytes: it is the disclosed representation.
-		if literal != nil {
-			if !bytes.Contains(data, literal) {
-				return fileScan{}
+	// Fast reject on the raw bytes. Sound only when they are what the lines
+	// will show (nothing to mask, nothing to replace) and the pattern cannot
+	// tell a line from the whole file.
+	if !masked && valid && m.wholeFile && !m.inText(data) {
+		return fileScan{}
+	}
+
+	lines := strings.Split(text, "\n")
+	if n := len(lines); n > 0 && lines[n-1] == "" {
+		lines = lines[:n-1]
+	}
+	st := r.red.NewState()
+	masks := map[int]int{} // line index → values masked on that line
+	for i, l := range lines {
+		if i&1023 == 0 && ctx.Err() != nil {
+			return fileScan{skip: "cancelled"}
+		}
+		l = strings.TrimSuffix(l, "\r")
+		if !valid {
+			l = strings.ToValidUTF8(l, string(utf8.RuneError))
+		}
+		if masked {
+			var n int
+			if l, n = st.Masked(l); n > 0 {
+				masks[i] = n
 			}
-		} else if !re.Match(data) {
-			return fileScan{}
 		}
+		lines[i] = l
 	}
 
-	rawLines := strings.Split(text, "\n")
-	if n := len(rawLines); n > 0 && rawLines[n-1] == "" {
-		rawLines = rawLines[:n-1]
-	}
+	// Lines are searched whole, however long: a line cut short would hide
+	// matches past the cut and make patterns such as `word$` match at it.
+	type hit struct{ line, start, end int }
 	var fs fileScan
-	lines := rawLines
-	if masked {
-		st := r.red.NewState()
-		lines = make([]string, len(rawLines))
-		for i, l := range rawLines {
-			lines[i] = st.Line(strings.TrimSuffix(l, "\r"))
-		}
-	}
-
-	matchLine := func(s string) (int, bool) {
-		if literal != nil {
-			i := strings.Index(s, string(literal))
-			return i, i >= 0
-		}
-		loc := re.FindStringIndex(s)
-		if loc == nil {
-			return 0, false
-		}
-		return loc[0], true
-	}
-
-	var hits []int // 0-based line indexes
+	var hits []hit
 	for i, l := range lines {
 		if i+1 <= afterLine {
 			continue
 		}
-		if len(l) > maxLineBytes {
-			l = l[:maxLineBytes]
+		if i&1023 == 0 && ctx.Err() != nil {
+			return fileScan{skip: "cancelled"}
 		}
-		if _, ok := matchLine(l); ok {
-			if len(hits) >= o.MaxResults {
-				fs.more = true
-				break
-			}
-			hits = append(hits, i)
+		start, end, ok := m.find(l)
+		if !ok {
+			continue
 		}
+		if len(hits) >= o.MaxResults {
+			fs.more = true
+			break
+		}
+		hits = append(hits, hit{i, start, end})
 	}
-	fs.redactions = 0
 	if len(hits) == 0 {
 		return fs
 	}
 	fs.matches = len(hits)
-	fs.lastMatch = hits[len(hits)-1] + 1
+	fs.lastMatch = hits[len(hits)-1].line + 1
 
 	shown := map[int]bool{}
-	isHit := map[int]bool{}
+	found := make(map[int]hit, len(hits))
 	for _, h := range hits {
-		isHit[h] = true
-		for c := h - o.Context; c <= h+o.Context; c++ {
+		found[h.line] = h
+		for c := h.line - o.Context; c <= h.line+o.Context; c++ {
 			if c >= 0 && c < len(lines) {
 				shown[c] = true
 			}
@@ -449,40 +572,46 @@ func (r *Repo) scanFile(op *opener, rel string, re *regexp.Regexp, literal []byt
 	}
 	sort.Ints(order)
 	for _, i := range order {
-		l := strings.TrimSuffix(lines[i], "\r")
-		at := 0
-		if isHit[i] {
-			at, _ = matchLine(l)
-		}
-		shownText := windowLine(l, at)
-		fs.redactions += strings.Count(shownText, "[REDACTED:")
-		fs.lines = append(fs.lines, searchLine{no: i + 1, text: shownText, match: isHit[i]})
+		h, isHit := found[i] // the zero hit puts a context line's excerpt at its start
+		text := windowLine(lines[i], h.start, h.end)
+		fs.lines = append(fs.lines, searchLine{no: i + 1, text: text, match: isHit})
+		// Counted from what the redactor did to this line, not by looking
+		// for "[REDACTED:" alone: ordinary source text can spell that out.
+		fs.redactions += shownMasks(text, masks[i])
 	}
 	return fs
 }
 
-// windowLine shortens a long line to a window around the match position.
-func windowLine(s string, at int) string {
-	s = strings.ToValidUTF8(s, "\uFFFD")
+// windowLine shortens a long line to an excerpt that begins shortly before
+// the match s[start:end] and therefore contains it (as much of it as fits).
+// s is the line in the form the match was found in, valid UTF-8. The excerpt
+// never begins or ends inside a mask marker.
+func windowLine(s string, start, end int) string {
+	start = min(max(start, 0), len(s))
+	end = min(max(end, start), len(s))
 	if len(s) <= searchLineDisplay {
-		return strings.TrimRight(s, " \t")
+		// Trailing blanks are dropped, unless the match reaches into them.
+		return s[:max(end, len(strings.TrimRight(s, " \t")))]
 	}
-	start := max(at-80, 0)
-	if start > len(s) {
-		start = 0
+	from := max(start-80, 0)
+	for from > 0 && !utf8.RuneStart(s[from]) {
+		from--
 	}
-	for start > 0 && !utf8.RuneStart(s[start]) {
-		start--
+	if a, _, ok := markerAround(s, from); ok {
+		from = a
 	}
-	end := min(start+searchLineDisplay, len(s))
-	for end < len(s) && !utf8.RuneStart(s[end]) {
-		end--
+	to := min(from+searchLineDisplay, len(s))
+	for to < len(s) && !utf8.RuneStart(s[to]) {
+		to--
 	}
-	out := s[start:end]
-	if start > 0 {
+	if _, b, ok := markerAround(s, to); ok {
+		to = b
+	}
+	out := s[from:to]
+	if from > 0 {
 		out = "…" + out
 	}
-	if end < len(s) {
+	if to < len(s) {
 		out += "…"
 	}
 	return out

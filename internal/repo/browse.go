@@ -237,18 +237,25 @@ func (r *Repo) List(ctx context.Context, o ListOptions) (*ListResult, error) {
 	}
 	prefix := ""
 	if strings.TrimSpace(o.Path) != "" && o.Path != "." && o.Path != "/" {
-		rel, err := CheckPath(o.Path)
+		// The directory is the first reading of the path (see pathForms)
+		// that names something the caller may see; a listing prints
+		// directory names as they are, blanks and backslashes included.
+		forms, err := pathForms(o.Path)
 		if err != nil {
 			return nil, err
 		}
-		if e, ok := snap.Lookup(rel); ok {
-			if e.Withheld != "" {
-				return nil, withheldError(rel, e.Withheld)
+		rel := forms[len(forms)-1]
+		for _, f := range forms {
+			if reason := snap.Policy.Check(f); reason != "" {
+				return nil, withheldError(f, reason)
 			}
-			return nil, fmt.Errorf("%s is a file, not a directory; use read_file to read it", rel)
-		}
-		if reason := snap.Policy.Check(rel); reason != "" {
-			return nil, withheldError(rel, reason)
+			if _, ok := snap.Lookup(f); ok {
+				return nil, fmt.Errorf("%s is a file, not a directory; use read_file to read it", f)
+			}
+			if snap.hasVisibleBelow(f, r.Opts.ShowWithheldNames) {
+				rel = f
+				break
+			}
 		}
 		prefix = rel + "/"
 	}
@@ -273,24 +280,26 @@ func (r *Repo) List(ctx context.Context, o ListOptions) (*ListResult, error) {
 		path  string // set for files that should be stat'ed
 		entry Entry
 	}
+	// Unless the owner chose to show their names, withheld paths take no part
+	// in anything below: not in the rows, not in the counts, and not in the
+	// difference between an empty listing and a directory that does not
+	// exist. Otherwise the caller's path and glob could be tested against
+	// withheld names and recover them one character at a time.
 	var rows []row
-	withheld := map[string]int{}
-	inScope := 0
+	underPrefix, inScope := 0, 0
 	collapsed := map[string]int{}
 	for _, e := range snap.Entries {
+		if e.Withheld != "" && !r.Opts.ShowWithheldNames {
+			continue
+		}
 		if prefix != "" && !strings.HasPrefix(e.Path, prefix) {
 			continue
 		}
+		underPrefix++
 		if glob != nil && !glob.Match(e.Path) {
 			continue
 		}
 		inScope++
-		if e.Withheld != "" {
-			withheld[e.Withheld]++
-			if !r.Opts.ShowWithheldNames {
-				continue
-			}
-		}
 		relToPrefix := e.Path[len(prefix):]
 		segs := strings.Split(relToPrefix, "/")
 		if len(segs) > o.Depth {
@@ -303,13 +312,11 @@ func (r *Repo) List(ctx context.Context, o ListOptions) (*ListResult, error) {
 		}
 		rows = append(rows, row{path: e.Path, entry: e})
 	}
-	if inScope == 0 {
-		if prefix != "" {
-			return nil, fmt.Errorf("no files under %s (not a directory in this repository's view, or everything in it is ignored by .gitignore)", strings.TrimSuffix(prefix, "/"))
-		}
-		if glob != nil {
-			return &ListResult{Text: fmt.Sprintf("FILES matching %q: none\n", o.Glob), Generation: snap.Generation}, nil
-		}
+	if underPrefix == 0 && prefix != "" {
+		return nil, fmt.Errorf("no files under %s (not a directory in this repository's view, or everything in it is ignored by .gitignore or withheld)", strings.TrimSuffix(prefix, "/"))
+	}
+	if inScope == 0 && glob != nil {
+		return &ListResult{Text: fmt.Sprintf("FILES matching %q: none\n", SanitizeLine(o.Glob)) + withheldNote(snap, r.Opts.ShowWithheldNames), Generation: snap.Generation}, nil
 	}
 	res := &ListResult{Total: len(rows), Generation: snap.Generation}
 	if o.Offset > len(rows) {
@@ -332,7 +339,9 @@ func (r *Repo) List(ctx context.Context, o ListOptions) (*ListResult, error) {
 	for _, rw := range rows[o.Offset:end] {
 		res.Shown++
 		if rw.path == "" {
-			fmt.Fprintf(&b, "  %s  (%d file(s) below; list it with path=%q)\n", SanitizeLine(rw.text), collapsed[rw.text], strings.TrimSuffix(rw.text, "/"))
+			// The name between plain quotes, not Go-quoted: a doubled
+			// backslash would be the name of a different directory.
+			fmt.Fprintf(&b, "  %s  (%d file(s) below; list it with path=\"%s\")\n", SanitizeLine(rw.text), collapsed[rw.text], SanitizeLine(strings.TrimSuffix(rw.text, "/")))
 			continue
 		}
 		e := rw.entry
@@ -359,25 +368,37 @@ func (r *Repo) List(ctx context.Context, o ListOptions) (*ListResult, error) {
 				note += " · merge conflict"
 			}
 		}
-		fmt.Fprintf(&b, "  %s  %s\n", SanitizeLine(e.Path), note)
+		fmt.Fprintf(&b, "  %s  %s%s\n", SanitizeLine(e.Path), note, exactNameNote(e.Path))
 	}
 	if end < len(rows) {
 		res.NextOffset = end
 		b.WriteString("[more entries: pass the cursor from @meta to continue]\n")
 	}
-	if n := sumCounts(withheld); n > 0 && !r.Opts.ShowWithheldNames {
-		fmt.Fprintf(&b, "[%d path(s) here are withheld by policy and not listed (%s)]\n", n, summarizeCounts(withheld))
-	}
+	b.WriteString(withheldNote(snap, r.Opts.ShowWithheldNames))
 	res.Text = b.String()
 	return res, nil
 }
 
-func sumCounts(m map[string]int) int {
-	n := 0
-	for _, c := range m {
-		n += c
+// exactNameNote spells out a name that begins or ends with a blank, which the
+// layout of a listing cannot show. Such a name has to be passed back exactly
+// (see pathForms); without the note the model would not know it has blanks.
+func exactNameNote(p string) string {
+	if p == strings.TrimSpace(p) {
+		return ""
 	}
-	return n
+	return `  [exact name: "` + SanitizeLine(p) + `"]`
+}
+
+// withheldNote tells the model that withheld paths exist, so "not listed" is
+// not taken for "absent". It is built from the repository's totals alone and
+// is therefore the same whatever was asked for: it cannot be used to test a
+// path or pattern against the names of withheld files.
+func withheldNote(snap *Snapshot, namesShown bool) string {
+	n := snap.WithheldTotal()
+	if n == 0 || namesShown {
+		return ""
+	}
+	return fmt.Sprintf("[%d path(s) in this repository are withheld by policy (%s); they are never listed, whether or not they match this request]\n", n, snap.WithheldSummary())
 }
 
 // ---------------------------------------------------------------------------
@@ -417,9 +438,14 @@ func (r *Repo) Find(ctx context.Context, query string, limit int) (*FindResult, 
 		path string
 		rank int
 	}
+	// As in List: a withheld path is never matched against the query unless
+	// the owner shows withheld names, so the answer says nothing about them.
 	var hits []hit
 	withheld := 0
 	for _, e := range snap.Entries {
+		if e.Withheld != "" && !r.Opts.ShowWithheldNames {
+			continue
+		}
 		lp := strings.ToLower(e.Path)
 		rank := -1
 		if glob != nil {
@@ -468,7 +494,7 @@ func (r *Repo) Find(ctx context.Context, query string, limit int) (*FindResult, 
 	}
 	b.WriteString("\n")
 	for _, h := range hits[:res.Shown] {
-		b.WriteString("  " + SanitizeLine(h.path) + "\n")
+		b.WriteString("  " + SanitizeLine(h.path) + exactNameNote(h.path) + "\n")
 	}
 	if len(hits) > limit {
 		b.WriteString("[more matches exist: use a more specific query or a pattern such as src/**/*.ts]\n")
@@ -479,6 +505,7 @@ func (r *Repo) Find(ctx context.Context, query string, limit int) (*FindResult, 
 	if len(hits) == 0 && withheld == 0 {
 		b.WriteString("[no file path matches. Files ignored by .gitignore are not part of this view. To search file CONTENTS use search_code]\n")
 	}
+	b.WriteString(withheldNote(snap, r.Opts.ShowWithheldNames))
 	res.Text = b.String()
 	return res, nil
 }

@@ -284,7 +284,7 @@ func TestBudgets(t *testing.T) {
 	if next < 2 || meta["complete"] != false || meta["total_lines"].(float64) != 4000 {
 		t.Errorf("a cut read must say where to continue: %v", meta)
 	}
-	text, meta, err = call(t, tools, "read_file", map[string]any{"path": "big.txt", "start_line": next, "max_lines": 3})
+	text, _, err = call(t, tools, "read_file", map[string]any{"path": "big.txt", "start_line": next, "max_lines": 3})
 	if err != nil || !strings.Contains(text, fmt.Sprintf("%d| 0123456789", int(next))) {
 		t.Errorf("continuation failed: %v\n%s", err, text[:min(len(text), 300)])
 	}

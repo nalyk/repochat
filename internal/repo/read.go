@@ -78,12 +78,14 @@ func (r *Repo) ReadFile(ctx context.Context, p string, start, maxLines int, rev 
 		state = "tracked, has merge conflicts"
 	}
 	res := &ReadResult{Path: rel, Size: fi.Size()}
-	r.render(res, f, start, maxLines, budget, state)
+	if err := r.render(ctx, res, f, start, maxLines, budget, state); err != nil {
+		return nil, err
+	}
 	return res, nil
 }
 
 func (r *Repo) readAtRev(ctx context.Context, p string, start, maxLines int, rev string, budget int) (*ReadResult, error) {
-	rel, err := CheckPath(p)
+	forms, err := pathForms(p)
 	if err != nil {
 		return nil, err
 	}
@@ -95,15 +97,36 @@ func (r *Repo) readAtRev(ctx context.Context, p string, start, maxLines int, rev
 	if err != nil {
 		return nil, err
 	}
-	if reason := pol.Check(rel); reason != "" {
-		return nil, withheldError(rel, reason)
+	// As in authorizeFile: the path exactly as given first, the policy before
+	// any look at whether the file exists.
+	rel := forms[len(forms)-1]
+	for _, f := range forms {
+		if reason := pol.Check(f); reason != "" {
+			return nil, withheldError(f, reason)
+		}
+		if f == rel {
+			break
+		}
+		_, code, err := r.gitText(ctx, "cat-file", "-e", sha+":"+f)
+		if err != nil {
+			return nil, err
+		}
+		if code == 0 {
+			rel = f
+			break
+		}
 	}
 	data, err := r.blobAt(ctx, sha, rel)
 	if err != nil {
+		if _, cleanErr := CheckPath(p); cleanErr != nil && rel == p {
+			return nil, cleanErr // the literal reading was the only one, and it names nothing
+		}
 		return nil, err
 	}
 	res := &ReadResult{Path: rel, Rev: sha, Size: int64(len(data))}
-	r.render(res, bytes.NewReader(data), start, maxLines, budget, "at "+sha[:10])
+	if err := r.render(ctx, res, bytes.NewReader(data), start, maxLines, budget, "at "+sha[:10]); err != nil {
+		return nil, err
+	}
 	return res, nil
 }
 
@@ -140,8 +163,11 @@ func (r *Repo) blobAt(ctx context.Context, sha, rel string) ([]byte, error) {
 	return data, nil
 }
 
-// render fills res from the content in src.
-func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget int, state string) {
+// render fills res from the content in src. The whole content is scanned
+// (for the line total and the masking state), which for a large file takes
+// longer than a call may: the scan gives up with ctx's error as soon as ctx
+// is done.
+func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start, maxLines, budget int, state string) error {
 	br := bufio.NewReaderSize(src, 64<<10)
 	var notes []string
 
@@ -152,14 +178,14 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 		if len(raw) > maxUTF16Bytes {
 			res.Binary = true
 			res.Text = fmt.Sprintf("FILE %s · %s · UTF-16 text larger than %s: not shown\n", res.Path, humanSize(res.Size), humanSize(maxUTF16Bytes))
-			return
+			return nil
 		}
 		br = bufio.NewReaderSize(strings.NewReader(decodeUTF16(raw)), 64<<10)
 		notes = append(notes, "decoded from UTF-16")
 	case bytes.IndexByte(head, 0) >= 0:
 		res.Binary = true
 		res.Text = fmt.Sprintf("FILE %s · %s · binary file: content not shown\n", res.Path, humanSize(res.Size))
-		return
+		return nil
 	case bytes.HasPrefix(head, []byte("version https://git-lfs.github.com/spec/")) && res.Size < 1024:
 		notes = append(notes, "this is a Git LFS pointer; the real content is stored outside the repository and is not available")
 	}
@@ -171,7 +197,13 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 	width := len(strconv.Itoa(start + maxLines))
 
 	for {
-		line, n, long, key, err := readLongLine(br)
+		if lineNo&255 == 0 && ctx.Err() != nil {
+			return ctx.Err()
+		}
+		line, n, long, key, err := readLongLine(ctx, br)
+		if errors.Is(err, context.Canceled) || errors.Is(err, context.DeadlineExceeded) {
+			return err
+		}
 		if n == 0 && err != nil {
 			break
 		}
@@ -247,16 +279,21 @@ func (r *Repo) render(res *ReadResult, src io.Reader, start, maxLines, budget in
 		fmt.Fprintf(&b, "[note: %s]\n", n)
 	}
 	res.Text = b.String()
+	return nil
 }
 
 // readLongLine reads one line of any length, keeping at most maxLineBytes of
 // it. n is the number of bytes consumed; long reports that the line was cut.
 // key reports private-key markers found anywhere in a cut line, including
 // the part that is not returned (see keyEdge), so masking cannot be defeated
-// by pushing a marker past the cut.
-func readLongLine(br *bufio.Reader) (line []byte, n int, long bool, key int, err error) {
+// by pushing a marker past the cut. A line can be as long as the file, so the
+// read gives up with ctx's error when ctx is done.
+func readLongLine(ctx context.Context, br *bufio.Reader) (line []byte, n int, long bool, key int, err error) {
 	var carry []byte // tail of the previous chunk, for markers split across chunks
 	for {
+		if long && ctx.Err() != nil {
+			return nil, n, long, key, ctx.Err()
+		}
 		chunk, e := br.ReadSlice('\n')
 		n += len(chunk)
 		if room := maxLineBytes - len(line); room > 0 {
@@ -293,10 +330,7 @@ func truncateLine(s string, alreadyCut bool) string {
 		}
 		return s
 	}
-	cut := maxLineDisplay
-	for cut > 0 && !utf8.RuneStart(s[cut]) {
-		cut--
-	}
+	cut := cutPoint(s, maxLineDisplay) // s is masked already; see cutPoint
 	return s[:cut] + fmt.Sprintf(" …[+%d bytes]", len(s)-cut)
 }
 
