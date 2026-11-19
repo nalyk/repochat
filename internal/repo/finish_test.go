@@ -5,7 +5,9 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -746,7 +748,8 @@ func TestFinishSaysWhenTheCheckoutMayBePartlyUpdated(t *testing.T) {
 	if err == nil {
 		t.Fatal("Finish succeeded")
 	}
-	mustContain(t, err.Error(), "partly updated", "index.lock", "git merge --ff-only", "git reset --merge")
+	mustContain(t, err.Error(), "partly updated", "index.lock", "git merge --ff-only", "git checkout --no-overlay")
+	mustNotContain(t, err.Error(), "git reset --merge")
 	mustNotContain(t, err.Error(), "nothing was changed")
 	now := c.info(t)
 	if now.Head != info.Head || !exists(info.Workspace) || !strings.Contains(branches(t, c.f.dir), info.Branch) {
@@ -873,5 +876,117 @@ func TestUpdateIsUndoneWhenAWithheldFileStaysOnDisk(t *testing.T) {
 	}
 	if exists(filepath.Join(c.ws.Root, ".env")) {
 		t.Error("the withheld file is still in the workspace")
+	}
+}
+
+// shCmd runs a shell command line in dir with the environment gitCmd uses.
+func shCmd(t *testing.T, dir, line string) {
+	t.Helper()
+	cmd := exec.Command("sh", "-c", line)
+	cmd.Dir = dir
+	cmd.Env = append(os.Environ(),
+		"GIT_AUTHOR_NAME=Ada", "GIT_AUTHOR_EMAIL=ada@example.com",
+		"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@example.com",
+		"GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Fatalf("sh -c %q: %v\n%s", line, err, out)
+	}
+}
+
+var backticked = regexp.MustCompile("`([^`]+)`")
+
+func TestPartlyUpdatedCheckoutRecoveryCommandsWork(t *testing.T) {
+	for _, way := range []string{"complete", "go back"} {
+		t.Run(way, func(t *testing.T) {
+			c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n", "gone.txt": "g\n", "u.txt": "u\n"}, nil)
+			c.apply(t, "work",
+				Change{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), Text: "A"},
+				Change{Op: "replace", Path: "b.txt", From: c.anchor(t, "b.txt", 1), Text: "B"},
+				Change{Op: "create", Path: "new.txt", Text: "new"},
+				Change{Op: "remove", Path: "gone.txt", FileTag: c.tag(t, "gone.txt")})
+			tip := gitCmd(t, c.f.dir, "rev-parse", "HEAD")
+			land := c.head(t)
+			write(t, c.f.dir, "u.txt", "owner's edit\n") // unrelated, uncommitted
+			lock := filepath.Join(c.f.dir, ".git", "index.lock")
+			// A merge killed while writing files: some of them written, the
+			// index and the branch at the old tip, git's lock left behind.
+			c.s.beforeOwnerMerge = func() {
+				write(t, c.f.dir, ".git/index.lock", "")
+				write(t, c.f.dir, "a.txt", "A\n")
+				write(t, c.f.dir, "new.txt", "new\n")
+				os.Remove(filepath.Join(c.f.dir, "gone.txt"))
+			}
+			_, err := c.s.Finish(bg, false, "")
+			if err == nil {
+				t.Fatal("Finish succeeded")
+			}
+			msg := err.Error()
+			mustContain(t, msg, "partly updated", tip, land, lock)
+			cmds := backticked.FindAllStringSubmatch(msg, -1)
+			if len(cmds) != 4 {
+				t.Fatalf("want two commands to complete and two to go back, got %d in:\n%s", len(cmds), msg)
+			}
+			os.Remove(lock) // "if no git command is running, remove the lock"
+			run := cmds[:2]
+			if way == "go back" {
+				run = cmds[2:]
+			}
+			for _, m := range run {
+				shCmd(t, c.f.dir, m[1])
+			}
+			if got := gitCmd(t, c.f.dir, "status", "--porcelain", "--untracked-files=all"); got != "M u.txt" {
+				t.Errorf("status after %s:\n%s", way, got)
+			}
+			if mustRead(t, filepath.Join(c.f.dir, "u.txt")) != "owner's edit\n" {
+				t.Error("the owner's unrelated edit was lost")
+			}
+			if way == "complete" {
+				if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != land {
+					t.Errorf("main at %s, want %s", got, land)
+				}
+				return
+			}
+			if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != tip {
+				t.Errorf("main at %s, want %s", got, tip)
+			}
+			if gitCmd(t, c.f.dir, "symbolic-ref", "HEAD") != "refs/heads/main" {
+				t.Error("HEAD left main")
+			}
+			for p, want := range map[string]string{"a.txt": "a\n", "b.txt": "b\n", "gone.txt": "g\n"} {
+				if got := mustRead(t, filepath.Join(c.f.dir, p)); got != want {
+					t.Errorf("%s = %q, want %q", p, got, want)
+				}
+			}
+			if exists(filepath.Join(c.f.dir, "new.txt")) {
+				t.Error("new.txt is still there")
+			}
+		})
+	}
+}
+
+func TestSessionBranchBeingRebasedElsewhereIsKept(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	branch := c.branch(t)
+	base := c.base(t)
+	other := filepath.Join(t.TempDir(), "other")
+	gitCmd(t, c.f.dir, "worktree", "add", "-q", "--force", other, branch)
+	// A rebase that stops: the other worktree shows as detached.
+	cmd := exec.Command("git", "-c", "core.hooksPath=/dev/null", "rebase", "-q", "--exec", "false", base)
+	cmd.Dir = other
+	cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_EDITOR=true",
+		"GIT_COMMITTER_NAME=Ada", "GIT_COMMITTER_EMAIL=ada@example.com")
+	if out, err := cmd.CombinedOutput(); err == nil {
+		t.Fatalf("the rebase did not stop:\n%s", out)
+	}
+	if wt := gitCmd(t, c.f.dir, "worktree", "list", "--porcelain"); strings.Count(wt, "branch refs/heads/"+branch) != 1 {
+		t.Fatalf("expected the rebasing worktree to show as detached:\n%s", wt)
+	}
+	err := c.s.Abandon(bg, true)
+	if err == nil || !strings.Contains(err.Error(), branch) || !strings.Contains(err.Error(), "checked out") {
+		t.Fatalf("Abandon: %v", err)
+	}
+	if !strings.Contains(branches(t, c.f.dir), branch) {
+		t.Error("the branch being rebased was deleted")
 	}
 }

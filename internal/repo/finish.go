@@ -610,7 +610,7 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 		return nil, finishRefused("the commit to land does not descend from %s", rec.StartBranch)
 	}
 	if ownerIndexLocked(owner) {
-		return nil, finishRefused("another git command is running in the repository's checkout (its git index is locked by .git/index.lock); retry once it has finished, or, if no git command is running, the owner can remove that file")
+		return nil, finishRefused("another git command is running in the repository's checkout (its git index is locked by %s); retry once it has finished, or, if no git command is running, the owner can remove that file", SanitizeLine(ownerIndexLock(owner)))
 	}
 	before, err := ownerWorktreeState(wctx, owner)
 	if err != nil {
@@ -641,17 +641,25 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	// What the merge left: only a branch verifiably at the landed commit
 	// lets the session go.
 	fin := &Finished{Commit: land, Squashed: squash, Files: files, RunsLater: later}
-	now, _ := s.ownerTip(wctx, rec)
-	if now != land {
+	now, err := s.ownerTip(wctx, rec)
+	switch {
+	case err != nil:
+		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge of %s as done, but where %s is now could not be read (%v); the session, its branch and its workspace are kept. Check the checkout with git status and git log.", land, rec.StartBranch, err))
+		return fin, nil
+	case now != land:
 		fin.Commit = now
-		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge as done, but %s is not at the merged commit %s; the session, its branch and its workspace are kept. Check the checkout with git status and git log.", rec.StartBranch, land[:12]))
+		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge as done, but %s is at %s, not at the merged commit %s; the session, its branch and its workspace are kept. Check the checkout with git status and git log.", rec.StartBranch, now, land))
 		return fin, nil
 	}
 	fin.Notes = notes
 	keepBranch := false
-	if err := onBranch(wctx); err != nil {
+	switch branch, err := s.ownerBranch(wctx); {
+	case err != nil:
 		keepBranch = true
-		fin.Notes = append(fin.Notes, fmt.Sprintf("WARNING: %s is at the merged commit, but the repository's checkout is no longer on it (another git command switched it); the session branch %s is kept.", rec.StartBranch, rec.Branch))
+		fin.Notes = append(fin.Notes, fmt.Sprintf("WARNING: %s is at the merged commit, but the branch the repository's checkout is on could not be read (%v); the session branch %s is kept.", rec.StartBranch, err, rec.Branch))
+	case branch != rec.StartBranch:
+		keepBranch = true
+		fin.Notes = append(fin.Notes, fmt.Sprintf("WARNING: %s is at the merged commit, but the repository's checkout is no longer on it (another git command switched it during the merge); the session branch %s is kept.", rec.StartBranch, rec.Branch))
 	}
 	if squash {
 		fin.Notes = append(fin.Notes, "The commit is unsigned: repochat runs no signing program.")
@@ -690,8 +698,14 @@ const ownerMergeTimeout = 10 * time.Minute
 // ownerIndexLocked reports whether git's index lock exists in the owner's
 // checkout.
 func ownerIndexLocked(owner *Repo) bool {
-	_, err := os.Lstat(filepath.Join(owner.GitDir, "index.lock"))
+	_, err := os.Lstat(ownerIndexLock(owner))
 	return !errors.Is(err, os.ErrNotExist)
+}
+
+// ownerIndexLock is the path of git's index lock for the owner's checkout
+// (in its own git directory, which for a linked worktree is not .git).
+func ownerIndexLock(owner *Repo) string {
+	return filepath.Join(owner.GitDir, "index.lock")
 }
 
 // ownerWorktreeState is what git status says of the owner's checkout. It
@@ -715,7 +729,23 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 		}
 		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
 	}
-	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only %s did not complete. The session, its branch and its workspace are kept. To recover, in the checkout: if no git command is running, remove .git/index.lock; then either complete the merge with `git merge --ff-only %s` or go back with `git reset --merge`", land[:12], land)
+	// git refuses a fast-forward when a path it touches has local changes, so
+	// every path that differs between tip and land held exactly tip's content
+	// before the merge: those paths, and only those, are set to one side.
+	// Renames are listed as a deletion and an addition (--no-renames); -r
+	// keeps xargs from running git checkout without paths, which would switch
+	// the checkout to the commit.
+	diff := func(filter string) string {
+		return fmt.Sprintf("git diff -z --no-renames --name-only --diff-filter=%s %s %s", filter, tip, land)
+	}
+	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only did not complete. %s is still at %s; the commit being landed is %s. The session, its branch and its workspace are kept. "+
+		"To recover, in the checkout, first, if no git command is running, remove the lock file %s. "+
+		"Then, to complete the merge, run `%s | xargs -0 -r git checkout --no-overlay %s --` and then `git merge --ff-only %s`. "+
+		"Or, to go back to %s, run `%s | xargs -0 -r rm -f --` and then `%s | xargs -0 -r git checkout --no-overlay %s --`. "+
+		"Both touch only the paths the merge changes: git refuses a fast-forward when one of them has uncommitted changes, so before the merge each of them held exactly %s's content, and other uncommitted changes are kept",
+		rec.StartBranch, tip, land, SanitizeLine(ownerIndexLock(s.owner)),
+		diff("ADMT"), land, land,
+		tip, diff("A"), diff("DMT"), tip, tip)
 }
 
 // deleteBranch deletes the session branch, unless a worktree other than the
@@ -728,7 +758,7 @@ func (s *Sessions) deleteBranch(ctx context.Context, rec *sessionRecord, head st
 	case err != nil:
 		return fmt.Errorf("The session branch %s is kept: whether it is checked out elsewhere could not be read (%v)", rec.Branch, err)
 	case elsewhere:
-		return fmt.Errorf("The session branch %s is kept: it is checked out in another worktree or checkout", rec.Branch)
+		return fmt.Errorf("The session branch %s is kept: it is checked out in another worktree or checkout (or being rebased or bisected there)", rec.Branch)
 	}
 	if _, err := s.owner.git(ctx, 4096, "update-ref", "-m", "repochat: session ended", "-d", ref, head); err != nil {
 		return fmt.Errorf("The session branch %s could not be deleted; delete it with: git branch -D %s", rec.Branch, rec.Branch)
@@ -758,6 +788,49 @@ func (s *Sessions) checkedOutElsewhere(ctx context.Context, rec *sessionRecord) 
 		}
 		if filepath.Clean(path) != rec.Workspace && resolveExisting(path) != rec.Workspace {
 			return true, nil
+		}
+	}
+	// A branch being rebased or bisected shows as detached in that list.
+	return s.inUseByRebaseOrBisect(ctx, rec)
+}
+
+// inUseByRebaseOrBisect reports whether a rebase or a bisect in any
+// worktree of the repository (the main one and every linked one) names the
+// session branch as the branch to return to.
+func (s *Sessions) inUseByRebaseOrBisect(ctx context.Context, rec *sessionRecord) (bool, error) {
+	common, code, err := s.owner.gitText(ctx, "rev-parse", "--git-common-dir")
+	if err != nil {
+		return false, err
+	}
+	if code != 0 || common == "" {
+		return false, errors.New("cannot locate the git directory")
+	}
+	if !filepath.IsAbs(common) {
+		common = filepath.Join(s.owner.Root, common)
+	}
+	dirs := []string{common}
+	entries, err := os.ReadDir(filepath.Join(common, "worktrees"))
+	if err != nil && !errors.Is(err, os.ErrNotExist) {
+		return false, err
+	}
+	for _, e := range entries {
+		if e.IsDir() {
+			dirs = append(dirs, filepath.Join(common, "worktrees", e.Name()))
+		}
+	}
+	ref := "refs/heads/" + rec.Branch
+	for _, d := range dirs {
+		for _, f := range []string{"rebase-merge/head-name", "rebase-apply/head-name", "BISECT_START"} {
+			data, err := os.ReadFile(filepath.Join(d, f))
+			if errors.Is(err, os.ErrNotExist) {
+				continue
+			}
+			if err != nil {
+				return false, err
+			}
+			if name := strings.TrimSpace(string(data)); name == ref || name == rec.Branch {
+				return true, nil
+			}
 		}
 	}
 	return false, nil
