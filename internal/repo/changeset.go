@@ -718,7 +718,7 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 				to = c.ToPath
 			}
 			if idx := w.edits[p]; len(idx) > 0 {
-				e, err := r.editFile(key, p, src, changes, idx)
+				e, err := r.editFile(ctx, key, p, src, changes, idx)
 				if err != nil {
 					return nil, err
 				}
@@ -927,7 +927,7 @@ func splitRaw(data []byte) (lines []rawLine, bom string) {
 
 // editFile applies the line operations idx to one file, bottom-up in effect:
 // every position refers to the file before the change set.
-func (r *Repo) editFile(key []byte, p string, src *source, changes []Change, idx []int) (*editResult, error) {
+func (r *Repo) editFile(ctx context.Context, key []byte, p string, src *source, changes []Change, idx []int) (*editResult, error) {
 	old, bom := splitRaw(src.data)
 	shown := src.shown
 	if len(old) != len(shown) || (bom != "" && len(old) == 0) {
@@ -1001,8 +1001,13 @@ func (r *Repo) editFile(key []byte, p string, src *source, changes []Change, idx
 				}
 			}
 			// Between two locked lines the point may lie inside one masked
-			// value (a key block): inserting there would change it.
-			if gap > 0 && gap < n && shown[gap-1].Locked && shown[gap].Locked {
+			// value, and where a key block is open it does: text inserted
+			// there would change the value, or end the block's masking and
+			// leave the rest of the key shown.
+			if gap > 0 && (shown[gap-1].Open || (gap < n && shown[gap-1].Locked && shown[gap].Locked)) {
+				if gap == n {
+					return nil, refusal(p, "the insertion point after line %d lies inside a value you were not shown (a private-key block that is still open there); the owner has to change it by hand", gap)
+				}
 				return nil, refusal(p, "the insertion point between lines %d and %d lies inside a value you were not shown; the owner has to change it by hand", gap, gap+1)
 			}
 			if j, ok := gaps[gap]; ok {
@@ -1084,7 +1089,55 @@ func (r *Repo) editFile(key []byte, p string, src *source, changes []Change, idx
 	if res.after == nil {
 		res.after = []byte{}
 	}
+	if err := r.checkStillMasked(ctx, p, shown, old, out, res); err != nil {
+		return nil, err
+	}
 	return res, nil
+}
+
+// checkStillMasked refuses an edit after which a line that was locked would
+// be shown differently, or no longer be locked: whatever the operations
+// were, masking is decided again from the whole new content, and a value
+// the model was not shown must stay not shown. kept lines are those of old
+// that res.lockedAfter names in out.
+func (r *Repo) checkStillMasked(ctx context.Context, p string, shown []shownLine, old, out []rawLine, res *editResult) error {
+	if len(res.lockedAfter) == 0 {
+		return nil
+	}
+	after, err := r.shownLines(ctx, res.after)
+	if err != nil {
+		return refusal(p, "its new content cannot be read as lines: %v", err)
+	}
+	if len(after) != len(out) {
+		return refusal(p, "its new lines could not be lined up with what read_file would show; refusing to guess")
+	}
+	// Walk old and out together: a kept line is the same rawLine value.
+	was := make(map[int]int, len(res.lockedAfter)) // index in out → index in old
+	k := 0
+	for i := range old {
+		if !shown[i].Locked {
+			continue
+		}
+		for k < len(out) && !res.lockedAfter[k] {
+			k++
+		}
+		if k == len(out) {
+			break
+		}
+		was[k] = i
+		k++
+	}
+	for k := range res.lockedAfter {
+		i, ok := was[k]
+		if !ok || !after[k].Locked || after[k].Text != shown[i].Text {
+			line := k + 1
+			if ok {
+				line = i + 1
+			}
+			return refusal(p, "the change would alter how line %d, which holds a value you were not shown, is masked; the owner has to change it by hand", line)
+		}
+	}
+	return nil
 }
 
 // conflictMarkerRe matches a line git writes into an unresolved merge

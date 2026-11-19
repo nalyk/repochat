@@ -87,9 +87,15 @@ type shownLine struct {
 	// Text is the line masked, sanitised and UTF-8 repaired, not shortened
 	// for display; for a Cut line, which was never read whole, it is the
 	// shortened form read_file shows.
-	Text   string
-	Locked bool // the redactor masked something on this line, or could not tell (Cut)
-	Long   bool // longer than the display limit: shown cut
+	Text string
+	// Locked: the redactor masked something on this line, or could not tell
+	// (Cut), or the line lies in a private-key block, from its BEGIN line to
+	// its END line, whatever the line itself holds.
+	Locked bool
+	// Open: a private-key block is open after this line, so whatever comes
+	// next is judged as part of it. Nothing may be inserted there.
+	Open bool
+	Long bool // longer than the display limit: shown cut
 	// Cut: longer than maxLineBytes, so the rest was never read. A secret
 	// that straddles the cut is too short there to be recognised, so such a
 	// line has no anchor and, with redaction on, is locked.
@@ -113,6 +119,7 @@ type maskedLine struct {
 	cut     bool   // longer than maxLineBytes: the rest was not read
 	invalid bool   // invalid UTF-8 was replaced
 	locked  bool
+	open    bool // a private-key block is open after the line
 }
 
 // maskLine is the one function that turns a raw line into what is shown.
@@ -125,12 +132,17 @@ func maskLine(st *RedactState, raw []byte, cut bool, key int) maskedLine {
 		text = strings.ToValidUTF8(text, "�")
 		ml.invalid = true
 	}
+	inBlock := st.Open()
 	text, masks := st.Masked(text)
 	st.Force(key)
 	ml.text = text
+	ml.open = st.Open()
 	// A cut line may end in part of a secret, too short to be recognised,
 	// and a key marker in its unread tail is a value the model was not shown.
-	ml.locked = masks > 0 || (st.r.Enabled() && (cut || key != 0))
+	// A line the redactor met with a key block open, or left with one open,
+	// belongs to the block even when it is shown as it is (a conflict marker
+	// between two halves of a key): changing it changes what gets masked.
+	ml.locked = masks > 0 || inBlock || ml.open || (st.r.Enabled() && (cut || key != 0))
 	return ml
 }
 
@@ -143,7 +155,7 @@ func (ml maskedLine) shown() shownLine {
 		// Never the head as read: its end may be a fragment of a secret.
 		text = truncateLine(text, true)
 	}
-	return shownLine{Text: Sanitize(text), Locked: ml.locked, Long: ml.long(), Cut: ml.cut}
+	return shownLine{Text: Sanitize(text), Locked: ml.locked, Open: ml.open, Long: ml.long(), Cut: ml.cut}
 }
 
 // lineSource yields the lines of a content stream through maskLine.

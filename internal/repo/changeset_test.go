@@ -850,3 +850,124 @@ func FuzzParseChanges(f *testing.F) {
 		}
 	})
 }
+
+// C3: a private-key block may hold a line the redactor does not mask (a
+// conflict marker between two body lines). Inserting text beside it would
+// end the block's masking, and the body lines after it would be shown.
+func TestInsertCannotEndAKeyBlock(t *testing.T) {
+	content := "-----BEGIN PRIVATE KEY-----\nQUJDRA==\n<<<<<<< HEAD\nU0VDUkVU\n-----END PRIVATE KEY-----\n"
+	c := newApplyFixture(t, map[string]string{"notes.txt": content}, nil)
+	mustNotContain(t, readText(t, c.ws, "notes.txt").Text, "QUJDRA==", "U0VDUkVU")
+	before := wsState(t, c.ws.Root)
+	change := Change{Op: "insert", Path: "notes.txt", At: c.anchor(t, "notes.txt", 3), Where: "before", Text: "# stop"}
+	a, err := c.s.Apply(bg, "", []Change{change}, "")
+	if err == nil {
+		t.Fatalf("the insert was applied; Fresh:\n%s", a.Fresh)
+	}
+	mustContain(t, err.Error(), "value you were not shown")
+	mustNotContain(t, err.Error(), "QUJDRA==", "U0VDUkVU")
+	if after := wsState(t, c.ws.Root); after != before {
+		t.Error("a refused insert changed the workspace")
+	}
+	// The marker line is part of the block: locked like the rest of it.
+	c.refuse(t, "line 3 holds a value you were not shown", Change{Op: "replace", Path: "notes.txt", From: c.anchor(t, "notes.txt", 3), Text: "# stop"})
+	c.refuse(t, "line 3 holds a value you were not shown", Change{Op: "delete", Path: "notes.txt", From: c.anchor(t, "notes.txt", 3)})
+	// Outside the block, edits go through.
+	c.accept(t, Change{Op: "insert", Path: "notes.txt", At: c.anchor(t, "notes.txt", 1), Where: "before", Text: "# a key follows"})
+	c.accept(t, Change{Op: "insert", Path: "notes.txt", At: "end", Text: "# a key precedes"})
+}
+
+// No edit of a file that holds masked lines may show the text of one: not
+// in the diff of the proposal, not in the refusal, not in the fresh lines of
+// the result, and not in a later read.
+func TestNoEditShowsAMaskedLine(t *testing.T) {
+	const s1, s2, s3 = "QUJDRAsecretONE1111", "U0VDUkVUsecretTWO2222", "R0hJSktMsecretTHREE33"
+	secrets := []string{s1, s2, s3}
+	begin, end := "-----BEGIN PRIVATE KEY-----\n", "-----END PRIVATE KEY-----\n"
+	shapes := map[string]string{
+		"conflict marker inside":   "top\n" + begin + s1 + "\n<<<<<<< HEAD\n" + s2 + "\n" + end + "bottom\n",
+		"three markers inside":     begin + s1 + "\n<<<<<<< ours\n" + s2 + "\n=======\n" + s3 + "\n>>>>>>> theirs\n" + end,
+		"unterminated at the end":  "top\n" + begin + s1 + "\n||||||| base\n" + s2 + "\n",
+		"two blocks":               begin + s1 + "\n" + end + "between\n" + begin + s2 + "\n=======\n" + s3 + "\n" + end + "bottom\n",
+		"headers and a blank line": begin + "Proc-Type: 4,ENCRYPTED\n\n" + s1 + "\n>>>>>>> x\n" + s2 + "\n" + end,
+		"token beside a block":     "aws = \"" + fakeAWSKey + "\"\n" + begin + s1 + "\n<<<<<<< HEAD\n" + s2 + "\n" + end,
+	}
+	texts := []string{"# stop", "-----END PRIVATE KEY-----", "-----BEGIN PRIVATE KEY-----", "not base64 !", ""}
+	for name, content := range shapes {
+		t.Run(name, func(t *testing.T) {
+			c := newApplyFixture(t, map[string]string{"k.txt": content}, nil)
+			base := c.head(t)
+			hidden := append([]string{fakeAWSKey}, secrets...)
+			mustNotContain(t, readText(t, c.ws, "k.txt").Text, hidden...)
+			n := strings.Count(content, "\n")
+			var tries []Change
+			for _, text := range texts {
+				if text == "" {
+					continue
+				}
+				tries = append(tries,
+					Change{Op: "insert", Path: "k.txt", At: "start", Text: text},
+					Change{Op: "insert", Path: "k.txt", At: "end", Text: text})
+			}
+			for l := 1; l <= n; l++ {
+				at := c.anchor(t, "k.txt", l)
+				for _, text := range texts {
+					if text == "" {
+						tries = append(tries, Change{Op: "delete", Path: "k.txt", From: at})
+						continue
+					}
+					tries = append(tries,
+						Change{Op: "insert", Path: "k.txt", At: at, Where: "before", Text: text},
+						Change{Op: "insert", Path: "k.txt", At: at, Where: "after", Text: text},
+						Change{Op: "replace", Path: "k.txt", From: at, Text: text})
+				}
+			}
+			accepted := 0
+			for _, change := range tries {
+				label := fmt.Sprintf("%s at=%s from=%s where=%s text=%q", change.Op, change.At, change.From, change.Where, change.Text)
+				plan, err := c.s.Propose(bg, []Change{change})
+				if err != nil {
+					for _, h := range hidden {
+						if strings.Contains(err.Error(), h) {
+							t.Errorf("%s: the refusal shows %s:\n%v", label, h, err)
+						}
+					}
+					continue
+				}
+				accepted++
+				// What an apply would answer and what a read would then
+				// show, from the plan; every seventh one is applied for real.
+				var later strings.Builder
+				lines, err := c.ws.shownLines(bg, plannedFile(t, plan, "k.txt").After)
+				if err != nil {
+					t.Fatal(err)
+				}
+				for _, l := range lines {
+					later.WriteString(l.Text + "\n")
+				}
+				views := map[string]string{"the diff": plan.Diff, "Fresh": c.ws.freshText(bg, plan.Files, nil), "a later read": later.String()}
+				if accepted%7 == 1 {
+					a, err := c.s.Apply(bg, plan.ID, nil, "")
+					if err != nil {
+						t.Fatalf("%s: proposed but not applied: %v", label, err)
+					}
+					views["the applied Fresh"], views["a read after the apply"] = a.Fresh, readText(t, c.ws, "k.txt").Text
+					if _, err := c.s.UndoTo(bg, base); err != nil {
+						t.Fatalf("undo: %v", err)
+					}
+				}
+				for where, text := range views {
+					for _, h := range hidden {
+						if strings.Contains(text, h) {
+							t.Errorf("%s: %s shows %s:\n%s", label, where, h, text)
+						}
+					}
+				}
+			}
+			if accepted == 0 {
+				t.Error("no edit at all was accepted")
+			}
+			t.Logf("%d of %d edits accepted", accepted, len(tries))
+		})
+	}
+}
