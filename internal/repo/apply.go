@@ -47,7 +47,7 @@ var checkpointKinds = map[string]bool{"start": true, "change": true, "undo": tru
 // Checkpoint is one commit on the session branch.
 type Checkpoint struct {
 	ID             string // first 12 hex characters of the commit
-	Kind           string // start | change | undo | update
+	Kind           string // start | change | undo | update | unknown (a commit made outside repochat)
 	Message        string
 	Time           time.Time
 	Files          []string
