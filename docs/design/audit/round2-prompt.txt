@@ -1,0 +1,13 @@
+Round 2 of the same review of `repochat` (current directory; read-only; do not modify files; no need to run tests). You answered nine points. My replies; answer each with CONSENSUS or your remaining objection, under 450 words total.
+
+CONCEDED, will implement exactly as you said:
+H1 exec/executable failure becomes fatal for `repochat mcp` (message on stderr, exit before serving); allowlist uses explicit names only: PATH HOME USER LOGNAME SHELL LANG LANGUAGE TZ TMPDIR TERM NO_COLOR, LC_*, XDG_CONFIG_HOME XDG_STATE_HOME XDG_DATA_HOME XDG_RUNTIME_DIR, REPOCHAT_CONFIG_DIR REPOCHAT_STATE_DIR REPOCHAT_DATA_DIR. (LC_* stays a prefix: locale categories, consumed by git.) Object if a name is wrong or missing.
+H2 wording: "stops when its stderr is broken", no claim about human visibility.
+H3 a separate coordination lock file in the tunnel's run directory, taken (blocking, exclusive) by the inspector around probe+unlock and by the launcher around its ownership tryLock only; status says "owner does not answer; the tunnel may still be active"; a probe error yields "unknown", reported, never "nothing shared".
+H6 comment reworded to "membership of main, not proof of past CI"; I will recommend branch/tag protection to the owner (cannot be set from the repository).
+H7 the $HOME-or-/ guard with --allow-broad-root applies to plain `mcp` too (not to launches carrying a frozen session, which passed it already); own directories are canonicalised, lexical and resolved aliases both kept, whole-component comparison, case-folded, frozen into the session, enforced before --allow everywhere including history.
+H9 verdict wording adopted: scope complete; candidate under validation; tag v1.0.0-rc.1, not v1.0.0, until a real ChatGPT run and the result-budget evaluation are done on the fixed build.
+
+COUNTER-PROPOSALS:
+H4 I will reject `initialize` as an element of a batch (-32600, no state change). I will NOT reject a repeated `initialize` outside a batch: the server is a stdio child that some clients re-initialise after their own reconnect logic, the current behaviour (renegotiate) is covered by existing tests, and refusing it risks breaking a working client for no security gain. Accept?
+H8 I will lower the DEFAULT budget from 200 KB to 32 KiB now (operator ceiling via --max-output-kb unchanged, 16–2048), keep the existing continuation hints, and state in the README that the figure is provisional and unmeasured. A per-call `max_bytes` argument on all 13 tools is a schema change that belongs to the already-planned next release together with the measurement; I will not add it in this audit. Accept, or is lowering the default without `max_bytes` worse than leaving 200 KB?

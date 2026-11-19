@@ -85,8 +85,10 @@ Verificat automat, inclusiv cu două instanțe reale `tunnel-client` pornite sim
 | istoricul accesibil din `HEAD`, ramuri, ramuri remote și taguri | stash, reflog, commituri orfane |
 | numărul fișierelor reținute, pe categorii | conținutul și numele fișierelor reținute |
 | | directorul `.git`, fișiere din afara repository-ului, ținte de symlink |
+| | conținutul submodulelor (un submodul modificat apare doar ca schimbare de commit) |
+| | fișierele proprii ale repochat (configurația cu cheia API, starea, `tunnel-client`), dacă se află în repository |
 
-**Fișiere reținute.** Fișierele care arată a secrete sunt reținute implicit: `.env`, `*.pem`, `*.key`, `id_rsa`, `terraform.tfstate`, `*.tfvars`, `credentials.json`, `secrets.yaml`, `.npmrc`, `service-account.json` și altele asemenea. Regula pe cuvinte-cheie (`token`, `secret`, `password`…) se aplică doar fișierelor de date și de configurare, deci `token.go` sau `password.service.ts` rămân vizibile. Modelul află că există fișiere reținute și câte sunt, ca să nu confunde „ascuns” cu „inexistent”.
+**Fișiere reținute.** Fișierele care arată a secrete sunt reținute implicit: `.env`, `*.pem`, `*.key`, `id_rsa`, `terraform.tfstate`, `*.tfvars`, `credentials.json`, `secrets.yaml`, `.npmrc`, `service-account.json` și altele asemenea. Regula pe cuvinte-cheie (`token`, `secret`, `password`…) se aplică doar fișierelor de date și de configurare, deci `token.go` sau `password.service.ts` rămân vizibile. Modelul află că există fișiere reținute și câte sunt în tot repository-ul, ca să nu confunde „ascuns” cu „inexistent”. Numărul nu depinde de ce caută: un răspuns nu spune niciodată câte fișiere reținute se potrivesc cu un anumit tipar sau director, pentru că așa li s-ar putea ghici numele literă cu literă.
 
 **Mascare.** Valorile care arată a secrete în fișierele servite (chei AWS, tokenuri GitHub/GitLab/Slack, chei OpenAI/Anthropic/Google/Stripe, JWT, parole în URL-uri, chei private PEM) apar ca `[REDACTED:tip]`. Căutarea lucrează pe textul deja mascat, așa că un secret nu poate fi ghicit caracter cu caracter prin interogări. Mascarea este „best effort”: un secret într-un format necunoscut nu este detectat.
 
@@ -103,17 +105,19 @@ repochat call read_file '{"path":"README.md"}'    # exact textul pe care l-ar pr
 | Opțiune | Efect |
 |---|---|
 | `--tracked-only` | ascunde fișierele neurmărite |
-| `--no-history` | doar arborele de lucru, fără commituri vechi |
+| `--no-history` | doar arborele de lucru, fără commituri vechi: se refuză și `git_diff`, iar `git_status` și `repo_overview` nu mai arată identificatori de commit |
 | `--deny PATTERN` | reține în plus (sintaxă `.gitignore`, repetabil) |
 | `--allow PATTERN` | servește un fișier pe care regulile implicite l-ar reține |
 | `--show-withheld-names` | modelul vede numele fișierelor reținute, nu și conținutul |
 | `--no-redact` | oprește mascarea valorilor |
-| `--max-output-kb N` | bugetul unui răspuns (16–2048, implicit 200) |
+| `--max-output-kb N` | bugetul unui răspuns, cu tot cu linia `@meta` (16–2048, implicit 32) |
 | `--profile NUME` | alt tunel salvat |
 
-Un fișier `.repochatignore` în repository (aceeași sintaxă ca `.gitignore`) reține fișiere pentru toți cei care servesc acel repository. El poate doar să strângă: `--allow` nu trece peste el.
+Un fișier `.repochatignore` în repository (aceeași sintaxă ca `.gitignore`, citită ca git: o negație `!` nu poate readuce un fișier dintr-un director exclus) reține fișiere pentru toți cei care servesc acel repository. El poate doar să strângă: `--allow` nu trece peste el.
 
-Ordinea regulilor: nume nesuportat → `.repochatignore` → `--deny` → `--allow` → regulile implicite pentru secrete.
+Ordinea regulilor: fișierele proprii ale repochat → nume nesuportat → `.repochatignore` → `--deny` → `--allow` → regulile implicite pentru secrete.
+
+Pune tiparele între ghilimele și dă fiecăruia propriul `--deny` sau `--allow`. Un tipar nepus între ghilimele poate fi extins de shell în mai multe cuvinte, iar comenzile care primesc doar opțiuni refuză orice cuvânt în plus, cu eroare, în loc să ignore în tăcere opțiunile de după el.
 
 **Profile.** `repochat setup --profile client-x` salvează alt tunel. `repochat setup --bind` leagă un profil de repository-ul curent: profilul e ales automat acolo și refuză orice alt repository. E util când un tunel trebuie să servească un singur proiect.
 
@@ -122,7 +126,7 @@ Ordinea regulilor: nume nesuportat → `.repochatignore` → `--deny` → `--all
 | Comandă | Ce face |
 |---|---|
 | `repochat` | partajează repository-ul curent |
-| `repochat status` / `stop` | se partajează ceva acum? / oprește din alt terminal |
+| `repochat status` / `stop` | se partajează ceva acum, din orice terminal și cu orice credențiale a fost pornit? / oprește din alt terminal |
 | `repochat doctor` | verifică separat fiecare parte și spune ce nu a putut testa |
 | `repochat setup` | introduce sau schimbă tunelul și cheia; `--list`, `--remove`, `--bind` |
 | `repochat files`, `tools`, `call` | ce se servește, ce instrumente primește modelul, rulează un instrument |
@@ -153,12 +157,14 @@ Fiecare răspuns se termină cu o linie `@meta {json}`: dacă e complet, cursoru
 
 - Niciun instrument nu scrie și niciunul nu execută comenzi arbitrare. Modelul nu furnizează niciodată argumente brute pentru git.
 - Un fișier este servit doar dacă git îl listează și politica îl admite. Symlink-urile nu sunt urmate nicăieri, nici dacă un director este înlocuit cu un symlink în timpul accesului.
-- Un diff sau un commit care atinge doar fișiere reținute nu produce conținut. O listă goală de căi permise nu devine „toate căile”.
+- Un diff sau un commit care atinge doar fișiere reținute nu produce conținut. O listă goală de căi permise nu devine „toate căile”. Git nu intră niciodată într-un submodul: nici conținutul lui, nici programele din configurația lui nu sunt atinse.
+- O revizie este un nume de ramură, tag sau commit, urmat cel mult de pași spre părinți (`^`, `~N`). Formele care caută în mesajele commiturilor (`^{/text}`, `:/text`) sunt refuzate, iar o revizie inexistentă și una neaccesibilă primesc același răspuns.
 - Configurația din repository nu poate face o operație de citire să ruleze un program: filtre `clean`/`smudge`, `textconv`, drivere de diff, `fsmonitor`, `diff.external`, `GIT_EXTERNAL_DIFF`, descărcări automate printr-un remote. Fiecare caz este testat cu un control pozitiv: testul arată întâi că git simplu rulează programul.
 - Configurația din repository nu poate aduce în răspunsuri conținutul unui fișier din afara lui (`mailmap.file`, `blame.ignoreRevsFile`). Textul de eroare al lui git nu ajunge niciodată la model; rămâne în jurnalul local.
-- Cheia API nu apare în argumentele niciunui proces, nu ajunge în mediul serverului MCP și nu ajunge la git. `tunnel-client` primește un mediu construit dintr-o listă albă.
-- Un singur repochat pe tunel, pe acest calculator. Preluarea se face cooperativ, printr-un socket privat; niciun proces nu este semnalizat după PID.
-- Textul din repository (surse, mesaje de commit, nume de fișiere) este tratat ca date nesigure: caracterele de control sunt neutralizate înainte să ajungă la model sau în terminal.
+- Cheia API nu apare în argumentele niciunui proces și nu ajunge la git. `tunnel-client` primește un mediu construit dintr-o listă albă și îl dă mai departe, cu tot cu cheie, serverului MCP pe care îl pornește; de aceea serverul se repornește singur, înainte să servească ceva, cu un mediu construit tot dintr-o listă albă. Procesul care citește repository-ul nu ține cheia nici în mediu, nici în memorie (verificat și cu `tunnel-client` real).
+- repochat nu își servește niciodată propriile fișiere, oricare ar fi opțiunile, iar directorul personal sau `/` ca rădăcină se refuză fără `--allow-broad-root`, inclusiv pentru `repochat mcp` pornit de alt client.
+- Un singur repochat pe tunel, pe acest calculator. Preluarea se face cooperativ, printr-un socket privat; niciun proces nu este semnalizat după PID. Ctrl+C oprește partajarea și când ieșirea este trimisă printr-un pipe (`repochat 2>&1 | tee jurnal`); dacă cititorul acelui pipe dispare (stderr rupt), partajarea se oprește. Asta nu garantează că cineva urmărește afișajul: cu `--quiet` sau cu stderr trimis într-un fișier nu se oprește nimic.
+- Textul din repository (surse, mesaje de commit, nume de fișiere, numele directorului) și textul trimis de apelant (valorile și numele argumentelor) sunt tratate ca date nesigure: caracterele de control sunt neutralizate înainte să ajungă la model sau în terminal.
 
 **Ce nu garantează:**
 
@@ -168,6 +174,7 @@ Fiecare răspuns se termină cu o linie `@meta {json}`: dacă e complet, cursoru
 - **Cine poate folosi pluginul poate citi repository-ul** cât timp rulează repochat. Creează pluginul ca *personal*. Tunelul nu știe ce conversație îl folosește: dacă treci la alt repository, conversațiile vechi îl văd pe cel nou. repochat te avertizează la schimbare.
 - **Instrucțiuni ascunse în cod** (prompt injection) pot influența modelul. repochat le marchează ca date, dar decizia aparține modelului.
 - `tunnel-client` deschide un port de diagnoză pe `127.0.0.1` (aleatoriu). repochat însuși nu ascultă pe rețea.
+- **Dimensiunea implicită a răspunsurilor (32 KB) este provizorie.** Nu a fost măsurată în sesiuni reale ChatGPT; un argument de dimensiune per apel este planificat pentru versiunea următoare.
 
 Jurnalul local (`repochat log`) reține doar metadate: instrument, rezultat, durată, dimensiune. Argumentele se înregistrează doar cu `--audit-args`. E un istoric pentru tine, nu o pistă de audit rezistentă la modificări.
 
@@ -180,7 +187,7 @@ Jurnalul local (`repochat log`) reține doar metadate: instrument, rezultat, dur
 | tunelul nu apare în ChatGPT | nu e atașat workspace-ului ChatGPT, sau adminul a restricționat serverele MCP personalizate |
 | „OpenAI rejected the tunnel connection (HTTP 401/403/404)” | cheie greșită / fără Tunnels Read + Use / ID de tunel greșit; rulează `repochat setup` |
 | instrumentele nu apar după o actualizare | în setările pluginului: *Refresh tools* |
-| „does not answer” la preluare | a rămas un `tunnel-client` orfan; oprește-l și repornește |
+| „does not answer” la preluare sau în `repochat status` | lansatorul a fost oprit forțat și a rămas un `tunnel-client` orfan, care încă ține tunelul; oprește acel proces și repornește |
 | modelul nu găsește un fișier | e ignorat de `.gitignore` sau reținut; vezi `repochat files --withheld` |
 
 `repochat --verbose` arată și jurnalul lui `tunnel-client`.
@@ -211,6 +218,8 @@ Ce acoperă testele automate: politica de expunere, mascarea, accesul la fișier
 2. **macOS, folosit de un om.** CI rulează pe macOS toată suita, inclusiv prima pornire în pseudo-terminal, și trece. Nimeni nu l-a folosit încă interactiv acolo, iar suita de contract cu `tunnel-client` real a rulat doar pe Linux.
 
 Designul și apoi implementarea au fost revizuite adversarial de Codex CLI. Revizia implementării a găsit, în mai multe runde, 20 de probleme reale; toate sunt reparate și acoperite cu teste de regresie. Transcrierea este în [`docs/design/`](docs/design/).
+
+**Auditul din 19 noiembrie 2026.** Cu toată suita verde, un al doilea audit (trei revizii adversariale, câte una pe pachet, fiecare obligată să reproducă ce raportează pe binarul compilat) a găsit încă aproximativ 50 de defecte reale. Cele mai grave: `git_diff` arăta conținutul fișierelor reținute dintr-un submodul și rula un program din configurația acelui submodul; o linie construită anume oprea tot serverul la căutare; cheia API rămânea în mediul procesului care servește, deși documentația spunea altfel; repochat își servea propriul fișier de configurare dintr-un director personal ținut în git. Toate sunt reparate, fiecare cu un test care a picat înainte de reparație (lista este în [`CHANGELOG.md`](CHANGELOG.md)). Deciziile nesigure au fost discutate cu Codex CLI până la consens: [`docs/design/audit/`](docs/design/audit/). Concluzia agreată: funcțional, 1.0 este complet; ca maturitate este un **candidat în validare** (`v1.0.0-rc.1`), până când o sesiune reală ChatGPT și o evaluare a dimensiunii răspunsurilor sunt făcute pe versiunea reparată.
 
 ## Proiect
 

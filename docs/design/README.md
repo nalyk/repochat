@@ -27,3 +27,12 @@ Codex a confirmat defectele MVP-ului și a găsit probleme reale în propunerea 
 Puncte unde Claude nu a cedat și Codex a acceptat compromisul: configurația git a utilizatorului rămâne activă (X1), rezultatele rămân text cu o linie `@meta` în loc de `structuredContent` (X3), repository-ul poate fi schimbat liber între porniri, cu avertizare, iar legarea profilului de un repository este opțională (X6).
 
 Consensul din runda 3 privește designul. Corectitudinea implementării a fost verificată separat: prin teste, prin rularea cu binarul real `tunnel-client` și prin revizia din fișierele `impl-*`, care a găsit probleme pe care designul agreat nu le prevenea.
+
+## Auditul din 19 noiembrie 2026
+
+| Fișier | Conținut |
+|---|---|
+| `audit/round1-prompt.txt`, `audit/round1-codex.md` | nouă decizii nesigure din audit, puse lui Codex; verdict pe fiecare |
+| `audit/round2-prompt.txt`, `audit/round2-codex.md` | concesii și două contrapropuneri; consens pe toate punctele |
+
+Codex a schimbat patru decizii: repornirea serverului MCP eșuează închis, lista albă de mediu folosește nume explicite, sondarea blocării unui tunel are propria blocare de coordonare, iar garda pentru directorul personal se aplică și comenzii `mcp`. A acceptat, în schimb, păstrarea unui `initialize` repetat în afara unui lot.
