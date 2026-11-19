@@ -841,7 +841,7 @@ func TestOwnerIgnoreEditedWhileServingIsAppliedAtOnce(t *testing.T) {
 // The same with only a resume in between (Codex's call: start_session again
 // in the same server process).
 func TestOwnerIgnoreEditedWhileServingResyncsOnStart(t *testing.T) {
-	c := newApplyFixture(t, map[string]string{"notes.txt": "hello\n"}, nil)
+	c := newApplyFixture(t, map[string]string{"notes.txt": "hello\n", "open.txt": "fine\n"}, nil)
 	c.anchor(t, "notes.txt", 1)
 	write(t, c.f.dir, ".repochatignore", "notes.txt\n")
 	if _, err := c.s.Start(bg, false); err != nil {

@@ -675,7 +675,9 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	// command on add, the smudge command on checkout, and starts the process
 	// filter for the file whose driver has one.
 	plain := func(args ...string) {
-		cmd := exec.Command("git", args...)
+		// Without the configured fsmonitor: its mark script reports nothing,
+		// which an older git reads as "no file changed" and then filters none.
+		cmd := exec.Command("git", append([]string{"-c", "core.fsmonitor=false"}, args...)...)
 		cmd.Dir = dir
 		cmd.Env = append(os.Environ(), "GIT_CONFIG_GLOBAL=/dev/null", "GIT_CONFIG_SYSTEM=/dev/null")
 		out, err := cmd.CombinedOutput()

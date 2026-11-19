@@ -5,6 +5,7 @@ import (
 	"fmt"
 	"os"
 	"path/filepath"
+	"regexp"
 	"strings"
 	"testing"
 )
@@ -340,6 +341,11 @@ func TestUndoAcrossAFileThatBecameADirectory(t *testing.T) {
 		t.Run(tc.name, func(t *testing.T) {
 			c := newApplyFixture(t, tc.start, nil)
 			base := c.base(t)
+			// Permission bits aside: git checks files out as the umask has
+			// them, a session writes new files as 0644.
+			wsState := func(t *testing.T, dir string) string {
+				return regexp.MustCompile(`(?m) [-d][-rwx]{9}`).ReplaceAllString(wsState(t, dir), "")
+			}
 			start := wsState(t, c.ws.Root)
 			c.apply(t, "remove", Change{Op: "remove", Path: tc.first, FileTag: c.tag(t, tc.first)})
 			c.apply(t, "create", Change{Op: "create", Path: tc.second, Text: "new"})
