@@ -308,11 +308,15 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 	}
 	if rec != nil { // fresh: the old session's branch stays, its workspace goes
 		s.closeWorkspace()
-		s.removeWorkspace(ctx, rec.Workspace)
+		werr := s.removeWorkspace(ctx, rec.Workspace)
 		if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return nil, err
 		}
-		s.notify(fmt.Sprintf("The previous session's branch %s is kept; its workspace was removed.", rec.Branch))
+		if werr != nil {
+			s.notify(fmt.Sprintf("The previous session's branch %s is kept. Its workspace could not be removed (%v); what is left of it lies under repochat's state directory.", rec.Branch, werr))
+		} else {
+			s.notify(fmt.Sprintf("The previous session's branch %s is kept; its workspace was removed.", rec.Branch))
+		}
 	}
 
 	status, err := s.owner.git(ctx, 64<<20, "status", "--porcelain", "-z", "--untracked-files=normal", "--ignore-submodules=dirty")
@@ -727,21 +731,75 @@ func sparseEscape(p string) (string, error) {
 	return b.String(), nil
 }
 
-// removeWorkspace removes a workspace and its registration in the owner's
-// repository; the branch stays. Failures are logged, and returned for the
-// callers that report them: what remains is a
-// directory under repochat's state and, at worst, a stale worktree entry
-// that `git worktree prune` clears.
-func (s *Sessions) removeWorkspace(ctx context.Context, path string) error {
-	var first error
-	out, _, code, err := s.owner.gitRaw(ctx, 64<<10, "worktree", "remove", "--force", "--force", path)
-	removed := err == nil && code == 0
-	if !removed {
-		if s.owner.Logf != nil {
-			s.owner.Logf("session: git worktree remove failed: %v %s", err, firstErr(nil, out))
-		}
-		first = errors.New("git worktree remove failed")
+// errNotOurWorkspace is the refusal to remove what is at a recorded
+// workspace path.
+var errNotOurWorkspace = errors.New("what is at the session's workspace path is not the session's own workspace (a symbolic link, something that is not a directory, or a directory git does not list as that worktree), so nothing was removed; the owner can look under repochat's state directory and remove it by hand")
+
+// ownWorkspace checks that path may be removed as a session's workspace:
+// it is <session directory>/<id>/w, neither <id> nor w is a symbolic link or
+// anything but a directory, and git lists a worktree of the owner's
+// repository at exactly that path. present is false, with no error, when
+// the workspace directory, or the one it lies in, is not there at all.
+//
+// The record names the path, and a record is only a file: git resolves
+// symbolic links, so `worktree remove` given a link to another worktree
+// removes that one, with everything in it.
+func (s *Sessions) ownWorkspace(ctx context.Context, path string) (present bool, err error) {
+	parent := filepath.Dir(path)
+	if filepath.Base(path) != "w" || filepath.Dir(parent) != s.dir || !sessionIDRe.MatchString(filepath.Base(parent)) {
+		return false, errNotOurWorkspace
 	}
+	for _, p := range []string{parent, path} {
+		fi, err := os.Lstat(p)
+		switch {
+		case errors.Is(err, os.ErrNotExist):
+			return false, nil
+		case err != nil:
+			return false, fmt.Errorf("cannot check the session's workspace path: %v", pathErrCause(err))
+		case !fi.IsDir(): // Lstat: a symbolic link is not a directory
+			return false, errNotOurWorkspace
+		}
+	}
+	out, err := s.owner.git(ctx, 16<<20, "worktree", "list", "--porcelain")
+	if err != nil {
+		return false, err
+	}
+	for _, l := range strings.Split(string(out), "\n") {
+		if l == "worktree "+path {
+			return true, nil
+		}
+	}
+	return false, errNotOurWorkspace
+}
+
+// removeWorkspace removes a workspace and its registration in the owner's
+// repository; the branch stays. It removes nothing unless the path is the
+// session's own workspace (see ownWorkspace). Failures are logged, and
+// returned for the callers that report them: what remains is a directory
+// under repochat's state and, at worst, a stale worktree entry that
+// `git worktree prune` clears.
+func (s *Sessions) removeWorkspace(ctx context.Context, path string) error {
+	present, err := s.ownWorkspace(ctx, path)
+	if err != nil {
+		if s.owner.Logf != nil {
+			s.owner.Logf("session: the workspace was not removed: %v", err)
+		}
+		return err
+	}
+	var first error
+	removed := false
+	if present {
+		out, _, code, err := s.owner.gitRaw(ctx, 64<<10, "worktree", "remove", "--force", "--force", path)
+		removed = err == nil && code == 0
+		if !removed {
+			if s.owner.Logf != nil {
+				s.owner.Logf("session: git worktree remove failed: %v %s", err, firstErr(nil, out))
+			}
+			first = errors.New("git worktree remove failed")
+		}
+	}
+	// The session's own directory, checked above to be one: what it holds is
+	// removed, never followed.
 	if err := os.RemoveAll(filepath.Dir(path)); err != nil {
 		if s.owner.Logf != nil {
 			s.owner.Logf("session: cannot remove the workspace: %v", err)

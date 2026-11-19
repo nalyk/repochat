@@ -1135,6 +1135,9 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 	// A workspace that is still there keeps the session open: its record is
 	// what lets the next call find it again.
 	werr := s.removeWorkspace(ctx, rec.Workspace)
+	if errors.Is(werr, errNotOurWorkspace) {
+		return fmt.Errorf("the session was not abandoned: %v. The session stays open; --new-session starts another and leaves this one's files where they are", werr)
+	}
 	if _, err := os.Lstat(filepath.Dir(rec.Workspace)); !errors.Is(err, os.ErrNotExist) {
 		return fmt.Errorf("the session workspace could not be removed (%v); the session stays open, and abandoning it can be tried again", werr)
 	}

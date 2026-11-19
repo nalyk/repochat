@@ -851,3 +851,84 @@ func TestOwnerIgnoreEditedWhileServingResyncsOnStart(t *testing.T) {
 		t.Error("notes.txt is still in the workspace after the resume")
 	}
 }
+
+// C2: session.json rewritten to name a session whose workspace path is a
+// symbolic link to another linked worktree of the repository. git resolves
+// the link, so `worktree remove --force` would delete that worktree with
+// everything in it. Nothing is removed through such a path, by any of the
+// calls that remove a workspace.
+func TestTamperedRecordCannotRemoveAnotherWorktree(t *testing.T) {
+	for _, shape := range []string{"the workspace is a link", "its directory is a link"} {
+		for _, call := range []string{"abandon", "fresh start"} {
+			t.Run(shape+", "+call, func(t *testing.T) {
+				f := newSessionFixture(t, nil)
+				s, info := f.start(t, Options{})
+				s.Close()
+				// Another linked worktree, with work that exists nowhere else.
+				victimParent := newDirPath(t)
+				victim := filepath.Join(victimParent, "w")
+				gitCmd(t, f.dir, "worktree", "add", "-q", "--detach", victim, "HEAD")
+				write(t, victim, "precious.txt", "untracked, and nowhere else\n")
+
+				dir := filepath.Dir(filepath.Dir(info.Workspace)) // <state>/<owner ID>
+				fake := filepath.Join(dir, "deadbeef")
+				if shape == "the workspace is a link" {
+					if err := os.Mkdir(fake, 0o700); err != nil {
+						t.Fatal(err)
+					}
+					if err := os.Symlink(victim, filepath.Join(fake, "w")); err != nil {
+						t.Fatal(err)
+					}
+				} else if err := os.Symlink(victimParent, fake); err != nil {
+					t.Fatal(err)
+				}
+				recPath := filepath.Join(dir, sessionFile)
+				raw := mustRead(t, recPath)
+				raw = strings.ReplaceAll(raw, info.ID, "deadbeef")
+				if err := os.WriteFile(recPath, []byte(raw), 0o600); err != nil {
+					t.Fatal(err)
+				}
+
+				s2 := f.sessions(t, Options{})
+				if rec, err := s2.readRecord(); err != nil || rec == nil || rec.Workspace != filepath.Join(fake, "w") {
+					t.Fatalf("the tampered record was not read as one: %+v, %v", rec, err)
+				}
+				var err error
+				if call == "abandon" {
+					err = s2.Abandon(bg, false)
+					if err == nil {
+						t.Error("Abandon reported success")
+					}
+				} else {
+					_, err = s2.Start(bg, true)
+				}
+				t.Logf("%s: %v", call, err)
+				if got := mustRead(t, filepath.Join(victim, "precious.txt")); got != "untracked, and nowhere else\n" {
+					t.Errorf("the other worktree's file = %q", got)
+				}
+				if got := gitCmd(t, f.dir, "worktree", "list", "--porcelain"); !strings.Contains(got, "worktree "+victim+"\n") {
+					t.Errorf("the other worktree is no longer registered:\n%s", got)
+				}
+				if got := gitCmd(t, victim, "status", "--porcelain"); got != "?? precious.txt" {
+					t.Errorf("the other worktree's status: %q", got)
+				}
+			})
+		}
+	}
+}
+
+// What is removed is the session's own workspace and nothing else: a
+// directory at the recorded path that git does not know as that worktree
+// stays.
+func TestWorkspaceGitDoesNotKnowIsNotRemoved(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, info := f.start(t, Options{})
+	gitCmd(t, f.dir, "worktree", "remove", "--force", info.Workspace)
+	write(t, info.Workspace, "kept.txt", "not a worktree any more\n")
+	if err := s.Abandon(bg, false); err == nil {
+		t.Error("Abandon reported success")
+	}
+	if !exists(filepath.Join(info.Workspace, "kept.txt")) {
+		t.Error("a directory git does not know as the session's worktree was removed")
+	}
+}
