@@ -218,10 +218,10 @@ func (r *Repo) render(ctx context.Context, res *ReadResult, src io.Reader, start
 		}
 		var anchor string
 		if tagger != nil {
-			text := ml.shown().Text
-			tagger.add(text)
+			sl := ml.shown()
+			tagger.add(sl)
 			if lineNo >= start && lineNo < start+maxLines && !budgetHit {
-				anchor = anchorOf(anchorKey, text)
+				anchor = lineAnchor(anchorKey, sl)
 			}
 		}
 

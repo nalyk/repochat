@@ -12,8 +12,9 @@ import (
 var (
 	testKey  = []byte("0123456789abcdef0123456789abcdef")
 	otherKey = []byte("fedcba9876543210fedcba9876543210")
-	// anchoredLine matches one content line of read_file output in write mode.
-	anchoredLine = regexp.MustCompile(`^\s*(\d+):([a-z2-7]{3})\| `)
+	// anchoredLine matches one content line of read_file output in write
+	// mode; a line cut on reading shows the unmatchable anchor ???.
+	anchoredLine = regexp.MustCompile(`^\s*(\d+):([a-z2-7]{3}|\?\?\?)\| `)
 	anyAnchor    = regexp.MustCompile(`(?m)^\s*\d+:[a-z2-7]{3}\|`)
 )
 
@@ -119,7 +120,7 @@ func TestRenderAndShownLinesAgree(t *testing.T) {
 			t.Fatalf("%s: read shows %d lines of %d, shownLines has %d", p, len(shown), res.Total, len(lines))
 		}
 		for i, l := range lines {
-			if a := anchorOf(testKey, l.Text); shown[i+1] != a {
+			if a := lineAnchor(testKey, l); shown[i+1] != a {
 				t.Errorf("%s line %d: read shows %s, shownLines gives %s", p, i+1, shown[i+1], a)
 			}
 		}
@@ -340,4 +341,52 @@ func TestSearchResultsCarryAnchors(t *testing.T) {
 		t.Fatal(err)
 	}
 	mustContain(t, res.Text, "> 3:"+read[3]+"| // key [REDACTED:github-token]\n")
+}
+
+// A secret that straddles the point where a very long line is cut is only
+// half read, too short for the redactor to know it. Such a line must not be
+// anchored on its head, must be locked, and must not show the fragment.
+func TestSecretAcrossTheReadCut(t *testing.T) {
+	straddle := func(c string) string {
+		return "first\n" + strings.Repeat("a", maxLineBytes-31) + " ghp_" + strings.Repeat(c, 36) + " tail\nlast\n"
+	}
+	dir := newDir(t)
+	write(t, dir, "s.txt", straddle("S"))
+	write(t, dir, "t.txt", straddle("T"))
+	commit(t, dir, "straddle")
+	r := open(t, dir, Options{AnchorKey: testKey})
+
+	lines, err := r.shownLines(bg, []byte(straddle("S")))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(lines) != 3 || !lines[1].Locked || !lines[1].Long || lines[0].Locked || lines[2].Locked {
+		t.Fatalf("straddling line: %d lines, Locked=%v Long=%v", len(lines), lines[1].Locked, lines[1].Long)
+	}
+	if strings.Contains(lines[1].Text, "ghp_") || strings.Contains(lines[1].Text, "SSSS") {
+		t.Errorf("Text carries the secret's fragment: …%q", lines[1].Text[max(0, len(lines[1].Text)-60):])
+	}
+	if a := lineAnchor(testKey, lines[1]); a != unanchored {
+		t.Errorf("straddling line anchored %q", a)
+	}
+
+	s, tt := readText(t, r, "s.txt"), readText(t, r, "t.txt")
+	mustContain(t, s.Text, "  2:"+unanchored+"| ")
+	if s.FileTag == "" || s.FileTag != tt.FileTag {
+		t.Errorf("FileTag %q vs %q", s.FileTag, tt.FileTag)
+	}
+	if s.Text[len("FILE s.txt"):] != tt.Text[len("FILE t.txt"):] {
+		t.Errorf("reads differ only in the secret, yet differ")
+	}
+	res, err := r.Search(bg, SearchOptions{Query: "tail"}, r.Budget())
+	if err != nil {
+		t.Fatal(err)
+	}
+	if strings.Count(res.Text, "> 2:"+unanchored+"| ") != 2 {
+		t.Errorf("search must show the unmatchable anchor for both files:\n%.300s", res.Text)
+	}
+	// The tag still counts such a line: dropping it changes the tag.
+	if fileTagOf(testKey, lines) == fileTagOf(testKey, []shownLine{lines[0], lines[2]}) {
+		t.Error("file tag ignores a cut line")
+	}
 }

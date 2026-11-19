@@ -49,12 +49,19 @@ func newFileTagger(key []byte) *fileTagger {
 	return &fileTagger{h: h}
 }
 
-// add takes the next line's shown text. Each line is length-prefixed, so
-// moving text across a line boundary changes the tag.
-func (f *fileTagger) add(text string) {
+// add takes the next shown line. Each line is length-prefixed, so moving
+// text across a line boundary changes the tag. A line cut on reading
+// contributes a fixed marker instead of its text, as it does to anchors
+// (see lineAnchor): it still counts, but its head says nothing.
+func (f *fileTagger) add(l shownLine) {
+	if l.Cut {
+		f.h.Write([]byte{1})
+		return
+	}
 	var n [binary.MaxVarintLen64]byte
-	f.h.Write(n[:binary.PutUvarint(n[:], uint64(len(text)))])
-	io.WriteString(f.h, text)
+	f.h.Write([]byte{0})
+	f.h.Write(n[:binary.PutUvarint(n[:], uint64(len(l.Text)))])
+	io.WriteString(f.h, l.Text)
 }
 
 func (f *fileTagger) sum() string {
@@ -66,16 +73,36 @@ func (f *fileTagger) sum() string {
 func fileTagOf(key []byte, lines []shownLine) string {
 	f := newFileTagger(key)
 	for _, l := range lines {
-		f.add(l.Text)
+		f.add(l)
 	}
 	return f.sum()
 }
 
+// unanchored is the anchor of a line that cannot be anchored: one cut on
+// reading. It is outside anchorAlphabet, so no edit can cite it.
+const unanchored = "???"
+
 // shownLine is one line of a file as the model is shown it.
 type shownLine struct {
-	Text   string // masked, sanitised, UTF-8 repaired; not shortened for display
-	Locked bool   // the redactor masked something on this line (or in its unread tail)
-	Long   bool   // longer than the display limit: shown cut
+	// Text is the line masked, sanitised and UTF-8 repaired, not shortened
+	// for display; for a Cut line, which was never read whole, it is the
+	// shortened form read_file shows.
+	Text   string
+	Locked bool // the redactor masked something on this line, or could not tell (Cut)
+	Long   bool // longer than the display limit: shown cut
+	// Cut: longer than maxLineBytes, so the rest was never read. A secret
+	// that straddles the cut is too short there to be recognised, so such a
+	// line has no anchor and, with redaction on, is locked.
+	Cut bool
+}
+
+// lineAnchor is the anchor of a shown line: anchorOf its Text, or
+// unanchored for a Cut line. Every anchor shown or checked goes through it.
+func lineAnchor(key []byte, l shownLine) string {
+	if l.Cut {
+		return unanchored
+	}
+	return anchorOf(key, l.Text)
 }
 
 // maskedLine is one line after the per-line steps every reader of a file
@@ -101,8 +128,9 @@ func maskLine(st *RedactState, raw []byte, cut bool, key int) maskedLine {
 	text, masks := st.Masked(text)
 	st.Force(key)
 	ml.text = text
-	// A key marker in the unread tail is a value the model was not shown.
-	ml.locked = masks > 0 || (key != 0 && st.r.Enabled())
+	// A cut line may end in part of a secret, too short to be recognised,
+	// and a key marker in its unread tail is a value the model was not shown.
+	ml.locked = masks > 0 || (st.r.Enabled() && (cut || key != 0))
 	return ml
 }
 
@@ -110,7 +138,12 @@ func maskLine(st *RedactState, raw []byte, cut bool, key int) maskedLine {
 func (ml maskedLine) long() bool { return ml.cut || len(ml.text) > maxLineDisplay }
 
 func (ml maskedLine) shown() shownLine {
-	return shownLine{Text: Sanitize(ml.text), Locked: ml.locked, Long: ml.long()}
+	text := ml.text
+	if ml.cut {
+		// Never the head as read: its end may be a fragment of a secret.
+		text = truncateLine(text, true)
+	}
+	return shownLine{Text: Sanitize(text), Locked: ml.locked, Long: ml.long(), Cut: ml.cut}
 }
 
 // lineSource yields the lines of a content stream through maskLine.

@@ -591,18 +591,22 @@ func (r *Repo) scanFile(ctx context.Context, op *opener, rel string, m *matcher,
 // searchAnchors returns, when the repository shows anchors, the anchor of
 // each line of data by index: the very anchor read_file shows for it, from
 // shownLines. Should those lines not be the ones the search split data into
-// (a file read_file decodes from UTF-16), every anchor is "???", which no
-// edit accepts.
+// (a file read_file decodes from UTF-16), every anchor is unanchored, which
+// no edit accepts.
 func (r *Repo) searchAnchors(ctx context.Context, data []byte, count int) func(int) string {
 	key := r.Opts.AnchorKey
 	if len(key) == 0 {
 		return nil
 	}
-	shown, err := r.shownLines(ctx, data)
-	if err != nil || len(shown) != count || hasUTF16BOM(data) {
-		return func(int) string { return "???" }
+	none := func(int) string { return unanchored }
+	if hasUTF16BOM(data) {
+		return none
 	}
-	return func(i int) string { return anchorOf(key, shown[i].Text) }
+	shown, err := r.shownLines(ctx, data)
+	if err != nil || len(shown) != count {
+		return none
+	}
+	return func(i int) string { return lineAnchor(key, shown[i]) }
 }
 
 // windowLine shortens a long line to an excerpt that begins shortly before
