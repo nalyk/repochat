@@ -47,10 +47,10 @@ cd repochat
 make install          # compilează și copiază binarul în ~/.local/bin
 ```
 
-Sau direct cu Go (repository-ul este privat, deci Go trebuie să aibă acces la el):
+Sau direct cu Go:
 
 ```bash
-GOPRIVATE=github.com/nalyk/repochat go install github.com/nalyk/repochat@latest
+go install github.com/nalyk/repochat@latest
 ```
 
 Încă nu există niciun release publicat. Un tag `v*` pe `main` produce unul.
@@ -266,6 +266,8 @@ Ce nu garantează:
 - `tunnel-client` deschide un port de diagnoză pe `127.0.0.1`. repochat însuși nu ascultă pe nimic.
 
 Jurnalul local (`repochat log`) reține doar metadate. Argumentele se înregistrează doar cu `--audit-args`. În modul de scriere, fiecare set de modificări aplicat, fiecare undo, actualizare și merge se înregistrează cu checkpointul, numărul de linii și numele fișierelor atinse (primele 20, apoi câte mai sunt), niciodată cu conținutul lor. Numele acestor fișiere se înregistrează și fără `--audit-args`. E un istoric pentru tine și poate fi modificat de oricine are contul tău.
+
+Ai găsit o breșă? Raporteaz-o privat; [`SECURITY.md`](SECURITY.md) (în engleză) spune cum și ce se pune la socoteală.
 
 ## Depanare
 

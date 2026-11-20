@@ -5,7 +5,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 1. **Repository merge options can run a signing program. Guarantees 1, 6 and 7.**
 
-   Location: [`finish.go`, `Sessions.Finish`](/home/nalyk/gits/repochat/internal/repo/finish.go:605), particularly the configuration checks at line 647 and merge invocation at line 727.
+   Location: [`finish.go`, `Sessions.Finish`](internal/repo/finish.go:605), particularly the configuration checks at line 647 and merge invocation at line 727.
 
    Reproduction:
 
@@ -38,7 +38,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 2. **A tampered record plus a workspace symlink can delete another linked worktree. Guarantees 1 and 10.**
 
-   Locations: [`session.go`, `Sessions.readRecord`](/home/nalyk/gits/repochat/internal/repo/session.go:813), [`Sessions.removeWorkspace`](/home/nalyk/gits/repochat/internal/repo/session.go:710), and [`finish.go`, `Sessions.Abandon`](/home/nalyk/gits/repochat/internal/repo/finish.go:1075).
+   Locations: [`session.go`, `Sessions.readRecord`](internal/repo/session.go:813), [`Sessions.removeWorkspace`](internal/repo/session.go:710), and [`finish.go`, `Sessions.Abandon`](internal/repo/finish.go:1075).
 
    Reproduction:
 
@@ -70,7 +70,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 3. **Inserting beside an unlocked conflict marker exposes previously masked PEM material. Guarantee 5.**
 
-   Locations: [`changeset.go`, `Repo.editFile`](/home/nalyk/gits/repochat/internal/repo/changeset.go:930), especially line 1005; [`redact.go`, `RedactState.Masked`](/home/nalyk/gits/repochat/internal/repo/redact.go:174); [`apply.go`, `Repo.freshText`](/home/nalyk/gits/repochat/internal/repo/apply.go:744).
+   Locations: [`changeset.go`, `Repo.editFile`](internal/repo/changeset.go:930), especially line 1005; [`redact.go`, `RedactState.Masked`](internal/repo/redact.go:174); [`apply.go`, `Repo.freshText`](internal/repo/apply.go:744).
 
    Commit an ordinary exposed file, `notes.txt`, containing:
 
@@ -102,7 +102,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 4. **Changes to the owner’s `.repochatignore` do not resynchronize an already-open workspace. Guarantees 2 and 3.**
 
-   Locations: [`session.go`, `Sessions.ensure`](/home/nalyk/gits/repochat/internal/repo/session.go:386), [`Sessions.optionsDigest`](/home/nalyk/gits/repochat/internal/repo/session.go:891), and [`fileset.go`, `Repo.Snapshot`](/home/nalyk/gits/repochat/internal/repo/fileset.go:88).
+   Locations: [`session.go`, `Sessions.ensure`](internal/repo/session.go:386), [`Sessions.optionsDigest`](internal/repo/session.go:891), and [`fileset.go`, `Repo.Snapshot`](internal/repo/fileset.go:88).
 
    Reproduction:
 
@@ -119,7 +119,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 5. **A stale multi-line range is accepted when only its interior changed. Guarantee 4.**
 
-   Location: [`changeset.go`, `Repo.planChanges`](/home/nalyk/gits/repochat/internal/repo/changeset.go:620), anchor validation at lines 658–673.
+   Location: [`changeset.go`, `Repo.planChanges`](internal/repo/changeset.go:620), anchor validation at lines 658–673.
 
    Start with:
 
@@ -147,7 +147,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 6. **There is another stale-content gap between checking files and writing them. Guarantee 4.**
 
-   Location: [`apply.go`, `Sessions.writeFiles`](/home/nalyk/gits/repochat/internal/repo/apply.go:350).
+   Location: [`apply.go`, `Sessions.writeFiles`](internal/repo/apply.go:350).
 
    Reproduction schedule:
 
@@ -162,7 +162,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 7. **Finish can change the owner’s checkout without landing anything, or overwrite a newly appeared ignored file. Guarantee 7.**
 
-   Location: [`finish.go`, `Sessions.Finish`](/home/nalyk/gits/repochat/internal/repo/finish.go:605), especially lines 723–755.
+   Location: [`finish.go`, `Sessions.Finish`](internal/repo/finish.go:605), especially lines 723–755.
 
    Two concrete triggers:
 
@@ -173,7 +173,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 8. **A moved directory handle can carry a write outside the workspace. Guarantee 1.**
 
-   Location: [`fswrite.go`, `opener.walk`](/home/nalyk/gits/repochat/internal/repo/fswrite.go:24) and [`opener.WriteAtomic`](/home/nalyk/gits/repochat/internal/repo/fswrite.go:81).
+   Location: [`fswrite.go`, `opener.walk`](internal/repo/fswrite.go:24) and [`opener.WriteAtomic`](internal/repo/fswrite.go:81).
 
    Reproduction schedule:
 
@@ -188,7 +188,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 9. **Finish still has a deadline that kills git mid-checkout. Guarantee 7.**
 
-   Locations: [`finish.go`, `ownerMergeTimeout`](/home/nalyk/gits/repochat/internal/repo/finish.go:796) and [`repo.go`, `runGitInput`](/home/nalyk/gits/repochat/internal/repo/repo.go:571).
+   Locations: [`finish.go`, `ownerMergeTimeout`](internal/repo/finish.go:796) and [`repo.go`, `runGitInput`](internal/repo/repo.go:571).
 
    Reproduction:
 
@@ -202,8 +202,8 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 There are also two **contract mismatches explicitly permitted by the design**, rather than accidental omissions:
 
-- **Guarantee 2, protected paths during update:** [`Sessions.Update`](/home/nalyk/gits/repochat/internal/repo/finish.go:174) merges without checking `protectedPath`. Start a session, commit a change to `.github/workflows/ci.yml` on the owner’s branch, then call `update_session {}`. The protected workspace file changes.
-- **Guarantee 5, whole-file removal:** [`Repo.planChanges`](/home/nalyk/gits/repochat/internal/repo/changeset.go:705) checks a remove’s file tag but not locked lines. Read an exposed file containing a masked token, then remove it using its `file_tag`. The file and masked line disappear. The design expressly allows this, despite its broader anti-goal and the guarantee in this review request.
+- **Guarantee 2, protected paths during update:** [`Sessions.Update`](internal/repo/finish.go:174) merges without checking `protectedPath`. Start a session, commit a change to `.github/workflows/ci.yml` on the owner’s branch, then call `update_session {}`. The protected workspace file changes.
+- **Guarantee 5, whole-file removal:** [`Repo.planChanges`](internal/repo/changeset.go:705) checks a remove’s file tag but not locked lines. Read an exposed file containing a masked token, then remove it using its `file_tag`. The file and masked line disappear. The design expressly allows this, despite its broader anti-goal and the guarantee in this review request.
 
 For the remaining coverage:
 
@@ -242,7 +242,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 1. **Repository merge options can run a signing program. Guarantees 1, 6 and 7.**
 
-   Location: [`finish.go`, `Sessions.Finish`](/home/nalyk/gits/repochat/internal/repo/finish.go:605), particularly the configuration checks at line 647 and merge invocation at line 727.
+   Location: [`finish.go`, `Sessions.Finish`](internal/repo/finish.go:605), particularly the configuration checks at line 647 and merge invocation at line 727.
 
    Reproduction:
 
@@ -275,7 +275,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 2. **A tampered record plus a workspace symlink can delete another linked worktree. Guarantees 1 and 10.**
 
-   Locations: [`session.go`, `Sessions.readRecord`](/home/nalyk/gits/repochat/internal/repo/session.go:813), [`Sessions.removeWorkspace`](/home/nalyk/gits/repochat/internal/repo/session.go:710), and [`finish.go`, `Sessions.Abandon`](/home/nalyk/gits/repochat/internal/repo/finish.go:1075).
+   Locations: [`session.go`, `Sessions.readRecord`](internal/repo/session.go:813), [`Sessions.removeWorkspace`](internal/repo/session.go:710), and [`finish.go`, `Sessions.Abandon`](internal/repo/finish.go:1075).
 
    Reproduction:
 
@@ -307,7 +307,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 3. **Inserting beside an unlocked conflict marker exposes previously masked PEM material. Guarantee 5.**
 
-   Locations: [`changeset.go`, `Repo.editFile`](/home/nalyk/gits/repochat/internal/repo/changeset.go:930), especially line 1005; [`redact.go`, `RedactState.Masked`](/home/nalyk/gits/repochat/internal/repo/redact.go:174); [`apply.go`, `Repo.freshText`](/home/nalyk/gits/repochat/internal/repo/apply.go:744).
+   Locations: [`changeset.go`, `Repo.editFile`](internal/repo/changeset.go:930), especially line 1005; [`redact.go`, `RedactState.Masked`](internal/repo/redact.go:174); [`apply.go`, `Repo.freshText`](internal/repo/apply.go:744).
 
    Commit an ordinary exposed file, `notes.txt`, containing:
 
@@ -339,7 +339,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 4. **Changes to the owner’s `.repochatignore` do not resynchronize an already-open workspace. Guarantees 2 and 3.**
 
-   Locations: [`session.go`, `Sessions.ensure`](/home/nalyk/gits/repochat/internal/repo/session.go:386), [`Sessions.optionsDigest`](/home/nalyk/gits/repochat/internal/repo/session.go:891), and [`fileset.go`, `Repo.Snapshot`](/home/nalyk/gits/repochat/internal/repo/fileset.go:88).
+   Locations: [`session.go`, `Sessions.ensure`](internal/repo/session.go:386), [`Sessions.optionsDigest`](internal/repo/session.go:891), and [`fileset.go`, `Repo.Snapshot`](internal/repo/fileset.go:88).
 
    Reproduction:
 
@@ -356,7 +356,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 5. **A stale multi-line range is accepted when only its interior changed. Guarantee 4.**
 
-   Location: [`changeset.go`, `Repo.planChanges`](/home/nalyk/gits/repochat/internal/repo/changeset.go:620), anchor validation at lines 658–673.
+   Location: [`changeset.go`, `Repo.planChanges`](internal/repo/changeset.go:620), anchor validation at lines 658–673.
 
    Start with:
 
@@ -384,7 +384,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 6. **There is another stale-content gap between checking files and writing them. Guarantee 4.**
 
-   Location: [`apply.go`, `Sessions.writeFiles`](/home/nalyk/gits/repochat/internal/repo/apply.go:350).
+   Location: [`apply.go`, `Sessions.writeFiles`](internal/repo/apply.go:350).
 
    Reproduction schedule:
 
@@ -399,7 +399,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 7. **Finish can change the owner’s checkout without landing anything, or overwrite a newly appeared ignored file. Guarantee 7.**
 
-   Location: [`finish.go`, `Sessions.Finish`](/home/nalyk/gits/repochat/internal/repo/finish.go:605), especially lines 723–755.
+   Location: [`finish.go`, `Sessions.Finish`](internal/repo/finish.go:605), especially lines 723–755.
 
    Two concrete triggers:
 
@@ -410,7 +410,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 8. **A moved directory handle can carry a write outside the workspace. Guarantee 1.**
 
-   Location: [`fswrite.go`, `opener.walk`](/home/nalyk/gits/repochat/internal/repo/fswrite.go:24) and [`opener.WriteAtomic`](/home/nalyk/gits/repochat/internal/repo/fswrite.go:81).
+   Location: [`fswrite.go`, `opener.walk`](internal/repo/fswrite.go:24) and [`opener.WriteAtomic`](internal/repo/fswrite.go:81).
 
    Reproduction schedule:
 
@@ -425,7 +425,7 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 9. **Finish still has a deadline that kills git mid-checkout. Guarantee 7.**
 
-   Locations: [`finish.go`, `ownerMergeTimeout`](/home/nalyk/gits/repochat/internal/repo/finish.go:796) and [`repo.go`, `runGitInput`](/home/nalyk/gits/repochat/internal/repo/repo.go:571).
+   Locations: [`finish.go`, `ownerMergeTimeout`](internal/repo/finish.go:796) and [`repo.go`, `runGitInput`](internal/repo/repo.go:571).
 
    Reproduction:
 
@@ -439,8 +439,8 @@ Below, `W` means the workspace, `S` its parent state directory containing `sessi
 
 There are also two **contract mismatches explicitly permitted by the design**, rather than accidental omissions:
 
-- **Guarantee 2, protected paths during update:** [`Sessions.Update`](/home/nalyk/gits/repochat/internal/repo/finish.go:174) merges without checking `protectedPath`. Start a session, commit a change to `.github/workflows/ci.yml` on the owner’s branch, then call `update_session {}`. The protected workspace file changes.
-- **Guarantee 5, whole-file removal:** [`Repo.planChanges`](/home/nalyk/gits/repochat/internal/repo/changeset.go:705) checks a remove’s file tag but not locked lines. Read an exposed file containing a masked token, then remove it using its `file_tag`. The file and masked line disappear. The design expressly allows this, despite its broader anti-goal and the guarantee in this review request.
+- **Guarantee 2, protected paths during update:** [`Sessions.Update`](internal/repo/finish.go:174) merges without checking `protectedPath`. Start a session, commit a change to `.github/workflows/ci.yml` on the owner’s branch, then call `update_session {}`. The protected workspace file changes.
+- **Guarantee 5, whole-file removal:** [`Repo.planChanges`](internal/repo/changeset.go:705) checks a remove’s file tag but not locked lines. Read an exposed file containing a masked token, then remove it using its `file_tag`. The file and masked line disappear. The design expressly allows this, despite its broader anti-goal and the guarantee in this review request.
 
 For the remaining coverage:
 
