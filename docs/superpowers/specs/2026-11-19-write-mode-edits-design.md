@@ -1,6 +1,6 @@
 # Write mode, project 1: edits in a session workspace
 
-Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-19 · status: **proposed, awaiting the owner's approval**
+Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-19 · status: **approved by the owner on 2026-11-19 and built; not yet used from a real ChatGPT session**
 
 Anything marked "my call" was decided by the author of this document, not by the owner.
 

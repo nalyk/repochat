@@ -39,84 +39,84 @@
             "id": "B1",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "schema inserts the variadic required slice directly; calls without required arguments produce a nil slice and therefore JSON null. The affected tools are repo_info, tree, git_status, and git_log. Evidence: [schema helper](/home/ubuntu/gits/repochat/src/main.go:647).",
+            "rationale": "schema inserts the variadic required slice directly; calls without required arguments produce a nil slice and therefore JSON null. The affected tools are repo_info, tree, git_status, and git_log. Evidence: [schema helper](src/main.go:647).",
             "proposed_change": "Omit required when empty, or emit an empty array. Validate the serialized catalogue against its declared JSON Schema dialect."
         },
         {
             "id": "B2",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "repo_info requires rev-parse --short HEAD to succeed and returns its error. An unborn repository has no HEAD commit. Evidence: [repo_info](/home/ubuntu/gits/repochat/src/main.go:671).",
+            "rationale": "repo_info requires rev-parse --short HEAD to succeed and returns its error. An unborn repository has no HEAD commit. Evidence: [repo_info](src/main.go:671).",
             "proposed_change": "Represent unborn HEAD explicitly; distinguish it from corruption and other Git failures."
         },
         {
             "id": "B3",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The handler copies any nonempty requested protocolVersion into the response without checking support. Evidence: [initialize handler](/home/ubuntu/gits/repochat/src/main.go:705).",
+            "rationale": "The handler copies any nonempty requested protocolVersion into the response without checking support. Evidence: [initialize handler](src/main.go:705).",
             "proposed_change": "Negotiate only implemented legacy revisions and separately validate modern per-request versions."
         },
         {
             "id": "B4",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The regex matches token/password followed by a dot, including your examples. Tree and search silently omit matches. Evidence: [regex](/home/ubuntu/gits/repochat/src/main.go:38), [tree filtering](/home/ubuntu/gits/repochat/src/main.go:512).",
+            "rationale": "The regex matches token/password followed by a dot, including your examples. Tree and search silently omit matches. Evidence: [regex](src/main.go:38), [tree filtering](src/main.go:512).",
             "proposed_change": "Replace broad keyword matching with explicit credential-file rules and disclose exclusions."
         },
         {
             "id": "B5",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The listed names/extensions are absent from the rules: terraform.tfstate, ordinary *.tfvars, service-account.json, and .htpasswd do not match the current expression. Evidence: [regex](/home/ubuntu/gits/repochat/src/main.go:38).",
+            "rationale": "The listed names/extensions are absent from the rules: terraform.tfstate, ordinary *.tfvars, service-account.json, and .htpasswd do not match the current expression. Evidence: [regex](src/main.go:38).",
             "proposed_change": "Add explicit rules and regression cases, while documenting that filename policy cannot identify every secret."
         },
         {
             "id": "B6",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "Tree and search use WalkDir with hard-coded filtering; read_file likewise never consults Git ignore rules. This both exposes ignored files and hides tracked source under names such as vendor. Evidence: [tree](/home/ubuntu/gits/repochat/src/main.go:500), [search](/home/ubuntu/gits/repochat/src/main.go:565), [path checks](/home/ubuntu/gits/repochat/src/main.go:389).",
+            "rationale": "Tree and search use WalkDir with hard-coded filtering; read_file likewise never consults Git ignore rules. This both exposes ignored files and hides tracked source under names such as vendor. Evidence: [tree](src/main.go:500), [search](src/main.go:565), [path checks](src/main.go:389).",
             "proposed_change": "Use an explicitly defined Git fileset consistently across discovery, reads, and search."
         },
         {
             "id": "B7",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The zero-result return occurs before the capped-search footer. Its wording says 'within scanned text files', but does not reveal that scanning stopped early. Scanner errors are also discarded. Evidence: [search completion](/home/ubuntu/gits/repochat/src/main.go:619).",
+            "rationale": "The zero-result return occurs before the capped-search footer. Its wording says 'within scanned text files', but does not reveal that scanning stopped early. Scanner errors are also discarded. Evidence: [search completion](src/main.go:619).",
             "proposed_change": "Return completeness, scanned/skipped counts, and stop reasons even when there are zero matches."
         },
         {
             "id": "B8",
             "verdict": "modify",
             "severity": "minor",
-            "rationale": "The limitations are correctly identified: reads clamp at 300 lines, omit totals, and git_log requests metadata only. These are documented capability gaps, not protocol or security defects. Evidence: [read limit](/home/ubuntu/gits/repochat/src/main.go:448), [git_log](/home/ubuntu/gits/repochat/src/main.go:689).",
+            "rationale": "The limitations are correctly identified: reads clamp at 300 lines, omit totals, and git_log requests metadata only. These are documented capability gaps, not protocol or security defects. Evidence: [read limit](src/main.go:448), [git_log](src/main.go:689).",
             "proposed_change": "Classify these as product requirements. Prioritize reliable read continuation and diff/show before broad language-outline coverage."
         },
         {
             "id": "B9",
             "verdict": "modify",
             "severity": "major",
-            "rationale": "Credential inheritance is confirmed. Repo-configured clean/process filters remain a relevant execution surface when Git inspects worktree contents. However, the common Git wrapper already disables fsmonitor, hooks, and paging, and current tools do not request textconv-producing diffs. Evidence: [environment](/home/ubuntu/gits/repochat/src/main.go:351), [Git wrapper](/home/ubuntu/gits/repochat/src/main.go:367), [filter behavior](https://git-scm.com/docs/gitattributes).",
+            "rationale": "Credential inheritance is confirmed. Repo-configured clean/process filters remain a relevant execution surface when Git inspects worktree contents. However, the common Git wrapper already disables fsmonitor, hooks, and paging, and current tools do not request textconv-producing diffs. Evidence: [environment](src/main.go:351), [Git wrapper](src/main.go:367), [filter behavior](https://git-scm.com/docs/gitattributes).",
             "proposed_change": "Narrow the defect statement to reachable execution paths and credential inheritance; retain the broader surfaces as requirements for new Git tools."
         },
         {
             "id": "B10",
             "verdict": "disagree",
             "severity": "minor",
-            "rationale": "Tests already reject traversal, absolute paths, secret paths, internal aliases to secrets, external symlinks, unknown tools, and insecure config permissions. Evidence: [path negatives](/home/ubuntu/gits/repochat/src/main_test.go:47), [unknown tool](/home/ubuntu/gits/repochat/src/main_test.go:105), [permissions negative](/home/ubuntu/gits/repochat/src/main_test.go:132).",
+            "rationale": "Tests already reject traversal, absolute paths, secret paths, internal aliases to secrets, external symlinks, unknown tools, and insecure config permissions. Evidence: [path negatives](src/main_test.go:47), [unknown tool](src/main_test.go:105), [permissions negative](src/main_test.go:132).",
             "proposed_change": "Replace 'happy-path only' with 'limited negative coverage; missing race, hostile Git configuration, resource exhaustion, and substantive protocol conformance coverage'."
         },
         {
             "id": "B11",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The launcher supplies no health override, upstream defaults to 127.0.0.1:8080, and README says no port is opened. Evidence: [launcher](/home/ubuntu/gits/repochat/src/main.go:340), [README claim](/home/ubuntu/gits/repochat/src/README.md:22), [upstream default](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/runtimeconfig/config.go#L147).",
+            "rationale": "The launcher supplies no health override, upstream defaults to 127.0.0.1:8080, and README says no port is opened. Evidence: [launcher](src/main.go:340), [README claim](src/README.md:22), [upstream default](https://github.com/openai/tunnel-client/blob/v0.0.21/pkg/runtimeconfig/config.go#L147).",
             "proposed_change": "Use an ephemeral loopback port and disclose the health/admin listener."
         },
         {
             "id": "D1",
             "verdict": "agree",
             "severity": "none",
-            "rationale": "The separation addresses the MVP\u2019s current coupling between repository operations, tool dispatch, and wire handling. Evidence: [combined dispatch and protocol code](/home/ubuntu/gits/repochat/src/main.go:669).",
+            "rationale": "The separation addresses the MVP\u2019s current coupling between repository operations, tool dispatch, and wire handling. Evidence: [combined dispatch and protocol code](src/main.go:669).",
             "proposed_change": "Retain. Make the repository service expose policy-enforced operations so CLI and MCP cannot accidentally choose different safety paths."
         },
         {
@@ -144,7 +144,7 @@
             "id": "D5",
             "verdict": "modify",
             "severity": "major",
-            "rationale": "Output-only regex replacement can miss a PEM body requested without its BEGIN line, secrets split by output caps, and patch lines carrying diff prefixes. This design does not specify where redaction occurs relative to slicing and rendering. The MVP already slices content before returning it: [read_file](/home/ubuntu/gits/repochat/src/main.go:456).",
+            "rationale": "Output-only regex replacement can miss a PEM body requested without its BEGIN line, secrets split by output caps, and patch lines carrying diff prefixes. This design does not specify where redaction occurs relative to slicing and rendering. The MVP already slices content before returning it: [read_file](src/main.go:456).",
             "proposed_change": "Detect secret spans in bounded source content before line selection, truncation, context extraction, or diff formatting; preserve line numbering. Handle oversized or incomplete blocks conservatively. Redact repository-derived metadata and errors field by field. Report that masking is best effort, and address the search oracle in M2."
         },
         {
@@ -165,7 +165,7 @@
             "id": "D8",
             "verdict": "modify",
             "severity": "major",
-            "rationale": "Response and wall-clock limits do not bound incoming JSON, queued work, fileset memory, decompressed Git objects, long-line scanning, or descendant processes. The MVP demonstrates the distinction by allocating CombinedOutput before truncating it. Evidence: [current Git output handling](/home/ubuntu/gits/repochat/src/main.go:376).",
+            "rationale": "Response and wall-clock limits do not bound incoming JSON, queued work, fileset memory, decompressed Git objects, long-line scanning, or descendant processes. The MVP demonstrates the distinction by allocating CombinedOutput before truncating it. Evidence: [current Git output handling](src/main.go:376).",
             "proposed_change": "Budget encoded response bytes, reserving space for metadata and truncation notices. Bound input frames, queue length, arguments, filesets, bytes read, object sizes, and intermediate buffers. Start deadlines at admission; cancel queued work independently of the worker pool. Bound process-tree shutdown and pipe draining. Enumerate every reason for incomplete search, including unreadable, binary, changed, and oversized files."
         },
         {
@@ -193,21 +193,21 @@
             "id": "D12",
             "verdict": "modify",
             "severity": "minor",
-            "rationale": "The key charset matches upstream; tunnel IDs have a more specific current syntax than the MVP\u2019s prefix/length check. The existing setup restores 'echo', not the terminal\u2019s exact prior state. Literal key flags would also expose secrets through argv/history. Evidence: [upstream validation](https://github.com/openai/tunnel-client/blob/master/pkg/runtimeconfig/config.go#L179), [existing terminal handling](/home/ubuntu/gits/repochat/src/main.go:103).",
+            "rationale": "The key charset matches upstream; tunnel IDs have a more specific current syntax than the MVP\u2019s prefix/length check. The existing setup restores 'echo', not the terminal\u2019s exact prior state. Literal key flags would also expose secrets through argv/history. Evidence: [upstream validation](https://github.com/openai/tunnel-client/blob/master/pkg/runtimeconfig/config.go#L179), [existing terminal handling](src/main.go:103).",
             "proposed_change": "Use env/file input for noninteractive secrets. Restore the exact terminal state on supported interruption paths and handle non-TTY input explicitly. Validate config schema/version, ownership, parent-directory permissions, and symlinks. Report syntax validation separately from successful authentication."
         },
         {
             "id": "D13",
             "verdict": "modify",
             "severity": "minor",
-            "rationale": "The proposed subprocess tests improve materially on the MVP, but credential presence is not validity and a local MCP exchange does not verify tunnel transport. Upstream health documentation explicitly separates these states. Evidence: [health contract](https://github.com/openai/tunnel-client/blob/master/docs/health.md), [current doctor](/home/ubuntu/gits/repochat/src/main.go:243).",
+            "rationale": "The proposed subprocess tests improve materially on the MVP, but credential presence is not validity and a local MCP exchange does not verify tunnel transport. Upstream health documentation explicitly separates these states. Evidence: [health contract](https://github.com/openai/tunnel-client/blob/master/docs/health.md), [current doctor](src/main.go:243).",
             "proposed_change": "Print separate local, credential-syntax, transport, and remote-test statuses, including 'not tested'. Enforce dependency compatibility rather than only displaying versions. Run all subprocess checks through the same hardened environment and effective policy used in production."
         },
         {
             "id": "D14",
             "verdict": "modify",
             "severity": "minor",
-            "rationale": "These commands are valuable, but 'exactly what the model would receive' requires the same policy, serialization, redaction, limits, and selected protocol era. Directly calling a lower-level repository function would produce misleading diagnostics. Evidence: the MVP currently has distinct [call](/home/ubuntu/gits/repochat/src/main.go:669) and [tool-result](/home/ubuntu/gits/repochat/src/main.go:736) layers.",
+            "rationale": "These commands are valuable, but 'exactly what the model would receive' requires the same policy, serialization, redaction, limits, and selected protocol era. Directly calling a lower-level repository function would produce misleading diagnostics. Evidence: the MVP currently has distinct [call](src/main.go:669) and [tool-result](src/main.go:736) layers.",
             "proposed_change": "Route call through the production tool pipeline and expose protocol selection. Generate client-native JSON argv arrays with an explicit root and equivalent policy settings; never embed credentials. Include effective-policy and exclusion summaries in local introspection."
         },
         {
@@ -258,7 +258,7 @@
             "id": "M5",
             "title": "Repository text and filenames are hostile output",
             "severity": "major",
-            "detail": "README instructions, commit messages, refs, filenames, and symlink targets can contain prompt injection, newlines, terminal escapes, or invalid UTF-8. Newline-delimited Git parsing and raw '%s' terminal logging are unsafe presentation choices. The MVP already formats repository text directly: [search formatting](/home/ubuntu/gits/repochat/src/main.go:613). OpenAI also identifies prompt injection as a custom-server risk: [custom MCP guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server).",
+            "detail": "README instructions, commit messages, refs, filenames, and symlink targets can contain prompt injection, newlines, terminal escapes, or invalid UTF-8. Newline-delimited Git parsing and raw '%s' terminal logging are unsafe presentation choices. The MVP already formats repository text directly: [search formatting](src/main.go:613). OpenAI also identifies prompt injection as a custom-server risk: [custom MCP guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server).",
             "proposed_change": "Use NUL-delimited Git formats and structured parsing. Define reversible identifiers for non-UTF-8 filenames rather than silently replacing bytes. Escape terminal controls and quote displayed names/targets. Label repository material as untrusted data and keep it out of server instructions and tool descriptions."
         },
         {

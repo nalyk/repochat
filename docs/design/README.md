@@ -2,7 +2,7 @@
 
 Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
 
-repochat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (autor) și Codex CLI (`codex exec`, sandbox doar-citire, cu căutare web), rulată local. Fișierele de aici sunt transcrierea brută: ce i s-a trimis lui Codex și ce a răspuns, în JSON validat pe o schemă.
+repochat 1.0 a fost proiectat într-o dezbatere adversarială între Claude (autor) și Codex CLI (`codex exec`, sandbox doar-citire, cu căutare web), rulată local. Fișierele de aici sunt transcrierea brută: ce i s-a trimis lui Codex și ce a răspuns, în JSON validat pe o schemă. Singura modificare față de ce s-a primit: prefixul căilor de pe calculatorul local a fost scos din linkuri, așa că ele încep de la rădăcina repository-ului.
 
 | Fișier | Conținut |
 |---|---|

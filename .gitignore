@@ -3,3 +3,7 @@
 *.test
 *.out
 coverage.*
+
+# Local agent and tooling state
+/.claude/
+/.superpowers/

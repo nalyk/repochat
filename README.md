@@ -47,10 +47,10 @@ cd repochat
 make install          # builds and copies the binary to ~/.local/bin
 ```
 
-Or with Go directly (the repository is private, so Go needs access to it):
+Or with Go directly:
 
 ```bash
-GOPRIVATE=github.com/nalyk/repochat go install github.com/nalyk/repochat@latest
+go install github.com/nalyk/repochat@latest
 ```
 
 There is no published release yet. A `v*` tag on `main` builds one.
@@ -266,6 +266,8 @@ What it does not guarantee:
 - `tunnel-client` opens a diagnostics port on `127.0.0.1`. repochat itself listens on nothing.
 
 The local log (`repochat log`) keeps metadata only. Arguments are recorded only with `--audit-args`. In write mode every applied change set, undo, update and merge is recorded with its checkpoint, its line counts and the names of the files it touched (the first 20, then how many more), never their content. Those file names are recorded without `--audit-args` too. It is a history for you and can be edited by anyone with your account.
+
+Found a hole? Report it privately; [`SECURITY.md`](SECURITY.md) says how and what counts.
 
 ## Troubleshooting
 
