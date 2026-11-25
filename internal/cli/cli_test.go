@@ -20,6 +20,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/nalyk/repochat/internal/guidance"
 	"github.com/nalyk/repochat/internal/repo"
 )
 
@@ -462,6 +463,12 @@ func TestLauncherEndToEnd(t *testing.T) {
 	sess, err := decodeSession(rec.ChildArgv[3])
 	if err != nil || sess.Root != e.repo || sess.Events == "" {
 		t.Errorf("session blob: %+v %v", sess, err)
+	}
+	if sess != nil && sess.GuidanceKey != guidance.Key(testTunnel) {
+		t.Errorf("the session carries guidance key %q, want %q", sess.GuidanceKey, guidance.Key(testTunnel))
+	}
+	if strings.Contains(string(mustDecode(t, rec.ChildArgv[3])), testTunnel) {
+		t.Error("the session must carry the guidance key, never the raw tunnel ID")
 	}
 	if strings.Contains(rec.ChildArgv[3], testKey) || strings.Contains(string(mustDecode(t, rec.ChildArgv[3])), "sk-") {
 		t.Error("the session must not contain credentials")
