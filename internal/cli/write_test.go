@@ -760,3 +760,55 @@ func TestSessionDiffWithoutASessionOrOnTheWrongCommand(t *testing.T) {
 		}
 	}
 }
+
+func TestSessionDiffRefusesHostileCheckpoints(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	if text, isErr := d.call("apply_changes", createNotes); isErr {
+		t.Fatalf("apply_changes: %s", text)
+	}
+	for _, bad := range []string{"--output=x", "HEAD^{/x}", "-x"} {
+		out, errText, code := runCLI("session", "diff", "--checkpoint", bad, "--root", e.repo)
+		if code == 0 {
+			t.Errorf("--checkpoint %q succeeded: %s", bad, out)
+		}
+		if strings.Contains(out, "notes.md") {
+			t.Errorf("--checkpoint %q showed a diff:\n%s", bad, out)
+		}
+		_ = errText
+		for _, dir := range []string{e.repo, "."} {
+			if _, err := os.Stat(filepath.Join(dir, "x")); err == nil {
+				t.Errorf("--checkpoint %q wrote a file x in %s", bad, dir)
+			}
+		}
+	}
+	if ws := sessionWorkspaces(t); len(ws) > 0 {
+		if _, err := os.Stat(filepath.Join(ws[0], "x")); err == nil {
+			t.Error("a file x was written in the session workspace")
+		}
+	}
+}
+
+func TestSessionDiffSaysWhenNotEverythingFit(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	first, isErr := d.call("apply_changes", map[string]any{
+		"changes": []any{map[string]any{"op": "create", "path": "big.txt", "text": strings.Repeat("line of text\n", 400)}},
+		"message": "add big",
+	})
+	if isErr {
+		t.Fatalf("apply_changes: %s", first)
+	}
+	cp := regexp.MustCompile(`checkpoint ([0-9a-f]{12})`).FindStringSubmatch(first)
+	if cp == nil {
+		t.Fatalf("no checkpoint in %s", first)
+	}
+	old := terminalDiffBudget
+	terminalDiffBudget = 600
+	defer func() { terminalDiffBudget = old }()
+	out, _, code := runCLI("session", "diff", "--root", e.repo)
+	if code != 0 {
+		t.Fatalf("session diff: %d", code)
+	}
+	wantIn(t, out, "Not everything fit: `git diff main...repochat/")
+	out, _, _ = runCLI("session", "diff", "--checkpoint", cp[1], "--root", e.repo)
+	wantIn(t, out, "Not everything fit: `git diff "+cp[1]+"^ "+cp[1]+"`")
+}

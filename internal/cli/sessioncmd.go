@@ -188,7 +188,7 @@ func cmdSession(c *console, args []string) int {
 
 // terminalDiffBudget is the size of diff the terminal shows: the owner's
 // own screen, not a model's context, so it is effectively unlimited.
-const terminalDiffBudget = 64 << 20
+var terminalDiffBudget = 64 << 20
 
 // printSessionDiff shows what finish would land, or one checkpoint's change.
 func printSessionDiff(ctx context.Context, c *console, r *repo.Repo, st *repo.SessionStatus, checkpoint string, stat bool) int {
@@ -203,7 +203,12 @@ func printSessionDiff(ctx context.Context, c *console, r *repo.Repo, st *repo.Se
 	}
 	fmt.Fprintln(c.out, strings.TrimRight(res.Text, "\n"))
 	if len(res.Omitted)+len(res.Cut) > 0 || res.Incomplete {
-		fmt.Fprintf(c.out, "Not everything fit: `git diff %s...%s` shows the rest.\n", st.Info.StartBranch, st.Info.Branch)
+		start, branch := repo.SanitizeLine(st.Info.StartBranch), repo.SanitizeLine(st.Info.Branch)
+		if checkpoint != "" {
+			fmt.Fprintf(c.out, "Not everything fit: `git diff %s^ %s` shows the rest.\n", repo.SanitizeLine(checkpoint), repo.SanitizeLine(checkpoint))
+		} else {
+			fmt.Fprintf(c.out, "Not everything fit: `git diff %s...%s` shows the rest.\n", start, branch)
+		}
 	}
 	return 0
 }
