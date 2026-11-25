@@ -157,8 +157,8 @@ Behaviour:
 Results and instructions:
 - A replayed result begins "Operation <id> was already done: <what>. Nothing was done again." and carries `"replayed": true` in `@meta`. For checkpoint results, add "Read the files again for fresh anchors."
 - The `finish_session` result adds:
-  - "Merged revision: session at <Head[:12]>, from <Base[:12]>."
-  - "Full diff: `git diff <start_branch>...<session_branch>` or `repochat session diff`."
+  - "Merged revision: the session at <Head[:12]> (the session started at <Base[:12]>)."
+  - "Full diff: `git diff <Before> <Commit>` in the user's checkout." `Before` is the owner's tip before the merge (full ID), so the command works after a fast-forward and a squash; `repochat session diff` needs an open session and is not offered after a finish. (Changed in the final review wave.)
   - "No checks were run: repochat cannot run commands yet."
   - `@meta` gains `head` and `base`.
 - `WriteInstructions` gains one sentence at the end: "Pass a new operation_id with every call that changes something, and expected_checkpoint (the latest checkpoint you saw) with finish_session."
