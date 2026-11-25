@@ -108,6 +108,7 @@ repochat --write --new-session      # start a new session instead of resuming th
 repochat --write --confirm-merge    # finish_session does not merge; you do, with repochat session finish
 repochat session                    # from any terminal: the open session, its checkpoints, the changed files
 repochat session finish             # merge it yourself, after a question [--squash] [--message TEXT] [--yes]
+repochat session diff               # what finish would land, or one checkpoint [--checkpoint ID] [--stat]
 repochat session abandon            # remove its workspace; the branch is kept [--delete-branch]
 ```
 
