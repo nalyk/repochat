@@ -41,8 +41,9 @@ func changesSchema() map[string]any {
 	str := func(desc string) map[string]any { return map[string]any{"type": "string", "description": desc} }
 	op := str("What to do. replace: lines from..to become text. insert: text goes before or after the line at, or at the start or end of the file. " +
 		"delete: lines from..to are removed. create: a new file at path whose whole content is text. remove: delete the file at path (needs file_tag). move: rename path to to_path. " +
+		"format: run gofmt on the .go file at path after the other operations on it (needs no other field). " +
 		"A replace or delete of three or more lines also needs file_tag.")
-	op["enum"] = []string{"replace", "insert", "delete", "create", "remove", "move"}
+	op["enum"] = []string{"replace", "insert", "delete", "create", "remove", "move", "format"}
 	where := str(`insert at an anchor only: "before" or "after" that line (default "after").`)
 	where["enum"] = []string{"before", "after"}
 	return map[string]any{

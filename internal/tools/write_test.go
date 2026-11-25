@@ -201,7 +201,7 @@ func TestWriteCatalogueAddsNineToolsWithHonestAnnotations(t *testing.T) {
 			t.Errorf("member %s: %#v", name, p)
 		}
 	}
-	if op := props["op"].(map[string]any); !reflect.DeepEqual(op["enum"], []string{"replace", "insert", "delete", "create", "remove", "move"}) {
+	if op := props["op"].(map[string]any); !reflect.DeepEqual(op["enum"], []string{"replace", "insert", "delete", "create", "remove", "move", "format"}) {
 		t.Errorf("op enum: %#v", op["enum"])
 	}
 	if text := props["text"].(map[string]any)["description"].(string); !strings.Contains(text, "anchor") {
