@@ -120,7 +120,7 @@ func cmdTrust(c *console, args []string) int {
 	case *revoke:
 		return trustRevoke(c, store, key, name, creds.TunnelID)
 	case *release:
-		return trustRelease(c, store, key, name, creds.TunnelID)
+		return trustRelease(c, r, store, key, name, creds.TunnelID)
 	}
 	return trustReview(ctx, c, r, store, key, name, creds.TunnelID, path)
 }
@@ -187,7 +187,7 @@ func trustRevoke(c *console, store *guidance.Store, key, profile, tunnelID strin
 	return 0
 }
 
-func trustRelease(c *console, store *guidance.Store, key, profile, tunnelID string) int {
+func trustRelease(c *console, r *repo.Repo, store *guidance.Store, key, profile, tunnelID string) int {
 	b, err := store.Assignment(key)
 	if err != nil {
 		c.fail("%v", err)
@@ -198,6 +198,11 @@ func trustRelease(c *console, store *guidance.Store, key, profile, tunnelID stri
 		return 0
 	}
 	c.say("Repository: %s", repo.SanitizeLine(b.Root))
+	if r != nil {
+		if here, err := filepath.EvalSymlinks(r.Root); err == nil && here != b.Root {
+			c.say("This is not the repository in the current directory (%s); the release acts on the one above.", repo.SanitizeLine(here))
+		}
+	}
 	c.say("Tunnel:     %s (profile %s)", maskID(tunnelID), repo.SanitizeLine(profile))
 	c.say("Afterwards, in ChatGPT, delete the plugin and create it again.")
 	if !c.confirm("Release it and remove its stored guidance?", false) {
@@ -255,7 +260,8 @@ func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 		}
 	}
 
-	name := repo.SanitizeLine(filepath.Base(r.Root))
+	// The name the lead of the instructions uses, which is already safe.
+	name := r.Name
 	c.say("Repository: %s (%s)", name, repo.SanitizeLine(r.Root))
 	c.say("Profile:    %s", repo.SanitizeLine(profile))
 	c.say("Tunnel:     %s, %s", maskID(tunnelID), assigned)

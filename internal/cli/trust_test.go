@@ -619,3 +619,32 @@ func TestShareRefusesAWithheldSourceUpFront(t *testing.T) {
 		t.Fatalf("without --deny: %q", errs)
 	}
 }
+
+// m3: the prompt names the repository as the lead does (its safe name).
+func TestTrustPromptUsesTheSafeName(t *testing.T) {
+	e := trustEnv(t, true)
+	odd := filepath.Join(filepath.Dir(e.repo), "my project")
+	if err := os.Rename(e.repo, odd); err != nil {
+		t.Fatal(err)
+	}
+	cfg, _ := loadConfig()
+	cfg.Profiles["default"].BoundRepo = odd
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	c, errb := ttyConsole("\n")
+	cmdTrust(c, []string{"--root", odd})
+	wantIn(t, errb.String(), "Repository: my_project ("+odd+")", "standing instructions for my_project?")
+}
+
+// m6: releasing from inside another repository says which one it releases.
+func TestReleaseFromAnotherRepositorySaysSo(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	_, errs, _ := runCLI("trust", "--root", other, "--profile", "default", "--release-tunnel")
+	wantIn(t, errs, "Repository: "+e.repo, "not the repository in the current directory ("+other+")")
+	_, errs, _ = runCLI("trust", "--root", e.repo, "--release-tunnel")
+	if strings.Contains(errs, "current directory") {
+		t.Errorf("from its own repository:\n%s", errs)
+	}
+}
