@@ -17,7 +17,7 @@ Write these down before trial 1, in a file you keep with the results:
 - the model shown in the picker;
 - the date and the repochat version (`repochat version`) and commit;
 - the protocol (this file, with its commit);
-- discovery traffic: on the terminal, how many `initialize` and `server/discover` responses were served (`repochat log`), and which of them carried instructions;
+- discovery traffic: how many `initialize` and `server/discover` responses were served (`repochat log` shows each as a connection); the log does not record which of them carried instructions, so note by hand whether guidance was stored and the share restarted since, for each;
 - refresh state: whether Refresh tools was pressed after the last change of guidance, and whether the conversation is new.
 
 ## 1. Set up
