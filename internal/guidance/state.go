@@ -9,10 +9,10 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"io"
 	"os"
 	"path/filepath"
 	"regexp"
-	"strings"
 	"syscall"
 	"time"
 
@@ -72,83 +72,153 @@ func checksum(r Record) (string, error) {
 	return hex.EncodeToString(h[:]), nil
 }
 
-func within(parent, child string) bool {
-	rel, err := filepath.Rel(parent, child)
-	return err == nil && rel != ".." && !strings.HasPrefix(rel, ".."+string(filepath.Separator))
+// resolve makes p absolute and resolves symbolic links in its existing part;
+// the part that does not exist yet is appended unchanged.
+func resolve(p string) (string, error) {
+	abs, err := filepath.Abs(p)
+	if err != nil {
+		return "", err
+	}
+	existing := abs
+	var rest []string
+	for {
+		if _, err := os.Lstat(existing); err == nil {
+			break
+		}
+		parent := filepath.Dir(existing)
+		if parent == existing {
+			break
+		}
+		rest = append([]string{filepath.Base(existing)}, rest...)
+		existing = parent
+	}
+	real, err := filepath.EvalSymlinks(existing)
+	if err != nil {
+		return "", err
+	}
+	return filepath.Join(append([]string{real}, rest...)...), nil
 }
 
-// noSymlinks refuses a symbolic link at any component of an absolute path
-// that exists.
-func noSymlinks(p string) error {
-	cur := string(filepath.Separator)
-	for _, part := range strings.Split(strings.TrimPrefix(p, cur), cur) {
-		if part == "" {
-			continue
+// insideRepo reports whether dir, or any existing parent of it, is the same
+// file (device and inode) as the repository root. Comparing files rather than
+// strings holds on case-insensitive file systems.
+func insideRepo(dir string, repoInfo os.FileInfo) bool {
+	for p := dir; ; p = filepath.Dir(p) {
+		if fi, err := os.Stat(p); err == nil && os.SameFile(fi, repoInfo) {
+			return true
 		}
-		cur = filepath.Join(cur, part)
-		fi, err := os.Lstat(cur)
-		if errors.Is(err, os.ErrNotExist) {
-			return nil
-		}
-		if err != nil {
-			return err
-		}
-		if fi.Mode()&os.ModeSymlink != 0 {
-			return fmt.Errorf("%s is a symbolic link; guidance state is never kept behind a link", cur)
+		if filepath.Dir(p) == p {
+			return false
 		}
 	}
-	return nil
 }
 
-// Open creates <stateDir>/guidance (0700). It refuses a directory inside the
-// repository and any symbolic link on the path.
+// Open creates <stateDir>/guidance (0700). stateDir is resolved through
+// symbolic links, as is repoRoot; a resolved directory inside the repository
+// is refused. The guidance directory itself must be a real directory owned by
+// the current user with mode 0700, and its files are never followed through
+// links.
 func Open(stateDir, repoRoot string) (*Store, error) {
-	abs, err := filepath.Abs(stateDir)
+	state, err := resolve(stateDir)
 	if err != nil {
 		return nil, err
 	}
-	dir := filepath.Join(abs, "guidance")
+	dir := filepath.Join(state, "guidance")
+	var repoInfo os.FileInfo
 	if repoRoot != "" {
-		rabs, err := filepath.Abs(repoRoot)
+		rr, err := resolve(repoRoot)
 		if err != nil {
 			return nil, err
 		}
-		roots := []string{rabs}
-		if real, err := filepath.EvalSymlinks(rabs); err == nil {
-			roots = append(roots, real)
-		}
-		for _, r := range roots {
-			if within(r, dir) {
-				return nil, fmt.Errorf("guidance state directory %s is inside the repository %s; the repository must not hold its own review state", dir, r)
-			}
+		if repoInfo, err = os.Stat(rr); err != nil {
+			return nil, err
 		}
 	}
-	if err := noSymlinks(dir); err != nil {
+	inside := func() error {
+		if repoInfo != nil && insideRepo(dir, repoInfo) {
+			return fmt.Errorf("guidance state directory %s is inside the repository %s; the repository must not hold its own review state", dir, repoRoot)
+		}
+		return nil
+	}
+	if err := inside(); err != nil {
+		return nil, err
+	}
+	created := false
+	if fi, err := os.Lstat(dir); err == nil {
+		if fi.Mode()&os.ModeSymlink != 0 {
+			return nil, fmt.Errorf("%s is a symbolic link; guidance state is never kept behind a link", dir)
+		}
+	} else if errors.Is(err, os.ErrNotExist) {
+		created = true
+	} else {
 		return nil, err
 	}
 	if err := os.MkdirAll(dir, 0o700); err != nil {
 		return nil, err
 	}
-	if err := noSymlinks(dir); err != nil {
+	if err := inside(); err != nil {
 		return nil, err
 	}
-	if err := os.Chmod(dir, 0o700); err != nil {
+	fi, err := os.Lstat(dir)
+	if err != nil {
 		return nil, err
 	}
-	return &Store{dir: dir}, nil
+	if created && fi.Mode().Perm() != 0o700 {
+		if err := os.Chmod(dir, 0o700); err != nil {
+			return nil, err
+		}
+		if fi, err = os.Lstat(dir); err != nil {
+			return nil, err
+		}
+	}
+	if !fi.Mode().IsDir() {
+		return nil, fmt.Errorf("%s is not a real directory", dir)
+	}
+	if st, ok := fi.Sys().(*syscall.Stat_t); !ok || int(st.Uid) != os.Getuid() {
+		return nil, fmt.Errorf("%s is not owned by the current user", dir)
+	}
+	if fi.Mode().Perm() != 0o700 {
+		return nil, fmt.Errorf("%s has mode %o, want 0700", dir, fi.Mode().Perm())
+	}
+	s := &Store{dir: dir}
+	if err := s.sweepTemps(); err != nil {
+		return nil, err
+	}
+	return s, nil
+}
+
+// sweepTemps removes temporary files a crashed write left behind.
+func (s *Store) sweepTemps() error {
+	unlock, err := s.Lock()
+	if err != nil {
+		return err
+	}
+	defer unlock()
+	names, err := filepath.Glob(filepath.Join(s.dir, ".tmp-*"))
+	if err != nil {
+		return err
+	}
+	for _, n := range names {
+		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
+			return err
+		}
+	}
+	return nil
 }
 
 // Lock takes an exclusive flock on <dir>/.lock.
-func (s *Store) Lock() (func(), error) {
+func (s *Store) Lock() (func(), error) { return s.flock(syscall.LOCK_EX) }
+
+// rlock takes a shared flock, for readers that want one consistent snapshot.
+func (s *Store) rlock() (func(), error) { return s.flock(syscall.LOCK_SH) }
+
+func (s *Store) flock(how int) (func(), error) {
 	p := filepath.Join(s.dir, lockFile)
-	if err := refuseLink(p); err != nil {
-		return nil, err
-	}
 	f, err := os.OpenFile(p, os.O_CREATE|os.O_RDWR|syscall.O_NOFOLLOW, 0o600)
 	if err != nil {
 		return nil, fmt.Errorf("guidance lock %s: %w", p, err)
 	}
-	if err := syscall.Flock(int(f.Fd()), syscall.LOCK_EX); err != nil {
+	if err := syscall.Flock(int(f.Fd()), how); err != nil {
 		f.Close()
 		return nil, fmt.Errorf("guidance lock %s: %w", p, err)
 	}
@@ -209,23 +279,29 @@ func (s *Store) writeAtomic(name string, data []byte) error {
 		return err
 	}
 	ok = true
-	if d, err := os.Open(s.dir); err == nil {
-		d.Sync()
-		d.Close()
+	return s.syncDir()
+}
+
+// syncDir fsyncs the guidance directory so renames and removals are durable.
+func (s *Store) syncDir() error {
+	d, err := os.Open(s.dir)
+	if err != nil {
+		return err
 	}
-	return nil
+	if err := d.Sync(); err != nil {
+		d.Close()
+		return err
+	}
+	return d.Close()
 }
 
 func (s *Store) readFile(name string) ([]byte, error) {
-	p := filepath.Join(s.dir, name)
-	if err := refuseLink(p); err != nil {
-		return nil, err
-	}
-	b, err := os.ReadFile(p)
+	f, err := os.OpenFile(filepath.Join(s.dir, name), os.O_RDONLY|syscall.O_NOFOLLOW, 0)
 	if err != nil {
 		return nil, err
 	}
-	return b, nil
+	defer f.Close()
+	return io.ReadAll(f)
 }
 
 // readMap reads a JSON map file; a missing file is an empty map.
@@ -277,6 +353,9 @@ func (s *Store) Save(r *Record) error {
 	if err := validKey(r.Key); err != nil {
 		return err
 	}
+	if err := checkContent(r); err != nil {
+		return fmt.Errorf("guidance record for %s refused: %w", r.Key, err)
+	}
 	unlock, err := s.Lock()
 	if err != nil {
 		return err
@@ -314,27 +393,52 @@ func (s *Store) Save(r *Record) error {
 	return nil
 }
 
+// checkContent validates what does not depend on the store: versions, the
+// raw digest syntax, the display cap and the display digest.
+func checkContent(r *Record) error {
+	switch {
+	case r.Version != RecordVersion:
+		return fmt.Errorf("version %d, want %d", r.Version, RecordVersion)
+	case r.Transform != TransformVersion:
+		return fmt.Errorf("transform %d, want %d", r.Transform, TransformVersion)
+	case !hex64.MatchString(r.RawSHA):
+		return errors.New("raw digest is not 64 hex characters")
+	case len(r.Display) > maxDisplay:
+		return fmt.Errorf("display is %d bytes, over %d", len(r.Display), maxDisplay)
+	case sha(r.Display) != r.DisplaySHA:
+		return errors.New("display does not match its digest")
+	}
+	return nil
+}
+
 // Load returns the record for key, (nil, nil) when there is none, and an
-// error naming the file for anything damaged.
+// error naming the file for anything damaged, superseded or unassigned. It
+// reads under a shared lock, one consistent snapshot of the three files.
 func (s *Store) Load(key string) (*Record, error) {
 	if err := validKey(key); err != nil {
 		return nil, err
 	}
+	unlock, err := s.rlock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	name := key + ".json"
 	path := filepath.Join(s.dir, name)
-	b, err := s.readFile(name)
-	if errors.Is(err, os.ErrNotExist) {
-		// Still refuse a damaged lifecycle or assignments file.
-		if _, err := readMap[uint64](s, lifecycleFile); err != nil {
-			return nil, err
-		}
-		if _, err := readMap[repo.Binding](s, assignmentsFile); err != nil {
-			return nil, err
-		}
+	b, rerr := s.readFile(name)
+	lc, err := readMap[uint64](s, lifecycleFile)
+	if err != nil {
+		return nil, err
+	}
+	as, err := readMap[repo.Binding](s, assignmentsFile)
+	if err != nil {
+		return nil, err
+	}
+	if errors.Is(rerr, os.ErrNotExist) {
 		return nil, nil
 	}
-	if err != nil {
-		return nil, fmt.Errorf("guidance record %s: %w", path, err)
+	if rerr != nil {
+		return nil, fmt.Errorf("guidance record %s: %w", path, rerr)
 	}
 	bad := func(format string, a ...any) (*Record, error) {
 		return nil, fmt.Errorf("guidance record %s is damaged: %s", path, fmt.Sprintf(format, a...))
@@ -343,32 +447,28 @@ func (s *Store) Load(key string) (*Record, error) {
 	if err := json.Unmarshal(b, &r); err != nil {
 		return bad("%v", err)
 	}
-	lc, err := readMap[uint64](s, lifecycleFile)
-	if err != nil {
-		return nil, err
+	if err := checkContent(&r); err != nil {
+		return bad("%v", err)
 	}
-	if _, err := readMap[repo.Binding](s, assignmentsFile); err != nil {
-		return nil, err
-	}
-	switch {
-	case r.Version != RecordVersion:
-		return bad("version %d, want %d", r.Version, RecordVersion)
-	case r.Transform != TransformVersion:
-		return bad("transform %d, want %d", r.Transform, TransformVersion)
-	case r.Key != key:
+	if r.Key != key {
 		return bad("key %q does not match its file", r.Key)
-	case !hex64.MatchString(r.RawSHA):
-		return bad("raw digest is not 64 hex characters")
-	case len(r.Display) > maxDisplay:
-		return bad("display is %d bytes, over %d", len(r.Display), maxDisplay)
-	case sha(r.Display) != r.DisplaySHA:
-		return bad("display does not match its digest")
-	case r.Generation == 0 || r.Generation > lc[key]:
-		return bad("generation %d is beyond the lifecycle value %d", r.Generation, lc[key])
+	}
+	if r.Generation == 0 {
+		return bad("generation 0 is not a valid generation")
 	}
 	want, err := checksum(r)
 	if err != nil || want != r.Checksum {
 		return bad("checksum mismatch")
+	}
+	if r.Generation != lc[key] {
+		return nil, fmt.Errorf("guidance record %s is superseded: it is generation %d but the current generation is %d (revoked, released or replaced); it is not honoured", path, r.Generation, lc[key])
+	}
+	a, ok := as[key]
+	if !ok {
+		return nil, fmt.Errorf("guidance record %s has no assignment in %s; it is not honoured", path, filepath.Join(s.dir, assignmentsFile))
+	}
+	if !a.Equal(&r.Binding) {
+		return nil, fmt.Errorf("guidance record %s is bound to a different repository than %s assigns; it is not honoured", path, filepath.Join(s.dir, assignmentsFile))
 	}
 	return &r, nil
 }
@@ -397,7 +497,7 @@ func (s *Store) remove(name string) error {
 	if err := os.Remove(p); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return err
 	}
-	return nil
+	return s.syncDir()
 }
 
 // Assignment returns the binding key is assigned to, or (nil, nil).
@@ -405,6 +505,11 @@ func (s *Store) Assignment(key string) (*repo.Binding, error) {
 	if err := validKey(key); err != nil {
 		return nil, err
 	}
+	unlock, err := s.rlock()
+	if err != nil {
+		return nil, err
+	}
+	defer unlock()
 	as, err := readMap[repo.Binding](s, assignmentsFile)
 	if err != nil {
 		return nil, err

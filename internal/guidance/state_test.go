@@ -3,6 +3,7 @@ package guidance
 import (
 	"crypto/sha256"
 	"encoding/hex"
+	"encoding/json"
 	"os"
 	"path/filepath"
 	"strings"
@@ -80,12 +81,24 @@ func TestSaveLoadRoundTripAndPermissions(t *testing.T) {
 	}
 }
 
+func must(t *testing.T, err error) {
+	t.Helper()
+	if err != nil {
+		t.Fatal(err)
+	}
+}
+
 func TestLoadRefusesDamage(t *testing.T) {
-	cases := map[string]func(path string, data []byte){
-		"flipped display byte": func(p string, d []byte) {
-			os.WriteFile(p, []byte(strings.Replace(string(d), "Be kind.", "Be Kind.", 1)), 0o600)
-		},
-		"bad checksum": func(p string, d []byte) {
+	type damage struct {
+		reason string
+		do     func(t *testing.T, p string, d []byte)
+	}
+	write := func(t *testing.T, p string, b []byte) { must(t, os.WriteFile(p, b, 0o600)) }
+	cases := map[string]damage{
+		"flipped display byte": {"display does not match", func(t *testing.T, p string, d []byte) {
+			write(t, p, []byte(strings.Replace(string(d), "Be kind.", "Be Kind.", 1)))
+		}},
+		"bad checksum": {"checksum mismatch", func(t *testing.T, p string, d []byte) {
 			i := strings.Index(string(d), `"Checksum": "`) + len(`"Checksum": "`)
 			b := []byte(string(d))
 			if b[i] == '0' {
@@ -93,70 +106,138 @@ func TestLoadRefusesDamage(t *testing.T) {
 			} else {
 				b[i] = '0'
 			}
-			os.WriteFile(p, b, 0o600)
-		},
-		"non-hex raw digest": func(p string, d []byte) {
-			os.WriteFile(p, []byte(strings.Replace(string(d), hx("raw"), strings.Repeat("z", 64), 1)), 0o600)
-		},
-		"transform 2": func(p string, d []byte) {
-			os.WriteFile(p, []byte(strings.Replace(string(d), `"Transform": 1`, `"Transform": 2`, 1)), 0o600)
-		},
-		"truncated": func(p string, d []byte) { os.WriteFile(p, d[:len(d)/2], 0o600) },
-		"damaged lifecycle": func(p string, d []byte) {
-			os.WriteFile(filepath.Join(filepath.Dir(p), "lifecycle.json"), []byte("{"), 0o600)
-		},
-		"damaged assignments": func(p string, d []byte) {
-			os.WriteFile(filepath.Join(filepath.Dir(p), "assignments.json"), []byte("{"), 0o600)
-		},
-		"generation beyond lifecycle": func(p string, d []byte) {
-			os.WriteFile(filepath.Join(filepath.Dir(p), "lifecycle.json"), []byte(`{"k":0}`), 0o600)
-		},
+			write(t, p, b)
+		}},
+		"non-hex raw digest": {"raw digest", func(t *testing.T, p string, d []byte) {
+			write(t, p, []byte(strings.Replace(string(d), hx("raw"), strings.Repeat("z", 64), 1)))
+		}},
+		"transform 2": {"transform 2", func(t *testing.T, p string, d []byte) {
+			write(t, p, []byte(strings.Replace(string(d), `"Transform": 1`, `"Transform": 2`, 1)))
+		}},
+		"truncated": {"is damaged", func(t *testing.T, p string, d []byte) { write(t, p, d[:len(d)/2]) }},
+		"generation 0": {"generation 0", func(t *testing.T, p string, d []byte) {
+			write(t, p, []byte(strings.Replace(string(d), `"Generation": 1`, `"Generation": 0`, 1)))
+		}},
+		"damaged lifecycle": {"lifecycle.json", func(t *testing.T, p string, d []byte) {
+			write(t, filepath.Join(filepath.Dir(p), "lifecycle.json"), []byte("{"))
+		}},
+		"damaged assignments": {"assignments.json", func(t *testing.T, p string, d []byte) {
+			write(t, filepath.Join(filepath.Dir(p), "assignments.json"), []byte("{"))
+		}},
+		"generation beyond lifecycle": {"superseded", func(t *testing.T, p string, d []byte) {
+			write(t, filepath.Join(filepath.Dir(p), "lifecycle.json"), []byte(`{"k":0}`))
+		}},
+		"assignment missing": {"no assignment", func(t *testing.T, p string, d []byte) {
+			write(t, filepath.Join(filepath.Dir(p), "assignments.json"), []byte(`{}`))
+		}},
+		"assignment differs": {"different repository", func(t *testing.T, p string, d []byte) {
+			write(t, filepath.Join(filepath.Dir(p), "assignments.json"), []byte(`{"k":{"Root":"/other"}}`))
+		}},
 	}
-	for name, damage := range cases {
+	for name, c := range cases {
 		t.Run(name, func(t *testing.T) {
 			s, state := newStore(t)
-			if err := s.Save(rec("k")); err != nil {
-				t.Fatal(err)
-			}
+			must(t, s.Save(rec("k")))
 			p := filepath.Join(state, "guidance", "k.json")
-			d, _ := os.ReadFile(p)
-			damage(p, d)
+			d, err := os.ReadFile(p)
+			must(t, err)
+			c.do(t, p, d)
 			got, err := s.Load("k")
 			if err == nil || got != nil {
 				t.Fatalf("want error, got %v %v", got, err)
+			}
+			if !strings.Contains(err.Error(), c.reason) {
+				t.Fatalf("error %q does not mention %q", err, c.reason)
 			}
 		})
 	}
 }
 
-func TestLoadRefusesOversizeDisplay(t *testing.T) {
+func TestInterruptedRevokeAndSaveAreRefused(t *testing.T) {
+	// Revoke bumps the lifecycle first; a crash leaves the record behind.
 	s, _ := newStore(t)
+	must(t, s.Save(rec("k")))
+	unlock, err := s.Lock()
+	must(t, err)
+	_, err = s.bump("k")
+	unlock()
+	must(t, err)
+	got, err := s.Load("k")
+	if err == nil || got != nil || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("interrupted revoke: %v %v", got, err)
+	}
+	// A Save that crashed after the bump (before writing the new record) is the same state.
+	s2, _ := newStore(t)
+	must(t, s2.Save(rec("k")))
+	must(t, s2.Save(rec("k")))
+	unlock, err = s2.Lock()
+	must(t, err)
+	_, err = s2.bump("k")
+	unlock()
+	must(t, err)
+	if got, err := s2.Load("k"); err == nil || got != nil || !strings.Contains(err.Error(), "superseded") {
+		t.Fatalf("crashed save: %v %v", got, err)
+	}
+}
+
+func TestSaveRefusesInvalidRecordBeforeBumping(t *testing.T) {
+	s, state := newStore(t)
 	r := rec("k")
 	r.Display = strings.Repeat("a", 2049)
 	r.DisplaySHA = hx(r.Display)
-	if err := s.Save(r); err != nil {
-		t.Fatal(err)
+	if err := s.Save(r); err == nil {
+		t.Fatal("oversize accepted")
 	}
-	if got, err := s.Load("k"); err == nil || got != nil {
-		t.Fatalf("want error, got %v %v", got, err)
+	if _, err := os.Stat(filepath.Join(state, "guidance", "lifecycle.json")); err == nil {
+		t.Fatal("lifecycle bumped for a refused record")
 	}
+}
+
+func TestLoadRefusesOversizeDisplay(t *testing.T) {
+	s, state := newStore(t)
+	must(t, s.Save(rec("k")))
+	p := filepath.Join(state, "guidance", "k.json")
+	d, err := os.ReadFile(p)
+	must(t, err)
+	var r Record
+	must(t, json.Unmarshal(d, &r))
+	r.Display = strings.Repeat("a", 2049)
+	r.DisplaySHA = hx(r.Display)
+	r.Checksum, err = checksum(r)
+	must(t, err)
+	b, err := json.Marshal(r)
+	must(t, err)
+	must(t, os.WriteFile(p, b, 0o600))
+	if got, err := s.Load("k"); err == nil || got != nil || !strings.Contains(err.Error(), "over 2048") {
+		t.Fatalf("want cap error, got %v %v", got, err)
+	}
+}
+
+func TestOpenSweepsTempFiles(t *testing.T) {
+	s, state := newStore(t)
+	tmp := filepath.Join(state, "guidance", ".tmp-123")
+	must(t, os.WriteFile(tmp, []byte("x"), 0o600))
+	_, err := Open(state, t.TempDir())
+	must(t, err)
+	if _, err := os.Stat(tmp); err == nil {
+		t.Fatal("temp file survived Open")
+	}
+	_ = s
 }
 
 func TestGenerationsNeverRepeat(t *testing.T) {
 	s, _ := newStore(t)
 	r := rec("k")
-	s.Save(r)
+	must(t, s.Save(r))
 	if r.Generation != 1 {
 		t.Fatal(r.Generation)
 	}
-	if err := s.Revoke("k"); err != nil {
-		t.Fatal(err)
-	}
+	must(t, s.Revoke("k"))
 	if got, err := s.Load("k"); got != nil || err != nil {
 		t.Fatalf("after revoke: %v %v", got, err)
 	}
 	r2 := rec("k")
-	s.Save(r2)
+	must(t, s.Save(r2))
 	if r2.Generation != 3 {
 		t.Fatalf("generation %d, want 3", r2.Generation)
 	}
@@ -165,8 +246,8 @@ func TestGenerationsNeverRepeat(t *testing.T) {
 func TestAssignmentSurvivesRevoke(t *testing.T) {
 	s, _ := newStore(t)
 	r := rec("k")
-	s.Save(r)
-	s.Revoke("k")
+	must(t, s.Save(r))
+	must(t, s.Revoke("k"))
 	b, err := s.Assignment("k")
 	if err != nil || b == nil || !b.Equal(&r.Binding) {
 		t.Fatalf("assignment: %v %v", b, err)
@@ -178,7 +259,7 @@ func TestAssignmentSurvivesRevoke(t *testing.T) {
 		t.Fatalf("after release: %v %v", b, err)
 	}
 	r2 := rec("k")
-	s.Save(r2)
+	must(t, s.Save(r2))
 	if r2.Generation != 4 {
 		t.Fatalf("generation %d, want 4 (save, revoke, release, save)", r2.Generation)
 	}
@@ -189,26 +270,49 @@ func TestOpenRefusesInsideRepoAndSymlinks(t *testing.T) {
 	if _, err := Open(filepath.Join(repoRoot, "state"), repoRoot); err == nil {
 		t.Fatal("inside repo accepted")
 	}
+	// inside the repo by way of a symlink
+	must(t, os.Mkdir(filepath.Join(repoRoot, "sub"), 0o755))
+	viaLink := filepath.Join(t.TempDir(), "l")
+	must(t, os.Symlink(filepath.Join(repoRoot, "sub"), viaLink))
+	if _, err := Open(viaLink, repoRoot); err == nil {
+		t.Fatal("state reached through a link into the repo accepted")
+	}
+	// symlinked guidance directory
 	state := t.TempDir()
 	target := t.TempDir()
-	if err := os.Symlink(target, filepath.Join(state, "guidance")); err != nil {
-		t.Fatal(err)
-	}
+	must(t, os.Symlink(target, filepath.Join(state, "guidance")))
 	if _, err := Open(state, t.TempDir()); err == nil {
 		t.Fatal("symlinked guidance dir accepted")
 	}
-	// symlink earlier on the path
-	real := t.TempDir()
-	link := filepath.Join(t.TempDir(), "link")
-	os.Symlink(real, link)
-	if _, err := Open(link, t.TempDir()); err == nil {
-		t.Fatal("symlinked state dir accepted")
+	// wrong mode on an existing guidance directory
+	state2 := t.TempDir()
+	must(t, os.Mkdir(filepath.Join(state2, "guidance"), 0o755))
+	must(t, os.Chmod(filepath.Join(state2, "guidance"), 0o755))
+	if _, err := Open(state2, t.TempDir()); err == nil {
+		t.Fatal("mode 0755 guidance dir accepted")
 	}
 	// symlinked file inside the store
 	s, st := newStore(t)
-	os.Symlink(filepath.Join(target, "x"), filepath.Join(st, "guidance", "lifecycle.json"))
+	must(t, os.Symlink(filepath.Join(target, "x"), filepath.Join(st, "guidance", "lifecycle.json")))
 	if err := s.Save(rec("k")); err == nil {
 		t.Fatal("symlinked lifecycle accepted")
+	}
+}
+
+func TestOpenWorksThroughSymlinkedParent(t *testing.T) {
+	real := t.TempDir()
+	link := filepath.Join(t.TempDir(), "link")
+	must(t, os.Symlink(real, link))
+	s, err := Open(filepath.Join(link, "state"), t.TempDir())
+	if err != nil {
+		t.Fatal(err)
+	}
+	must(t, s.Save(rec("k")))
+	if r, err := s.Load("k"); err != nil || r == nil {
+		t.Fatalf("%v %v", r, err)
+	}
+	if _, err := os.Stat(filepath.Join(real, "state", "guidance", "k.json")); err != nil {
+		t.Fatal(err)
 	}
 }
 
@@ -230,5 +334,40 @@ func TestConcurrentSavesSerialize(t *testing.T) {
 		if err != nil || r == nil || r.Generation != 3 {
 			t.Fatalf("%s: %+v %v", k, r, err)
 		}
+	}
+}
+
+func TestRevokeConcurrentWithSave(t *testing.T) {
+	s, _ := newStore(t)
+	var wg sync.WaitGroup
+	for i := 0; i < 4; i++ {
+		wg.Add(2)
+		go func() {
+			defer wg.Done()
+			if err := s.Save(rec("a")); err != nil {
+				t.Error(err)
+			}
+		}()
+		go func() {
+			defer wg.Done()
+			if err := s.Revoke("a"); err != nil {
+				t.Error(err)
+			}
+		}()
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			if _, err := s.Load("a"); err != nil {
+				t.Error(err)
+			}
+		}()
+	}
+	wg.Wait()
+	r, err := s.Load("a")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if r != nil && r.Generation != 8 {
+		t.Fatalf("surviving record has generation %d, want 8", r.Generation)
 	}
 }
