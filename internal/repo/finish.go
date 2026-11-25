@@ -173,8 +173,17 @@ func (s *Sessions) changedFiles(ctx context.Context, rec *sessionRecord, from, t
 // of kind update, when it has commits the session lacks. A conflict, or any
 // other failure, abandons the merge and leaves the session as it was.
 func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
+	return s.UpdateCall(ctx, Call{})
+}
+
+// UpdateCall is Update for a call that names the checkpoint the session must
+// be at (call.Expect): at any other, it refuses before merging anything.
+func (s *Sessions) UpdateCall(ctx context.Context, call Call) (*Applied, error) {
 	if s.opts.Observe {
 		return nil, errObserving
+	}
+	if err := validateCall(call); err != nil {
+		return nil, err
 	}
 	release, err := s.acquire()
 	if err != nil {
@@ -192,6 +201,9 @@ func (s *Sessions) Update(ctx context.Context) (*Applied, error) {
 	ws := s.ws
 	head, chain, err := s.chain(ctx, rec)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkExpected(head, call.Expect); err != nil {
 		return nil, err
 	}
 	tip, err := s.ownerTip(ctx, rec)
@@ -614,6 +626,15 @@ func finishRefused(format string, a ...any) error {
 // branch has commits the session lacks, and when git would have to overwrite
 // uncommitted changes in the checkout, ignored files included.
 func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Finished, error) {
+	return s.FinishCall(ctx, Call{}, squash, message)
+}
+
+// FinishCall is Finish for a call that names the checkpoint the session must
+// be at (call.Expect): at any other, it refuses before merging anything.
+func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, message string) (*Finished, error) {
+	if err := validateCall(call); err != nil {
+		return nil, err
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err
@@ -630,6 +651,9 @@ func (s *Sessions) Finish(ctx context.Context, squash bool, message string) (*Fi
 	// A branch rewritten outside repochat is refused here as everywhere.
 	head, _, err := s.chain(ctx, rec)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkExpected(head, call.Expect); err != nil {
 		return nil, err
 	}
 

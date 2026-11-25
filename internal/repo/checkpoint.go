@@ -252,6 +252,12 @@ func undoRefused(format string, a ...any) error {
 // target must not lie before the latest update from the owner's branch.
 // Undo to the current checkpoint changes nothing and returns it.
 func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
+	return s.UndoToCall(ctx, Call{}, id)
+}
+
+// UndoToCall is UndoTo for a call that names the checkpoint the session must
+// be at (call.Expect): at any other, it refuses before writing anything.
+func (s *Sessions) UndoToCall(ctx context.Context, call Call, id string) (*Applied, error) {
 	if s.opts.Observe {
 		return nil, errObserving
 	}
@@ -261,6 +267,9 @@ func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
 	}
 	if len(want) < 7 {
 		return nil, undoRefused("give at least 7 characters of the checkpoint ID")
+	}
+	if err := validateCall(call); err != nil {
+		return nil, err
 	}
 	release, err := s.acquire()
 	if err != nil {
@@ -278,6 +287,9 @@ func (s *Sessions) UndoTo(ctx context.Context, id string) (*Applied, error) {
 	ws := s.ws
 	head, chain, err := s.chain(ctx, rec)
 	if err != nil {
+		return nil, err
+	}
+	if err := checkExpected(head, call.Expect); err != nil {
 		return nil, err
 	}
 	boundary := rec.Base

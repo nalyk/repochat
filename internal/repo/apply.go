@@ -172,11 +172,20 @@ func (sp *storedPlan) matches(plan *Plan) error {
 // touches is byte-identical to what it was when the plan was made; a plan
 // already applied returns the same result again without writing.
 func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, message string) (*Applied, error) {
+	return s.ApplyCall(ctx, Call{}, planID, changes, message)
+}
+
+// ApplyCall is Apply for a call that names the checkpoint the session must
+// be at (call.Expect): at any other, it refuses before writing anything.
+func (s *Sessions) ApplyCall(ctx context.Context, call Call, planID string, changes []Change, message string) (*Applied, error) {
 	if s.opts.Observe {
 		return nil, errObserving
 	}
 	if (planID == "") == (len(changes) == 0) {
 		return nil, errors.New("give either a plan identifier from propose_changes or a change set, not both and not neither")
+	}
+	if err := validateCall(call); err != nil {
+		return nil, err
 	}
 	release, err := s.acquire()
 	if err != nil {
@@ -190,6 +199,15 @@ func (s *Sessions) Apply(ctx context.Context, planID string, changes []Change, m
 	}
 	if rec == nil {
 		return nil, ErrNoSession
+	}
+	if call.Expect != "" {
+		head, _, err := s.chain(ctx, rec)
+		if err != nil {
+			return nil, err
+		}
+		if err := checkExpected(head, call.Expect); err != nil {
+			return nil, err
+		}
 	}
 	s.freshPolicy()
 	// Looked up only now: ensure drops the plans made before the workspace
