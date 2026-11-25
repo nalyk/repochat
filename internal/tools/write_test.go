@@ -743,7 +743,7 @@ func TestLongRangeNeedsTheFileTagThroughTheTools(t *testing.T) {
 		}
 	}
 	if !strings.Contains(WriteInstructions, "A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result).") {
-		t.Error("WriteInstructions does not end with the file_tag rule")
+		t.Error("WriteInstructions does not contain the file_tag rule")
 	}
 }
 
@@ -809,8 +809,8 @@ func TestOperationIDAndExpectedCheckpointAreValidated(t *testing.T) {
 		if _, err := f.validated(t, "apply_changes", args); err == nil {
 			t.Errorf("%s: apply_changes was not refused", c.what)
 		}
-		if _, err := os.Stat(filepath.Join(f.dir, "x.txt")); err == nil {
-			t.Errorf("%s: the owner's checkout changed", c.what)
+		if _, lm := f.must(t, "list_checkpoints", map[string]any{}); lm["total"] != float64(1) {
+			t.Errorf("%s: the session gained a checkpoint: %v", c.what, lm)
 		}
 	}
 	for _, name := range []string{"undo_to_checkpoint", "update_session"} {

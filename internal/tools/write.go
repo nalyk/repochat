@@ -86,7 +86,7 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 		Desc: "The change set: an array of operations over any number of files, applied as one step. Anchors (12:abc) come from read_file or search_code output in this session and refer to the files as they are before the change set; ranges in one file may not overlap."}
 
 	opID := mcp.Param{Name: "operation_id", Kind: S, MaxLen: 64,
-		Desc: "An id you choose for this call, 8–64 letters, digits, `.`, `_` or `-`, new for every call. If the result does not arrive, call again with the same operation_id and the same arguments: work already done is reported, not repeated."}
+		Desc: "An id you choose for this call, 8–64 letters, digits, `.`, `_` or `-`, new for every call. If the result does not arrive, call again with the same operation_id and exactly the same arguments: work already done is reported, not repeated."}
 	expected := mcp.Param{Name: "expected_checkpoint", Kind: S, MaxLen: 40,
 		Desc: "The checkpoint the session is at, as the last session_status, start_session or apply_changes result showed it. Refused if the session has moved since."}
 	// finish_session's is required, but the handler enforces that: the server
@@ -191,7 +191,12 @@ func argsDigest(tool string, a mcp.Args) string {
 		}
 		norm[k] = v
 	}
-	enc, _ := json.Marshal(norm) // encoding/json sorts map keys
+	enc, err := json.Marshal(norm) // encoding/json sorts map keys
+	if err != nil {
+		// Fail closed: "" is not a digest, so validateCall refuses a call
+		// that carries an operation_id.
+		return ""
+	}
 	sum := sha256.Sum256([]byte(tool + "\x00" + string(enc)))
 	return hex.EncodeToString(sum[:])[:16]
 }
@@ -309,11 +314,11 @@ func (c *catalog) startSession(ctx context.Context, a mcp.Args) (mcp.Result, err
 	}
 	if info.Replayed {
 		var b strings.Builder
-		b.WriteString(replayedText(a.String("operation_id"), fmt.Sprintf("session %s was started on branch %s", info.ID, info.Branch)) + "\n")
+		b.WriteString(replayedText(a.String("operation_id"), fmt.Sprintf("session %s on branch %s was opened by that call", info.ID, info.Branch)) + "\n")
 		fmt.Fprintf(&b, "Branch %s, made from %s at %s.\n", info.Branch, info.StartBranch, short(info.Base))
 		return c.finish("start_session", b.String(), 0, meta{
 			"session": info.ID, "branch": info.Branch, "start_branch": info.StartBranch,
-			"base": info.Base, "head": info.Head, "resumed": false, "replayed": true, "complete": true,
+			"base": info.Base, "head": info.Head, "replayed": true, "complete": true,
 		}), nil
 	}
 	resumed := perr == nil && !fresh && prev.ID == info.ID
