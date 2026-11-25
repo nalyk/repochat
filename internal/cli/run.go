@@ -23,6 +23,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nalyk/repochat/internal/guidance"
 	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 )
@@ -280,7 +281,7 @@ func tunnelRunDir(tunnelID string) (string, error) {
 	if err := privateDir(base); err != nil {
 		return "", err
 	}
-	dir := filepath.Join(base, "run", tunnelKey(tunnelID))
+	dir := filepath.Join(base, "run", guidance.Key(tunnelID))
 	if err := privateDir(filepath.Join(base, "run")); err != nil {
 		return "", err
 	}

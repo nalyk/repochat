@@ -1,8 +1,6 @@
 package cli
 
 import (
-	"crypto/sha256"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -290,12 +288,6 @@ func (c *Config) selectProfile(explicit, repoRoot string) (name string, p *Profi
 		return name, nil, fmt.Errorf("profile %q is bound to %s and will not serve another repository. Use --profile NAME for a different tunnel, or `repochat setup --profile %s --unbind`", name, p.BoundRepo, name)
 	}
 	return name, p, nil
-}
-
-// tunnelKey is a filesystem-safe identifier for a tunnel's runtime files.
-func tunnelKey(tunnelID string) string {
-	sum := sha256.Sum256([]byte(tunnelID))
-	return hex.EncodeToString(sum[:])[:16]
 }
 
 // maskID shortens an identifier for display.

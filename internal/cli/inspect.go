@@ -15,6 +15,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nalyk/repochat/internal/guidance"
 	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 	"github.com/nalyk/repochat/internal/tools"
@@ -469,11 +470,11 @@ func findInstances(cfg *Config) []instance {
 	}
 	names := map[string]string{}
 	for name, p := range cfg.Profiles {
-		names[tunnelKey(p.TunnelID)] = name
+		names[guidance.Key(p.TunnelID)] = name
 	}
 	if id := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TUNNEL_ID")); id != "" {
-		if _, saved := names[tunnelKey(id)]; !saved {
-			names[tunnelKey(id)] = profileFromEnv
+		if _, saved := names[guidance.Key(id)]; !saved {
+			names[guidance.Key(id)] = profileFromEnv
 		}
 	}
 	var found []instance
