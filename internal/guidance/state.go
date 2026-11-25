@@ -55,6 +55,9 @@ func Key(tunnelID string) string {
 	return hex.EncodeToString(sum[:])[:16]
 }
 
+// SHA256Hex is the hex SHA-256 of s, as used for DisplaySHA.
+func SHA256Hex(s string) string { return sha(s) }
+
 func sha(s string) string {
 	h := sha256.Sum256([]byte(s))
 	return hex.EncodeToString(h[:])
@@ -361,6 +364,13 @@ func (s *Store) Save(r *Record) error {
 		return err
 	}
 	defer unlock()
+	as, err := readMap[repo.Binding](s, assignmentsFile)
+	if err != nil {
+		return err
+	}
+	if a, ok := as[r.Key]; ok && !a.Equal(&r.Binding) {
+		return fmt.Errorf("this tunnel is assigned to %s; to give it to another repository run `repochat trust --release-tunnel` from that profile first", a.Root)
+	}
 	// Lifecycle first: a crash afterwards leaves a skipped generation, never a
 	// repeated one.
 	gen, err := s.bump(r.Key)
@@ -379,10 +389,6 @@ func (s *Store) Save(r *Record) error {
 		return err
 	}
 	if err := s.writeAtomic(r.Key+".json", b); err != nil {
-		return err
-	}
-	as, err := readMap[repo.Binding](s, assignmentsFile)
-	if err != nil {
 		return err
 	}
 	as[r.Key] = r.Binding

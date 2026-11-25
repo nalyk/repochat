@@ -2,8 +2,6 @@ package cli
 
 import (
 	"context"
-	"crypto/sha256"
-	"encoding/hex"
 	"errors"
 	"flag"
 	"fmt"
@@ -19,8 +17,6 @@ import (
 // trustAfterPreview is a test seam, called once the preview is printed and
 // before the owner is asked.
 var trustAfterPreview = func() {}
-
-func sha256Hex(b []byte) string { h := sha256.Sum256(b); return hex.EncodeToString(h[:]) }
 
 // cmdTrust is `repochat trust [PATH]`: the owner reviews a root AGENTS.md or
 // CLAUDE.md and stores exactly what was shown as standing guidance.
@@ -70,14 +66,27 @@ func cmdTrust(c *console, args []string) int {
 		c.fail("%v", err)
 		return 1
 	}
-	r, err := openRepo(ctx, &s, cfg)
-	if err != nil {
-		c.fail("%v", err)
-		return 1
+	review := modes == 0
+	r, rerr := openRepo(ctx, &s, cfg)
+	if rerr == nil {
+		defer r.Close()
+	} else {
+		r = nil
+		// Only the review needs the repository; the other modes work
+		// from anywhere, so a lost repository cannot lock the tunnel.
+		if review {
+			c.fail("%v", rerr)
+			return 1
+		}
 	}
-	defer r.Close()
-
-	name, prof, err := cfg.selectProfile(*profile, r.Root)
+	root := ""
+	if r != nil {
+		root = r.Root
+	}
+	name, prof, err := cfg.selectProfile(*profile, root)
+	if err != nil && !review {
+		name, prof, err = cfg.selectProfile(*profile, "")
+	}
 	if err != nil {
 		c.fail("%v", err)
 		return 1
@@ -87,7 +96,7 @@ func cmdTrust(c *console, args []string) int {
 		c.fail("no tunnel ID and API key saved for profile %q: run `repochat setup --profile %s`", name, name)
 		return 1
 	}
-	if prof == nil || prof.BoundRepo != r.Root {
+	if review && (prof == nil || prof.BoundRepo != r.Root) {
 		c.fail("profile %q is not bound to this repository: bind it: repochat setup --profile %s --bind", name, name)
 		return 1
 	}
@@ -101,7 +110,7 @@ func cmdTrust(c *console, args []string) int {
 		c.fail("%v", err)
 		return 1
 	}
-	store, err := guidance.Open(sd, r.Root)
+	store, err := guidance.Open(sd, root)
 	if err != nil {
 		c.fail("%v", err)
 		return 1
@@ -115,13 +124,13 @@ func cmdTrust(c *console, args []string) int {
 			c.fail("%v", err)
 			return 1
 		}
-		c.ok("the standing guidance for %s is revoked", repo.SanitizeLine(filepath.Base(r.Root)))
+		c.ok("the standing guidance for profile %s is revoked", repo.SanitizeLine(name))
 		c.say("Restart repochat, press Refresh tools in ChatGPT, and start a new conversation.")
 		return 0
 	case *release:
 		return trustRelease(c, store, key, name)
 	}
-	return trustReview(ctx, c, r, store, key, name, path)
+	return trustReview(ctx, c, r, store, key, name, creds.TunnelID, path)
 }
 
 func trustStatus(ctx context.Context, c *console, r *repo.Repo, store *guidance.Store, key string) int {
@@ -132,19 +141,29 @@ func trustStatus(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 	}
 	if rec == nil {
 		c.say("No guidance is stored for this tunnel.")
+		if a, err := store.Assignment(key); err == nil && a != nil {
+			c.say("The tunnel is assigned to %s.", repo.SanitizeLine(a.Root))
+		}
 		return 0
 	}
-	state := "unchanged"
-	if _, lerr := os.Lstat(filepath.Join(r.Root, rec.Path)); errors.Is(lerr, os.ErrNotExist) {
-		state = "removed"
-	} else if src, rerr := r.ReadGuidanceSource(ctx, rec.Path); rerr != nil {
-		state = "changed (it can no longer be read as guidance: " + repo.SanitizeLine(rerr.Error()) + ")"
-	} else if src.RawSHA != rec.RawSHA {
-		state = "changed"
+	root := repo.SanitizeLine(rec.Binding.Root)
+	state := "drift unknown: run this in " + root
+	if r != nil {
+		if b, berr := r.CaptureBinding(ctx); berr == nil && b.Equal(&rec.Binding) {
+			state = "unchanged"
+			if _, lerr := os.Lstat(filepath.Join(r.Root, rec.Path)); errors.Is(lerr, os.ErrNotExist) {
+				state = "removed"
+			} else if src, rerr := r.ReadGuidanceSource(ctx, rec.Path); rerr != nil {
+				state = "changed (it can no longer be read as guidance: " + repo.SanitizeLine(rerr.Error()) + ")"
+			} else if src.RawSHA != rec.RawSHA {
+				state = "changed"
+			}
+		}
 	}
+	c.say("Repository: %s", root)
 	c.say("Path:       %s", repo.SanitizeLine(rec.Path))
 	c.say("Reviewed:   %s", rec.Reviewed.Local().Format(time.RFC1123))
-	c.say("Generation: generation %d", rec.Generation)
+	c.say("Generation: %d", rec.Generation)
 	c.say("File:       %s", state)
 	if state != "unchanged" {
 		c.say("The stored text is still what ChatGPT gets. Review the file again with `repochat trust`.")
@@ -163,6 +182,7 @@ func trustRelease(c *console, store *guidance.Store, key, profile string) int {
 		return 0
 	}
 	c.say("Tunnel of profile %s is assigned to %s.", repo.SanitizeLine(profile), repo.SanitizeLine(b.Root))
+	c.say("Afterwards, in ChatGPT, delete the plugin and create it again.")
 	if !c.confirm("Release it and remove its stored guidance?", false) {
 		c.say("Nothing was released.")
 		if !c.tty && !c.yes {
@@ -179,7 +199,7 @@ func trustRelease(c *console, store *guidance.Store, key, profile string) int {
 	return 0
 }
 
-func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.Store, key, profile, path string) int {
+func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.Store, key, profile, tunnelID, path string) int {
 	if !c.tty && !c.yes {
 		c.fail("repochat trust needs a terminal to ask for your confirmation; use --yes to confirm without one")
 		return 1
@@ -199,17 +219,22 @@ func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 		c.fail("%v", err)
 		return 1
 	}
+	assigned := "not yet assigned"
 	if a, err := store.Assignment(key); err != nil {
 		c.fail("%v", err)
 		return 1
-	} else if a != nil && !a.Equal(bind) {
-		c.fail("this tunnel is assigned to another repository (%s). To give it to this one, run `repochat trust --release-tunnel`, then delete the plugin in ChatGPT and create it again", repo.SanitizeLine(a.Root))
-		return 1
+	} else if a != nil {
+		if !a.Equal(bind) {
+			c.fail("this tunnel is assigned to another repository (%s). To give it to this one, run `repochat trust --release-tunnel` from that profile, then delete the plugin in ChatGPT and create it again", repo.SanitizeLine(a.Root))
+			return 1
+		}
+		assigned = "assigned to this repository"
 	}
 
 	name := repo.SanitizeLine(filepath.Base(r.Root))
 	c.say("Repository: %s (%s)", name, repo.SanitizeLine(r.Root))
 	c.say("Profile:    %s", repo.SanitizeLine(profile))
+	c.say("Tunnel:     %s, %s", maskID(tunnelID), assigned)
 	c.say("File:       %s", repo.SanitizeLine(src.Path))
 	c.say("----- begin guidance -----")
 	c.say("%s", display)
@@ -224,7 +249,7 @@ func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 	rec := &guidance.Record{
 		Version: guidance.RecordVersion, Transform: guidance.TransformVersion,
 		Key: key, Binding: *bind, Path: src.Path, RawSHA: src.RawSHA,
-		Display: display, DisplaySHA: sha256Hex([]byte(display)),
+		Display: display, DisplaySHA: guidance.SHA256Hex(display),
 		Reviewed: time.Now().UTC(),
 	}
 	if err := store.Save(rec); err != nil {

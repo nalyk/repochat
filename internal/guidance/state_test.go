@@ -371,3 +371,31 @@ func TestRevokeConcurrentWithSave(t *testing.T) {
 		t.Fatalf("surviving record has generation %d, want 8", r.Generation)
 	}
 }
+
+func TestSaveRefusesAnotherAssignment(t *testing.T) {
+	s, _ := newStore(t)
+	a := rec("k1")
+	if err := s.Save(a); err != nil {
+		t.Fatal(err)
+	}
+	b := rec("k1")
+	b.Binding = repo.Binding{Root: "/other", CommonDir: "/other/.git", RootDev: 1, RootIno: 9, CommonDev: 1, CommonIno: 10, Roots: []string{"abc"}}
+	err := s.Save(b)
+	if err == nil || !strings.Contains(err.Error(), "/r") || !strings.Contains(err.Error(), "--release-tunnel") {
+		t.Fatalf("err %v", err)
+	}
+	got, err := s.Load("k1")
+	if err != nil || got == nil || got.Binding.Root != "/r" || got.Generation != 1 {
+		t.Fatalf("record %+v err %v", got, err)
+	}
+	// The same binding may be saved again, and a release clears the way.
+	if err := s.Save(rec("k1")); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Release("k1"); err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Save(b); err != nil {
+		t.Fatal(err)
+	}
+}
