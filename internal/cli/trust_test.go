@@ -605,3 +605,17 @@ func TestTrustAgainRecoversAfterAReclone(t *testing.T) {
 		t.Fatalf("the share still refuses after trust: %q", errs)
 	}
 }
+
+// m2: the launcher takes the exposure decision before its self-test, so a
+// share that would withhold the source refuses up front, with the reason.
+func TestShareRefusesAWithheldSourceUpFront(t *testing.T) {
+	e := assigned(t)
+	_, errs, code := runCLI("--root", e.repo, "--deny", "AGENTS.md", "--print-command")
+	if code == 0 {
+		t.Fatalf("the share started with its guidance source withheld: %q", errs)
+	}
+	wantIn(t, errs, "AGENTS.md is now withheld")
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code != 0 {
+		t.Fatalf("without --deny: %q", errs)
+	}
+}

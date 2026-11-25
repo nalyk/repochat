@@ -267,13 +267,24 @@ func openRepo(ctx context.Context, s *session, cfg *Config) (*repo.Repo, error) 
 	return r, err
 }
 
+// baseInstructions are the server instructions of read or write mode, before
+// any owner guidance: the one place they are chosen, for newServer,
+// newWriteServer, the guidance that `repochat mcp` delivers and the
+// launcher's check of it.
+func baseInstructions(write bool) string {
+	if write {
+		return tools.WriteModeInstructions
+	}
+	return tools.Instructions
+}
+
 // newServer builds the MCP server for a repository.
 func newServer(r *repo.Repo, opts ...tools.Option) *mcp.Server {
 	return &mcp.Server{
 		Name:         "repochat",
 		Title:        "RepoChat",
 		Version:      Version,
-		Instructions: tools.Instructions,
+		Instructions: baseInstructions(false),
 		Tools:        tools.New(r, opts...),
 	}
 }
@@ -339,7 +350,7 @@ func newWriteServer(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report f
 		Name:         "repochat",
 		Title:        "RepoChat",
 		Version:      Version,
-		Instructions: tools.WriteModeInstructions,
+		Instructions: baseInstructions(true),
 		Tools:        writeTools(r, ss, confirmMerge, report, opts...),
 	}
 }

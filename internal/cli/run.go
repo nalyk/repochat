@@ -239,6 +239,13 @@ func (l *launcher) run(ctx context.Context) (int, error) {
 	if err := checkTunnelAssignment(ctx, l.r, creds.TunnelID); err != nil {
 		return 1, err
 	}
+	// The startup part of what the MCP process will do with the owner's
+	// guidance (load, budget, exposure of the source), without serving: a
+	// share that would withhold the source refuses here, with the reason,
+	// rather than in a child whose stderr nobody may read. It only reads.
+	if _, err := deliverGuidance(ctx, l.r, guidance.Key(creds.TunnelID), baseInstructions(l.o.Write), func(string, ...any) {}); err != nil {
+		return 1, fmt.Errorf("the owner guidance for this tunnel cannot be served: %s", repo.Sanitize(err.Error()))
+	}
 
 	// 5. Prove the server works before anything is exposed.
 	if err := selfTest(ctx, l.r); err != nil {

@@ -120,10 +120,7 @@ func cmdMCP(c *console, args []string) int {
 
 	sink := newEventSink(c, &s, r)
 	defer sink.close()
-	base := tools.Instructions
-	if s.Write {
-		base = tools.WriteModeInstructions
-	}
+	base := baseInstructions(s.Write)
 	var gd *delivered
 	if guidanceKey != "" {
 		var err error
