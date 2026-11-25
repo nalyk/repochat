@@ -13,6 +13,7 @@ import (
 	"os"
 	"path/filepath"
 	"regexp"
+	"strings"
 	"syscall"
 	"time"
 
@@ -197,19 +198,26 @@ func (s *Store) sweepTemps() error {
 		return err
 	}
 	defer unlock()
-	names, err := filepath.Glob(filepath.Join(s.dir, ".tmp-*"))
+	// os.ReadDir, not filepath.Glob: the directory's own path may hold
+	// pattern characters such as '['.
+	entries, err := os.ReadDir(s.dir)
 	if err != nil {
 		return err
 	}
-	for _, n := range names {
-		if err := os.Remove(n); err != nil && !errors.Is(err, os.ErrNotExist) {
+	for _, e := range entries {
+		if !strings.HasPrefix(e.Name(), ".tmp-") {
+			continue
+		}
+		if err := os.Remove(filepath.Join(s.dir, e.Name())); err != nil && !errors.Is(err, os.ErrNotExist) {
 			return err
 		}
 	}
 	return nil
 }
 
-// Lock takes an exclusive flock on <dir>/.lock.
+// Lock takes an exclusive flock on <dir>/.lock. Never call Load or
+// Assignment while holding it: they take their own lock on the same file
+// through another descriptor, and flock would deadlock.
 func (s *Store) Lock() (func(), error) { return s.flock(syscall.LOCK_EX) }
 
 // rlock takes a shared flock, for readers that want one consistent snapshot.

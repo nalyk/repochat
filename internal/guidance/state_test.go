@@ -426,3 +426,27 @@ func TestSaveReplacesTheAssignmentOfTheSameRoot(t *testing.T) {
 		t.Fatalf("another root: %v", err)
 	}
 }
+
+// m4: a '[' in the state path is a glob pattern to filepath.Glob; the sweep
+// must not depend on it.
+func TestOpenWithABracketInTheStatePath(t *testing.T) {
+	state := filepath.Join(t.TempDir(), "st[ate")
+	must(t, os.MkdirAll(state, 0o700))
+	s, err := Open(state, t.TempDir())
+	if err != nil {
+		t.Fatalf("Open: %v", err)
+	}
+	must(t, s.Save(rec("k")))
+	tmp := filepath.Join(state, "guidance", ".tmp-9")
+	keep := filepath.Join(state, "guidance", "k.json")
+	must(t, os.WriteFile(tmp, []byte("x"), 0o600))
+	if _, err := Open(state, t.TempDir()); err != nil {
+		t.Fatalf("reopen: %v", err)
+	}
+	if _, err := os.Stat(tmp); err == nil {
+		t.Fatal("temp file survived Open")
+	}
+	if _, err := os.Stat(keep); err != nil {
+		t.Fatalf("the record was swept: %v", err)
+	}
+}
