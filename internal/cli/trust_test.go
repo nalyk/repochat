@@ -299,3 +299,114 @@ func TestTrustRaceCannotMoveTheAssignment(t *testing.T) {
 		t.Fatalf("record %+v", rec)
 	}
 }
+
+// assigned is a tunnel that carries trusted guidance for e.repo.
+func assigned(t *testing.T) *testEnv {
+	t.Helper()
+	e := trustEnv(t, true)
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatalf("trust: %q", errs)
+	}
+	return e
+}
+
+func TestAssignedTunnelRefusedOnAnotherRepository(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	cfg, _ := loadConfig()
+	cfg.Profiles["default"].BoundRepo = ""
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, errs, code := runCLI("--root", other, "--print-command")
+	if code == 0 {
+		t.Fatalf("served another repository on an assigned tunnel: %q", errs)
+	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo, "use another tunnel, or `repochat trust --release-tunnel` there")
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code != 0 {
+		t.Fatalf("its own repository was refused: %q", errs)
+	}
+}
+
+func TestAssignedTunnelRefusedThroughAnAlias(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	cfg, _ := loadConfig()
+	cfg.Profiles["alias"] = &Profile{TunnelID: testTunnel, APIKey: testKey}
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, errs, code := runCLI("--root", other, "--profile", "alias", "--print-command")
+	if code == 0 {
+		t.Fatalf("an alias served another repository: %q", errs)
+	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
+}
+
+func TestUnbindRefusedWhileAssigned(t *testing.T) {
+	e := assigned(t)
+	_, errs, code := runCLI("setup", "--unbind")
+	if code == 0 {
+		t.Fatalf("unbound an assigned tunnel: %q", errs)
+	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
+	cfg, _ := loadConfig()
+	if cfg.Profiles["default"].BoundRepo != e.repo {
+		t.Fatal("the binding was removed")
+	}
+	// Binding the assigned tunnel to another repository is refused too.
+	other := makeRepo(t, "other")
+	cmd := func() int {
+		t.Chdir(other)
+		_, errs, code := runCLI("setup", "--bind")
+		wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
+		return code
+	}
+	if cmd() == 0 {
+		t.Fatal("bound an assigned tunnel to another repository")
+	}
+	cfg, _ = loadConfig()
+	if cfg.Profiles["default"].BoundRepo != e.repo {
+		t.Fatal("the binding moved")
+	}
+}
+
+func TestChangedRootsRefuseTheShare(t *testing.T) {
+	e := assigned(t)
+	gitRun(t, e.repo, "checkout", "-q", "--orphan", "rewritten")
+	gitRun(t, e.repo, "commit", "-q", "-m", "new root")
+	_, errs, code := runCLI("--root", e.repo, "--print-command")
+	if code == 0 {
+		t.Fatalf("served a repository whose roots changed: %q", errs)
+	}
+	wantIn(t, errs, "the repository changed since its guidance was reviewed; run repochat trust again")
+}
+
+func TestNoGuidanceStateChangesNothing(t *testing.T) {
+	e := trustEnv(t, true)
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code != 0 {
+		t.Fatalf("code %d: %q", code, errs)
+	}
+	sd, _ := stateDir()
+	if _, err := os.Stat(filepath.Join(sd, "guidance")); err == nil {
+		t.Fatal("a launch created guidance state")
+	}
+}
+
+func TestMCPWithTunnelCredentialsRefusesAnotherRepository(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	t.Setenv("CONTROL_PLANE_TUNNEL_ID", testTunnel)
+	_, errs, code := runCLI("mcp", "--root", other)
+	if code == 0 {
+		t.Fatalf("mcp served another repository on an assigned tunnel: %q", errs)
+	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
+}
+
+func TestServerEnvironmentKeepsTheTunnelID(t *testing.T) {
+	kept, removed := serverEnvironment([]string{"PATH=/bin", "CONTROL_PLANE_TUNNEL_ID=" + testTunnel, "CONTROL_PLANE_API_KEY=" + testKey})
+	if !removed || strings.Contains(strings.Join(kept, " "), testKey) || !strings.Contains(strings.Join(kept, " "), "REPOCHAT_TUNNEL_ID="+testTunnel) {
+		t.Fatalf("kept %v", kept)
+	}
+}

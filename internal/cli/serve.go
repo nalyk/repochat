@@ -9,6 +9,7 @@ import (
 	"net"
 	"os"
 	"os/signal"
+	"strings"
 	"sync"
 	"syscall"
 	"time"
@@ -39,6 +40,11 @@ func cmdMCP(c *console, args []string) int {
 	}
 	// The server never needs credentials; make sure nothing it starts can
 	// inherit them either.
+	tunnelID := strings.TrimSpace(os.Getenv("CONTROL_PLANE_TUNNEL_ID"))
+	if tunnelID == "" {
+		tunnelID = strings.TrimSpace(os.Getenv(mcpTunnelVar))
+	}
+	os.Unsetenv(mcpTunnelVar)
 	scrubSecretsFromEnv()
 
 	var cfg *Config
@@ -92,6 +98,12 @@ func cmdMCP(c *console, args []string) int {
 	}
 	defer r.Close()
 	r.Logf = stderrLogf(c.errw)
+	if tunnelID != "" {
+		if err := checkTunnelAssignment(ctx, r, tunnelID); err != nil {
+			fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
+			return 1
+		}
+	}
 	if _, err := r.Snapshot(ctx); err != nil {
 		fmt.Fprintln(c.errw, "repochat:", err)
 		return 1

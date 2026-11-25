@@ -112,6 +112,11 @@ func credentialWizard(ctx context.Context, c *console, cfg *Config, profile, hel
 		return nil, err
 	}
 
+	if o.Bind != "" {
+		if err := checkTunnelUnassigned(id, o.Bind); err != nil {
+			return nil, err
+		}
+	}
 	p := &Profile{TunnelID: id, APIKey: key}
 	if old := cfg.Profiles[profile]; old != nil && old.TunnelID == id {
 		p.Onboarded, p.BoundRepo, p.LastRepo = old.Onboarded, old.BoundRepo, old.LastRepo
@@ -308,6 +313,12 @@ func cmdSetup(c *console, args []string) int {
 			c.fail("no profile named %q", name)
 			return 1
 		}
+		if p.TunnelID != "" {
+			if err := checkTunnelUnassigned(p.TunnelID, ""); err != nil {
+				c.fail("%v", err)
+				return 1
+			}
+		}
 		if _, err := updateConfig(func(c *Config) {
 			if p := c.Profiles[name]; p != nil {
 				p.BoundRepo = ""
@@ -347,6 +358,10 @@ func cmdSetup(c *console, args []string) int {
 	}
 	if *bind && o.TunnelID == "" && o.APIKey == "" {
 		if p := cfg.Profiles[name]; p != nil { // bind an existing profile without re-entering credentials
+			if err := checkTunnelUnassigned(p.TunnelID, o.Bind); err != nil {
+				c.fail("%v", err)
+				return 1
+			}
 			bound := o.Bind
 			if _, err := updateConfig(func(c *Config) {
 				if p := c.Profiles[name]; p != nil {

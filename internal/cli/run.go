@@ -236,6 +236,9 @@ func (l *launcher) run(ctx context.Context) (int, error) {
 		return 1, fmt.Errorf("%v. Run `repochat setup` to enter them again", err)
 	}
 	l.creds = creds
+	if err := checkTunnelAssignment(ctx, l.r, creds.TunnelID); err != nil {
+		return 1, err
+	}
 
 	// 5. Prove the server works before anything is exposed.
 	if err := selfTest(ctx, l.r); err != nil {

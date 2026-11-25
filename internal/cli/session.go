@@ -818,10 +818,18 @@ func serverEnvironment(env []string) (kept []string, removed bool) {
 			kept = append(kept, kv)
 		} else {
 			removed = true
+			// The tunnel ID is not a secret; the server keeps it, under
+			// its own name, to check the tunnel's guidance assignment.
+			if id, ok := strings.CutPrefix(kv, "CONTROL_PLANE_TUNNEL_ID="); ok && id != "" {
+				kept = append(kept, mcpTunnelVar+"="+id)
+			}
 		}
 	}
 	return kept, removed
 }
+
+// mcpTunnelVar carries the tunnel ID across the server's clean restart.
+const mcpTunnelVar = "REPOCHAT_TUNNEL_ID"
 
 var serverEnvNames = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
