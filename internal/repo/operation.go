@@ -2,11 +2,15 @@ package repo
 
 import (
 	"context"
+	"encoding/json"
 	"errors"
 	"fmt"
+	"os"
+	"path/filepath"
 	"regexp"
 	"slices"
 	"strings"
+	"time"
 )
 
 // Call is what a mutating call says about itself, beyond its arguments.
@@ -24,10 +28,10 @@ var (
 	// OperationIDRe is the form of an operation id.
 	OperationIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
 	// ExpectRe is the form of an expected checkpoint.
+	ExpectRe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 	// DigestRe is the form of an argument digest: the first 16 hexadecimal
 	// characters of a SHA-256.
 	DigestRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
-	ExpectRe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 )
 
 // validateCall refuses a Call whose fields are not in their forms. It reads
@@ -114,4 +118,114 @@ func (s *Sessions) findOperation(ctx context.Context, rec *sessionRecord, chain 
 		return cp, digest, true, nil
 	}
 	return nil, "", false, nil
+}
+
+const (
+	operationsFile = "operations.json"
+	maxReceipts    = 64
+	receiptStarted = "started"
+	receiptDone    = "done"
+)
+
+// receipt is what start_session, finish_session and abandon_session leave
+// behind for a retry to find: these calls leave no checkpoint to carry a
+// trailer. A finish writes "started" right before it merges into the owner's
+// branch and "done" once the session is closed; start and abandon write
+// "done" only.
+type receipt struct {
+	ID       string       `json:"id"`
+	Tool     string       `json:"tool"`
+	Digest   string       `json:"digest"`
+	State    string       `json:"state"`
+	Time     time.Time    `json:"time"`
+	Finished *Finished    `json:"finished,omitempty"`
+	Info     *SessionInfo `json:"info,omitempty"`
+}
+
+// readReceipts returns the receipts, oldest first. A missing file, or one
+// that is not a receipt list, is empty (the next write replaces it); a file
+// that cannot be read is an error, so that a call with an operation id is
+// never run on a guess.
+func (s *Sessions) readReceipts() ([]receipt, error) {
+	data, err := os.ReadFile(filepath.Join(s.dir, operationsFile))
+	if errors.Is(err, os.ErrNotExist) {
+		return nil, nil
+	}
+	if err != nil {
+		return nil, fmt.Errorf("the operation receipts cannot be read, so the retry check cannot be made: %v (nothing was changed)", pathErrCause(err))
+	}
+	var rs []receipt
+	if err := json.Unmarshal(data, &rs); err != nil {
+		return nil, nil
+	}
+	return rs, nil
+}
+
+// findReceipt looks up the receipt for call, for the tool named. It returns
+// nil, nil when the call has no operation id or the id is new; the lock is
+// held. The same id with another digest or tool is refused, and so is an id
+// whose finish began merging without reporting.
+func (s *Sessions) findReceipt(tool string, call Call) (*receipt, error) {
+	if call.Op == "" {
+		return nil, nil
+	}
+	rs, err := s.readReceipts()
+	if err != nil {
+		return nil, err
+	}
+	for i := range rs {
+		r := &rs[i]
+		if r.ID != call.Op {
+			continue
+		}
+		if r.Digest != call.Digest || r.Tool != tool {
+			return nil, refusal("", "operation_id %s was already used for a different call; choose a new id (nothing was changed)", call.Op)
+		}
+		if r.State != receiptDone {
+			return nil, fmt.Errorf("the %s_session call with this operation_id began merging and did not report its outcome; the owner can check with `repochat session` and `git log` (nothing was run)", tool)
+		}
+		return r, nil
+	}
+	return nil, nil
+}
+
+// putReceipt records r, replacing an earlier receipt of the same id and
+// keeping the newest maxReceipts. The lock is held.
+func (s *Sessions) putReceipt(call Call, tool, state string, fin *Finished, info *SessionInfo) error {
+	if call.Op == "" {
+		return nil
+	}
+	rs, err := s.readReceipts()
+	if err != nil {
+		return err
+	}
+	rs = slices.DeleteFunc(rs, func(r receipt) bool { return r.ID == call.Op })
+	rs = append(rs, receipt{ID: call.Op, Tool: tool, Digest: call.Digest, State: state, Time: time.Now().UTC(), Finished: fin, Info: info})
+	if len(rs) > maxReceipts {
+		rs = rs[len(rs)-maxReceipts:]
+	}
+	data, err := json.Marshal(rs)
+	if err != nil {
+		return err
+	}
+	if err := writeFileAtomic(s.dir, operationsFile, append(data, '\n')); err != nil {
+		return fmt.Errorf("the operation receipt cannot be written: %v", pathErrCause(err))
+	}
+	return nil
+}
+
+// dropReceipt removes the receipt of call. The lock is held. A receipt that
+// cannot be rewritten stays, which refuses the retry: the safe side.
+func (s *Sessions) dropReceipt(call Call) {
+	if call.Op == "" {
+		return
+	}
+	rs, err := s.readReceipts()
+	if err != nil {
+		return
+	}
+	rs = slices.DeleteFunc(rs, func(r receipt) bool { return r.ID == call.Op })
+	if data, err := json.Marshal(rs); err == nil {
+		writeFileAtomic(s.dir, operationsFile, append(data, '\n'))
+	}
 }

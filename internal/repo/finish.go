@@ -45,6 +45,12 @@ type Finished struct {
 	Files     []string
 	RunsLater []string
 	Notes     []string // unsigned commits; hooks that did not run
+	// Base and Head are the revision that was merged: the session's start
+	// and the session head the merge landed (before any squash).
+	Base, Head string
+	// Replayed is set when this is the stored result of an earlier call with
+	// the same operation id; nothing was merged by this call.
+	Replayed bool
 }
 
 // Status reports where the open session stands against the owner's branch.
@@ -643,6 +649,17 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 		return nil, err
 	}
 	defer release()
+	// A retry is answered before anything else, session or none.
+	if r, err := s.findReceipt("finish", call); err != nil {
+		return nil, err
+	} else if r != nil {
+		if r.Finished == nil {
+			return nil, errors.New("the receipt of this operation_id holds no result (nothing was run)")
+		}
+		fin := *r.Finished
+		fin.Replayed = true
+		return &fin, nil
+	}
 	rec, err := s.ensure(ctx)
 	if err != nil {
 		return nil, err
@@ -771,6 +788,10 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 		return nil, err
 	}
 
+	// A retry that finds this must not merge again: the merge may have run.
+	if err := s.putReceipt(call, "finish", receiptStarted, nil, nil); err != nil {
+		return nil, err
+	}
 	if s.beforeOwnerMerge != nil {
 		s.beforeOwnerMerge()
 	}
@@ -792,14 +813,22 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 			if err == nil {
 				refusal = s.mergeRefusal(wctx, rec, out)
 			}
-			return nil, s.failedMerge(wctx, rec, tip, land, before, refusal, err == nil && preWriteRefusal(out))
+			ferr := s.failedMerge(wctx, rec, tip, land, before, refusal, err == nil && preWriteRefusal(out))
+			// A clean refusal means the checkout is as it was, so a retry
+			// may run the merge: the receipt of its beginning goes. A
+			// checkout that may be partly updated keeps it.
+			var pu *partlyUpdatedError
+			if !errors.As(ferr, &pu) {
+				s.dropReceipt(call)
+			}
+			return nil, ferr
 		}
 		notes = append(notes, "git reported an error at the end of the merge, but the branch is at the merged commit; check the checkout with git status.")
 	}
 
 	// What the merge left: only a branch verifiably at the landed commit
 	// lets the session go.
-	fin := &Finished{Commit: land, Squashed: squash, Files: files, RunsLater: later}
+	fin := &Finished{Commit: land, Squashed: squash, Files: files, RunsLater: later, Base: rec.Base, Head: head}
 	now, err := s.ownerTip(wctx, rec)
 	switch {
 	case err != nil:
@@ -845,6 +874,10 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 	}
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fin.Notes = append(fin.Notes, "The session record could not be deleted; the next call reports the session as broken, and --new-session starts another.")
+	}
+	stored := *fin
+	if err := s.putReceipt(call, "finish", receiptDone, &stored, nil); err != nil {
+		fin.Notes = append(fin.Notes, "The receipt of this operation_id could not be written, so a retry of this call is not recognised: "+err.Error())
 	}
 	return fin, nil
 }
@@ -950,7 +983,7 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 		return finishRefused("git merge --ff-only did not complete; the reason is in repochat's local log on the user's machine")
 	}
 	cmds := recoveryCommands(tip, land)
-	return fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only did not complete. %s is still at %s; the commit being landed is %s. The session, its branch and its workspace are kept. "+
+	return &partlyUpdatedError{fmt.Errorf("finish failed, and the repository's checkout may be partly updated: git merge --ff-only did not complete. %s is still at %s; the commit being landed is %s. The session, its branch and its workspace are kept. "+
 		"To recover, first, if no git command is running, remove the lock file %s. "+
 		"Then, to go back to %s, run these two commands in order, from any directory of the checkout: `%s`, then `%s`. "+
 		"To complete the merge instead, run the same two and then `%s`. "+
@@ -958,8 +991,14 @@ func (s *Sessions) failedMerge(ctx context.Context, rec *sessionRecord, tip, lan
 		"If one of those files was edited by hand while the merge ran, going back overwrites that edit: save a copy first (git status and git diff show what differs). "+
 		"Two kinds of path they leave as they are: one whose staged content already was the landed commit's while the file was edited further, which they name, and a file the merge adds under a name git ignores, which stays on disk",
 		rec.StartBranch, tip, land, SanitizeLine(ownerIndexLock(s.owner)),
-		tip, cmds[0], cmds[1], cmds[2], tip)
+		tip, cmds[0], cmds[1], cmds[2], tip)}
 }
+
+// partlyUpdatedError is a failed merge that may have changed the owner's
+// checkout; any other failed merge left it as it was.
+type partlyUpdatedError struct{ error }
+
+func (e *partlyUpdatedError) Unwrap() error { return e.error }
 
 // recoveryCommands are the shell command lines the owner runs after a
 // fast-forward from tip to land was cut off halfway: all but the last put the
@@ -1195,18 +1234,30 @@ func (s *Sessions) skippedHooks(ctx context.Context) []string {
 // Abandon ends the session without merging: the workspace and the record are
 // removed; the branch only with deleteBranch.
 func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
+	_, err := s.AbandonCall(ctx, Call{}, deleteBranch)
+	return err
+}
+
+// AbandonCall is Abandon for a call with an operation id: a retry of a call
+// that has abandoned the session reports replayed and does nothing.
+func (s *Sessions) AbandonCall(ctx context.Context, call Call, deleteBranch bool) (replayed bool, err error) {
 	release, err := s.acquire()
 	if err != nil {
-		return err
+		return false, err
 	}
 	defer release()
+	if r, err := s.findReceipt("abandon", call); err != nil {
+		return false, err
+	} else if r != nil {
+		return true, nil
+	}
 	rec, err := s.readRecord()
 	if err != nil {
-		return err
+		return false, err
 	}
 	if rec == nil {
 		s.closeWorkspace()
-		return ErrNoSession
+		return false, ErrNoSession
 	}
 	s.closeWorkspace()
 	s.plans = nil
@@ -1214,10 +1265,10 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 	// what lets the next call find it again.
 	werr := s.removeWorkspace(ctx, rec.Workspace)
 	if errors.Is(werr, errNotOurWorkspace) {
-		return fmt.Errorf("the session was not abandoned: %v. The session stays open; --new-session starts another and leaves this one's files where they are", werr)
+		return false, fmt.Errorf("the session was not abandoned: %v. The session stays open; --new-session starts another and leaves this one's files where they are", werr)
 	}
 	if _, err := os.Lstat(filepath.Dir(rec.Workspace)); !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("the session workspace could not be removed (%v); the session stays open, and abandoning it can be tried again", werr)
+		return false, fmt.Errorf("the session workspace could not be removed (%v); the session stays open, and abandoning it can be tried again", werr)
 	}
 	var berr error
 	if deleteBranch {
@@ -1231,10 +1282,13 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 		}
 	}
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
-		return fmt.Errorf("the session workspace was removed, but its record could not be deleted: %v", pathErrCause(err))
+		return false, fmt.Errorf("the session workspace was removed, but its record could not be deleted: %v", pathErrCause(err))
 	}
 	if berr != nil {
-		return fmt.Errorf("the session was abandoned, but its branch was not deleted. %v", berr)
+		return false, fmt.Errorf("the session was abandoned, but its branch was not deleted. %v", berr)
 	}
-	return nil
+	if err := s.putReceipt(call, "abandon", receiptDone, nil, nil); err != nil {
+		s.notify("The session was abandoned, but " + err.Error() + "; a retry of this call is not recognised.")
+	}
+	return false, nil
 }

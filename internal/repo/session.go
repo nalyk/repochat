@@ -47,6 +47,9 @@ type SessionOptions struct {
 type SessionInfo struct {
 	ID, Branch, StartBranch, Base, Head, Workspace string
 	Created                                        time.Time
+	// Replayed is set when the answer is the stored one of an earlier call
+	// with the same operation id.
+	Replayed bool
 }
 
 // ErrNoSession is returned when an operation needs a session and none is open.
@@ -252,6 +255,12 @@ func (s *Sessions) Current(ctx context.Context) (*SessionInfo, error) {
 // session's workspace is removed, its branch is left in place, and a new
 // session is started.
 func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) {
+	return s.StartCall(ctx, Call{}, fresh)
+}
+
+// StartCall is Start for a call with an operation id: a retry of a call that
+// has answered returns that answer (Replayed) and starts nothing.
+func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*SessionInfo, error) {
 	if s.opts.Observe {
 		return nil, errObserving
 	}
@@ -260,6 +269,13 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		return nil, err
 	}
 	defer release()
+	if r, err := s.findReceipt("start", call); err != nil {
+		return nil, err
+	} else if r != nil && r.Info != nil {
+		info := *r.Info
+		info.Replayed = true
+		return &info, nil
+	}
 	rec, err := s.readRecord()
 	damaged := fresh && errors.Is(err, errDamagedRecord)
 	if err != nil && !damaged {
@@ -270,7 +286,11 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 			return nil, err
 		}
 		if rec != nil {
-			return s.info(ctx, rec)
+			info, err := s.info(ctx, rec)
+			if err == nil {
+				s.recordStart(call, info)
+			}
+			return info, err
 		}
 	}
 	if err := s.checkOwnerIgnore(); err != nil {
@@ -383,7 +403,20 @@ func (s *Sessions) Start(ctx context.Context, fresh bool) (*SessionInfo, error) 
 		return nil, err
 	}
 	ok = true
-	return s.info(ctx, rec)
+	info, err := s.info(ctx, rec)
+	if err == nil {
+		s.recordStart(call, info)
+	}
+	return info, err
+}
+
+// recordStart keeps the answer of a start call that has an operation id. The
+// session is open by now, so a receipt that cannot be written is a notice.
+func (s *Sessions) recordStart(call Call, info *SessionInfo) {
+	stored := *info
+	if err := s.putReceipt(call, "start", receiptDone, nil, &stored); err != nil {
+		s.notify("The session was started, but " + err.Error() + "; a retry of this call is not recognised.")
+	}
 }
 
 // ensure makes the open workspace match session.json: none when there is no

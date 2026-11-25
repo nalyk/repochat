@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"encoding/json"
 	"errors"
 	"fmt"
 	"os"
@@ -530,5 +531,223 @@ func TestDigestMustBeSixteenHexCharacters(t *testing.T) {
 	}
 	if err := validateCall(Call{Op: "op-aaaa1111", Digest: "0123456789abcdef"}); err != nil {
 		t.Error(err)
+	}
+}
+
+func readReceipts(t *testing.T, s *Sessions) []receipt {
+	t.Helper()
+	data, err := os.ReadFile(filepath.Join(s.dir, "operations.json"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	var rs []receipt
+	if err := json.Unmarshal(data, &rs); err != nil {
+		t.Fatalf("operations.json: %v", err)
+	}
+	return rs
+}
+
+func TestFinishReplayAfterTheSessionClosed(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	call := opCall("fin-aaaa1111", "f1f1f1f1f1f1f1f1")
+	first, err := c.s.FinishCall(bg, call, false, "")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed {
+		t.Error("the first call reports Replayed")
+	}
+	owner := ownerState(t, c.f.dir, "a.txt")
+	second, err := c.s.FinishCall(bg, call, false, "")
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !second.Replayed || second.Commit != first.Commit || second.Head != first.Head || second.Base != first.Base {
+		t.Errorf("replay %+v, first %+v", second, first)
+	}
+	if got := ownerState(t, c.f.dir, "a.txt"); got != owner {
+		t.Errorf("the replay changed the owner's checkout:\n%s\nwas\n%s", got, owner)
+	}
+	other := opCall("fin-aaaa1111", "e2e2e2e2e2e2e2e2")
+	if _, err := c.s.FinishCall(bg, other, false, ""); err == nil || !strings.Contains(err.Error(), "different call") {
+		t.Errorf("other digest: %v", err)
+	}
+}
+
+func TestFinishStartedReceiptRefuses(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	data, _ := json.Marshal([]receipt{{ID: "fin-xxxx1111", Tool: "finish", Digest: "f1f1f1f1f1f1f1f1", State: "started", Time: time.Now()}})
+	if err := os.WriteFile(filepath.Join(c.s.dir, "operations.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	tip := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main")
+	_, err := c.s.FinishCall(bg, opCall("fin-xxxx1111", "f1f1f1f1f1f1f1f1"), false, "")
+	if err == nil || !strings.Contains(err.Error(), "did not report its outcome") {
+		t.Fatalf("got %v", err)
+	}
+	if got := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main"); got != tip {
+		t.Error("the owner's branch moved")
+	}
+}
+
+func TestFinishWritesStartedBeforeTheMergeAndDoneAfter(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	var during []receipt
+	c.s.beforeOwnerMerge = func() { during = readReceipts(t, c.s) }
+	if _, err := c.s.FinishCall(bg, opCall("fin-aaaa1111", "f1f1f1f1f1f1f1f1"), false, ""); err != nil {
+		t.Fatal(err)
+	}
+	if len(during) != 1 || during[0].State != "started" || during[0].Tool != "finish" {
+		t.Errorf("at the merge: %+v", during)
+	}
+	if after := readReceipts(t, c.s); len(after) != 1 || after[0].State != "done" || after[0].Finished == nil {
+		t.Errorf("after: %+v", after)
+	}
+}
+
+func TestFinishRefusedBeforeTheMergeWritesNoReceipt(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	if _, err := c.s.FinishCall(bg, opCall("fin-aaaa1111", "f1f1f1f1f1f1f1f1"), false, ""); err == nil {
+		t.Fatal("finish of an empty session succeeded")
+	}
+	if exists(filepath.Join(c.s.dir, "operations.json")) {
+		t.Error("a refused finish left a receipt")
+	}
+}
+
+func TestFinishReportsTheReviewedRevision(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	base := c.base(t)
+	c.replaceLine(t, "a.txt", 1, "A")
+	head := c.head(t)
+	c.replaceLine(t, "a.txt", 1, "AA")
+	_ = head
+	head = c.head(t)
+	fin, err := c.s.FinishCall(bg, Call{Expect: head}, true, "squashed")
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fin.Head != head || fin.Base != base {
+		t.Errorf("Base %s Head %s; want %s %s", fin.Base, fin.Head, base, head)
+	}
+	if fin.Commit == head {
+		t.Error("a squash landed the session head itself")
+	}
+}
+
+func TestStartFreshReplayDoesNotStartAThirdSession(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, first := f.start(t, Options{})
+	call := opCall("start-aaaa1111", "a1a1a1a1a1a1a1a1")
+	a, err := s.StartCall(bg, call, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if a.ID == first.ID || a.Replayed {
+		t.Fatalf("fresh start: %+v, first %+v", a, first)
+	}
+	b, err := s.StartCall(bg, call, true)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ID != a.ID || !b.Replayed {
+		t.Errorf("replay: %+v, want session %s replayed", b, a.ID)
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != a.ID {
+		t.Errorf("current: %+v, %v", cur, err)
+	}
+}
+
+func TestAbandonReplay(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, _ := f.start(t, Options{})
+	call := opCall("aban-aaaa1111", "b1b1b1b1b1b1b1b1")
+	if replayed, err := s.AbandonCall(bg, call, false); err != nil || replayed {
+		t.Fatalf("first: %v, %v", replayed, err)
+	}
+	if replayed, err := s.AbandonCall(bg, call, false); err != nil || !replayed {
+		t.Fatalf("second: %v, %v", replayed, err)
+	}
+	if _, err := s.AbandonCall(bg, opCall("aban-aaaa1111", "c1c1c1c1c1c1c1c1"), false); err == nil || !strings.Contains(err.Error(), "different call") {
+		t.Errorf("other digest: %v", err)
+	}
+	if _, err := s.AbandonCall(bg, opCall("aban-bbbb2222", "b1b1b1b1b1b1b1b1"), false); !errors.Is(err, ErrNoSession) {
+		t.Errorf("new op with no session: %v", err)
+	}
+}
+
+func TestReceiptsKeepTheNewest64(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, _ := f.start(t, Options{})
+	for i := 0; i < 65; i++ {
+		if _, err := s.AbandonCall(bg, opCall(fmt.Sprintf("aban-%04d", i), "b1b1b1b1b1b1b1b1"), false); err != nil {
+			t.Fatalf("abandon %d: %v", i, err)
+		}
+		if _, err := s.StartCall(bg, opCall(fmt.Sprintf("start-%04d", i), "a1a1a1a1a1a1a1a1"), false); err != nil {
+			t.Fatalf("start %d: %v", i, err)
+		}
+	}
+	rs := readReceipts(t, s)
+	if len(rs) != 64 {
+		t.Fatalf("%d receipts, want 64", len(rs))
+	}
+	for _, r := range rs {
+		if r.ID == "aban-0000" {
+			t.Error("the oldest receipt is still there")
+		}
+	}
+	if rs[63].ID != "start-0064" {
+		t.Errorf("newest is %s", rs[63].ID)
+	}
+}
+
+func TestDamagedReceiptsAreReplacedButUnreadableRefusesTheCall(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, _ := f.start(t, Options{})
+	path := filepath.Join(s.dir, "operations.json")
+	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AbandonCall(bg, opCall("aban-aaaa1111", "b1b1b1b1b1b1b1b1"), false); err != nil {
+		t.Fatalf("damaged file: %v", err)
+	}
+	if rs := readReceipts(t, s); len(rs) != 1 || rs[0].ID != "aban-aaaa1111" {
+		t.Errorf("receipts after a damaged file: %+v", rs)
+	}
+	// A directory where the file should be cannot be read.
+	os.Remove(path)
+	if err := os.Mkdir(path, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartCall(bg, opCall("start-aaaa1111", "a1a1a1a1a1a1a1a1"), false); err == nil {
+		t.Error("an unreadable receipt file did not refuse the call")
+	}
+	if _, err := s.Current(bg); !errors.Is(err, ErrNoSession) {
+		t.Errorf("the refused start still opened a session: %v", err)
+	}
+}
+
+func TestFinishRefusedByTheMergeCanBeRetried(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	if _, err := createC(c, Call{}); err != nil {
+		t.Fatal(err)
+	}
+	call := opCall("fin-aaaa1111", "f1f1f1f1f1f1f1f1")
+	// A file of the owner's appears where the merge adds one, after the
+	// last check and before the merge: git refuses, touching nothing.
+	c.s.beforeOwnerMerge = func() { write(t, c.f.dir, "c.txt", "mine\n") }
+	if _, err := c.s.FinishCall(bg, call, false, ""); err == nil {
+		t.Fatal("finish succeeded over the owner's file")
+	}
+	if rs := readReceipts(t, c.s); len(rs) != 0 {
+		t.Fatalf("a clean refusal left receipts: %+v", rs)
+	}
+	c.s.beforeOwnerMerge = nil
+	os.Remove(filepath.Join(c.f.dir, "c.txt"))
+	if fin, err := c.s.FinishCall(bg, call, false, ""); err != nil || fin.Replayed {
+		t.Fatalf("retry: %+v, %v", fin, err)
 	}
 }
