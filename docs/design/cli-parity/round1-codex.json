@@ -1,0 +1,658 @@
+{
+  "facts": [
+    {
+      "id": "F01",
+      "claim": "repochat has no third-party Go module dependencies.",
+      "status": "confirmed",
+      "evidence": "go.mod declares Go 1.25 and contains no dependency requirements. The runtime still depends on git and, for ChatGPT connectivity, the separate tunnel-client executable.",
+      "source": "[go.mod](go.mod), [README.md](README.md)"
+    },
+    {
+      "id": "F02",
+      "claim": "Write mode exposes 22 tools: 13 existing tools and nine session tools.",
+      "status": "confirmed",
+      "evidence": "NewWrite appends nine definitions to readTools. There is no command-execution tool.",
+      "source": "[tools.go](internal/tools/tools.go), [write.go](internal/tools/write.go)"
+    },
+    {
+      "id": "F03",
+      "claim": "Sessions start from committed HEAD and share the owner's Git object database.",
+      "status": "confirmed",
+      "evidence": "Start resolves HEAD and creates a linked worktree with --no-checkout. openWorkspace verifies that both worktrees have the same common Git directory. Sparse checkout withholds files without removing their blobs from that database.",
+      "source": "[session.go](internal/repo/session.go:254)"
+    },
+    {
+      "id": "F04",
+      "claim": "Resuming a session can discard command-produced changes that were never checkpointed.",
+      "status": "confirmed",
+      "evidence": "resume calls restore, which resets tracked files to HEAD and cleans untracked, nonignored files. Ignored artifacts can remain. A future command runner must explicitly reconcile this behavior.",
+      "source": "[session.go](internal/repo/session.go:488)"
+    },
+    {
+      "id": "F05",
+      "claim": "Current server instructions prohibit following repository instructions.",
+      "status": "confirmed",
+      "evidence": "instructionsDetails classifies everything returned by repository tools as untrusted data and says never to follow instructions found there. G3 therefore requires an explicit exception in this contract.",
+      "source": "[tools.go](internal/tools/tools.go:45)"
+    },
+    {
+      "id": "F06",
+      "claim": "The current MCP implementation cannot return images, widgets, Tasks, progress, or elicitation through its tool-handler interface.",
+      "status": "confirmed",
+      "evidence": "Result contains Text and Redactions; toolsCall always constructs text content. Capabilities advertise only tools, and the dispatcher has no resources or Tasks methods or elicitation result handling.",
+      "source": "[server.go](internal/mcp/server.go)"
+    },
+    {
+      "id": "F07",
+      "claim": "repochat imposes a hard 60-second execution limit.",
+      "status": "refuted",
+      "evidence": "It supplies a 60-second context deadline. runTool invokes the handler directly and waits for its return; it does not forcibly stop an uncooperative handler. The distinction matters for subprocess supervision.",
+      "source": "[server.go](internal/mcp/server.go:717)"
+    },
+    {
+      "id": "F08",
+      "claim": "The default repository result budget is 32 KiB.",
+      "status": "confirmed",
+      "evidence": "DefaultMaxOutput is 32 << 10. tools.finish applies masking, sanitization, truncation, and a bounded metadata footer.",
+      "source": "[repo.go](internal/repo/repo.go:49), [tools.go](internal/tools/tools.go:289)"
+    },
+    {
+      "id": "F09",
+      "claim": "All apply_changes requests have durable replay protection.",
+      "status": "refuted",
+      "evidence": "Applying a proposed plan again returns its cached result, but that cache is process memory with expiry. Direct change sets have no operation identifier. Retrying an insert at end after a lost response can apply it again.",
+      "source": "[apply.go](internal/repo/apply.go:80)"
+    },
+    {
+      "id": "F10",
+      "claim": "The hub is proposed, while session editing is implemented.",
+      "status": "confirmed",
+      "evidence": "The specifications explicitly distinguish their status, and the requested implementation files contain the session-editing machinery. I did not rerun tests, so passing-test and real-session claims remain reports from the repository and author.",
+      "source": "[hub specification](docs/superpowers/specs/2026-11-18-un-plugin-mai-multe-repository-uri-design.md), [write specification](docs/superpowers/specs/2026-11-19-write-mode-edits-design.md)"
+    },
+    {
+      "id": "F11",
+      "claim": "ChatGPT custom MCP servers support write tools.",
+      "status": "confirmed",
+      "evidence": "Official documentation explicitly supports read and write tools. This establishes product capability, not entitlement for this particular Plus account.",
+      "source": "[Add custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F12",
+      "claim": "ChatGPT uses readOnlyHint to determine default write confirmations.",
+      "status": "confirmed",
+      "evidence": "Write actions require confirmation by default; tools lacking the read-only hint are treated as writes.",
+      "source": "[Tool confirmations](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F13",
+      "claim": "ChatGPT can remember approval or denial per tool within a conversation.",
+      "status": "confirmed",
+      "evidence": "The documented scope is a tool and conversation, not its arguments. New conversations prompt again; refreshing the same conversation also restores prompts on subsequent turns.",
+      "source": "[Remembered confirmations](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F14",
+      "claim": "This Plus account can invoke repochat write tools.",
+      "status": "unverified",
+      "evidence": "Current developer documentation does not establish Plus entitlement. The Help Center availability section names Business and Enterprise/Edu. Neither establishes a successful write call on this account; run the probe.",
+      "source": "[Custom MCP documentation](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Availability and requirements](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt)"
+    },
+    {
+      "id": "F15",
+      "claim": "Developer Mode must be enabled before adding a custom MCP server.",
+      "status": "refuted",
+      "evidence": "The current Plugins flow replaces that prerequisite with a risk acknowledgment for each server. Account and workspace restrictions still apply.",
+      "source": "[Current connection workflow](https://help.openai.com/en/articles/12584461-connecting-custom-mcp-servers-in-chatgpt)"
+    },
+    {
+      "id": "F16",
+      "claim": "Custom MCP servers must implement search and fetch.",
+      "status": "refuted",
+      "evidence": "Custom connections can expose arbitrary tools. The search/fetch compatibility requirement belongs to particular retrieval surfaces, not this general tool connection.",
+      "source": "[Custom tool requirements](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F17",
+      "claim": "Secure MCP Tunnel supports private servers through an outbound connection and a local stdio child.",
+      "status": "confirmed",
+      "evidence": "tunnel-client forwards MCP requests to local stdio or HTTP servers. ChatGPT supports selecting a tunnel when adding a custom server.",
+      "source": "[Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels)"
+    },
+    {
+      "id": "F18",
+      "claim": "The tunnel has a default 120-second request deadline.",
+      "status": "confirmed",
+      "evidence": "The deadline includes hosted queue time and final response delivery. Progress notifications do not reset it.",
+      "source": "[Tunnel limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits)"
+    },
+    {
+      "id": "F19",
+      "claim": "The tunnel permits messages up to 10 MiB by default.",
+      "status": "confirmed",
+      "evidence": "The limit covers the serialized envelope, including metadata, so usable content is smaller.",
+      "source": "[Tunnel limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits)"
+    },
+    {
+      "id": "F20",
+      "claim": "The tunnel permits 600 MCP requests per minute by default.",
+      "status": "confirmed",
+      "evidence": "The allowance is shared according to tunnel and calling-application identity, with a user-based fallback. Additional tunnel-client processes do not multiply it.",
+      "source": "[Tunnel limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits)"
+    },
+    {
+      "id": "F21",
+      "claim": "ChatGPT's own custom-MCP timeout is known.",
+      "status": "unverified",
+      "evidence": "I found the tunnel deadline, but no authoritative guarantee for a separate ChatGPT execution timeout on this account and surface. repochat's context deadline must be distinguished from both.",
+      "source": "[Custom MCP documentation](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Tunnel limits](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels#limits)"
+    },
+    {
+      "id": "F22",
+      "claim": "ChatGPT guarantees a particular number of tool calls or autonomous polls per assistant turn.",
+      "status": "unverified",
+      "evidence": "No applicable public guarantee was established. Probe repeated workflows and record observed continuation, rather than treating one measured maximum as a platform contract.",
+      "source": "[Custom MCP usage guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F23",
+      "claim": "MCP supports image content in tool results.",
+      "status": "confirmed",
+      "evidence": "The tools specification defines image content carrying base64 data and a MIME type.",
+      "source": "[MCP image content](https://modelcontextprotocol.io/specification/2026-07-28/server/tools#image-content)"
+    },
+    {
+      "id": "F24",
+      "claim": "An image result from repochat reaches the selected ChatGPT Chat model through this tunnel.",
+      "status": "unverified",
+      "evidence": "Protocol support and widget image facilities do not establish this complete path. Test recognition of an unpredictable image feature, separately from whether the UI displays it.",
+      "source": "[MCP tools](https://modelcontextprotocol.io/specification/2026-07-28/server/tools), [OpenAI plugin reference](https://developers.openai.com/plugins/reference)"
+    },
+    {
+      "id": "F25",
+      "claim": "MCP 2025-11-25 introduced experimental Tasks.",
+      "status": "confirmed",
+      "evidence": "These are requestor-driven durable operations with task capabilities, polling, deferred results, and cancellation.",
+      "source": "[2025 Tasks](https://modelcontextprotocol.io/specification/2025-11-25/basic/utilities/tasks)"
+    },
+    {
+      "id": "F26",
+      "claim": "MCP 2026-07-28 preserves the 2025 Tasks mechanism unchanged.",
+      "status": "refuted",
+      "evidence": "Tasks are now an optional extension. Clients declare io.modelcontextprotocol/tasks per request; servers may return resultType=task and clients poll tasks/get. This differs from legacy task augmentation.",
+      "source": "[2026 protocol](https://modelcontextprotocol.io/specification/2026-07-28), [Current Tasks extension](https://modelcontextprotocol.io/extensions/tasks/overview)"
+    },
+    {
+      "id": "F27",
+      "claim": "ChatGPT Chat supports the applicable Tasks extension through this tunnel.",
+      "status": "unverified",
+      "evidence": "The specification establishes possible behavior, not host implementation. Capture capabilities and successfully exercise creation, retrieval, cancellation, and reconnect before depending on it.",
+      "source": "[Extension negotiation](https://modelcontextprotocol.io/specification/2026-07-28/basic/versioning), [Tasks](https://modelcontextprotocol.io/extensions/tasks/overview)"
+    },
+    {
+      "id": "F28",
+      "claim": "MCP progress notifications can continue after a request completes and wake another ChatGPT turn.",
+      "status": "refuted",
+      "evidence": "Progress belongs to an active request with a client-supplied token and must stop at completion. It is not a durable completion callback.",
+      "source": "[MCP progress](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/progress)"
+    },
+    {
+      "id": "F29",
+      "claim": "ChatGPT displays or acts on repochat progress notifications on the intended surface.",
+      "status": "unverified",
+      "evidence": "The tunnel can forward intermediate events, but that does not establish ChatGPT's presentation or model behavior.",
+      "source": "[Tunnel forwarding](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [MCP progress](https://modelcontextprotocol.io/specification/2026-07-28/basic/patterns/progress)"
+    },
+    {
+      "id": "F30",
+      "claim": "MCP 2026-07-28 elicitation requires an unsolicited server-to-client request.",
+      "status": "refuted",
+      "evidence": "The modern mechanism returns input_required with input requests, then receives responses on a subsequent client request. Supported elicitation modes must be declared.",
+      "source": "[Modern elicitation](https://modelcontextprotocol.io/specification/2026-07-28/client/elicitation)"
+    },
+    {
+      "id": "F31",
+      "claim": "The intended Plus connection supports elicitation end to end.",
+      "status": "unverified",
+      "evidence": "OpenAI recommends elicitation in plugin tools, but this account, tunnel, protocol revision, and interaction need a successful probe.",
+      "source": "[OpenAI elicitation guidance](https://developers.openai.com/plugins/build/mcp-server#tool-annotations-and-elicitation)"
+    },
+    {
+      "id": "F32",
+      "claim": "OpenAI documents openai/session as an anonymized conversation identifier.",
+      "status": "confirmed",
+      "evidence": "The client-metadata reference describes it as correlating calls within a ChatGPT conversation. Documentation alone does not establish receipt, stability, or authentication on this installation.",
+      "source": "[Client metadata](https://developers.openai.com/plugins/reference#_meta-fields-the-client-provides)"
+    },
+    {
+      "id": "F33",
+      "claim": "Apps SDK-style widgets are supported in ChatGPT.",
+      "status": "confirmed",
+      "evidence": "Current documentation favors the MCP Apps UI standard: registered UI resources, iframe rendering, and a host bridge. Legacy window.openai APIs remain for compatibility and additional features.",
+      "source": "[Add UI to an MCP server](https://developers.openai.com/plugins/build/chatgpt-ui)"
+    },
+    {
+      "id": "F34",
+      "claim": "Those widgets work through repochat's Secure MCP Tunnel on Plus.",
+      "status": "unverified",
+      "evidence": "MCP resource delivery makes this plausible, but I found no explicit guarantee for the complete combination. repochat also lacks resource methods and UI metadata today.",
+      "source": "[MCP UI](https://developers.openai.com/plugins/build/chatgpt-ui), [Secure MCP Tunnel](https://developers.openai.com/api/docs/guides/secure-mcp-tunnels), [server.go](internal/mcp/server.go)"
+    },
+    {
+      "id": "F35",
+      "claim": "A free-form command tool should automatically have destructiveHint=true and openWorldHint=true.",
+      "status": "refuted",
+      "evidence": "Annotations describe actual effects. Open-world means access to open-ended external entities; destructive means irreversible or difficult-to-reverse effects. Arbitrary syntax alone establishes neither.",
+      "source": "[Tool annotations](https://developers.openai.com/plugins/build/mcp-server#tool-annotations-and-elicitation)"
+    },
+    {
+      "id": "F36",
+      "claim": "Local exploration, editing, command execution, and verification are core CLI capabilities.",
+      "status": "confirmed",
+      "evidence": "Both products document this workflow. Claude explicitly describes repeated context gathering, action, and verification.",
+      "source": "[Claude Code's loop](https://code.claude.com/docs/en/how-claude-code-works), [Codex CLI](https://learn.chatgpt.com/docs/codex/cli)"
+    },
+    {
+      "id": "F37",
+      "claim": "Codex separates sandbox permissions from approval policy.",
+      "status": "confirmed",
+      "evidence": "Its documented modes include read-only, workspace-write, and unrestricted execution. on-request and never govern approval behavior independently; workspace execution normally has networking disabled.",
+      "source": "[Codex approvals and security](https://learn.chatgpt.com/docs/agent-approvals-security)"
+    },
+    {
+      "id": "F38",
+      "claim": "Codex necessarily reads the whole disk even when restricted.",
+      "status": "refuted",
+      "evidence": "Current permission profiles support path-based read, write, and deny rules. Broad default read access must not be confused with an inability to enforce restricted reads.",
+      "source": "[Filesystem permission profiles](https://learn.chatgpt.com/docs/config-file/config-reference)"
+    },
+    {
+      "id": "F39",
+      "claim": "Current Codex Linux isolation is based on Landlock alone.",
+      "status": "refuted",
+      "evidence": "Current documentation identifies bwrap plus seccomp as the default Linux implementation.",
+      "source": "[Codex OS enforcement](https://learn.chatgpt.com/docs/agent-approvals-security#os-level-sandbox)"
+    },
+    {
+      "id": "F40",
+      "claim": "Codex still uses sandbox-exec and Seatbelt on macOS.",
+      "status": "confirmed",
+      "evidence": "Current documentation explicitly describes executing sandbox-exec with a Seatbelt policy.",
+      "source": "[Codex macOS enforcement](https://learn.chatgpt.com/docs/agent-approvals-security#os-level-sandbox)"
+    },
+    {
+      "id": "F41",
+      "claim": "Claude Code offers distinct planning and approval modes.",
+      "status": "confirmed",
+      "evidence": "The documented modes include Manual, acceptEdits, Plan, Auto, dontAsk, and bypassPermissions. Plan produces a reviewable plan before source editing.",
+      "source": "[Claude permission modes](https://code.claude.com/docs/en/permission-modes)"
+    },
+    {
+      "id": "F42",
+      "claim": "Claude Code's Bash sandbox protects every tool automatically.",
+      "status": "refuted",
+      "evidence": "It covers shell commands and descendants. File tools, MCP servers, and hooks run outside that boundary. Its documented OS mechanisms include bubblewrap on Linux and Seatbelt on macOS.",
+      "source": "[Claude sandbox scope](https://code.claude.com/docs/en/sandboxing)"
+    },
+    {
+      "id": "F43",
+      "claim": "Codex automatically loads scoped AGENTS.md instructions.",
+      "status": "confirmed",
+      "evidence": "It constructs a global and project instruction chain, with directory precedence, override files, and a configurable size limit.",
+      "source": "[Codex AGENTS.md discovery](https://learn.chatgpt.com/docs/agent-configuration/agents-md)"
+    },
+    {
+      "id": "F44",
+      "claim": "Claude Code automatically loads project instructions.",
+      "status": "confirmed",
+      "evidence": "CLAUDE.md supplies persistent guidance. Current documentation also describes AGENTS.md support, subject to instruction-source settings and precedence.",
+      "source": "[Claude project instructions](https://code.claude.com/docs/en/memory)"
+    },
+    {
+      "id": "F45",
+      "claim": "Codex has a plan-update tool.",
+      "status": "confirmed",
+      "evidence": "The official prompting guide documents update_plan with steps and status values. This does not imply that ChatGPT Chat exposes that same tool.",
+      "source": "[Codex plan tool](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide)"
+    },
+    {
+      "id": "F46",
+      "claim": "Codex supports resumable command processes.",
+      "status": "confirmed",
+      "evidence": "Current configuration documents unified execution and write_stdin. The prompting guide describes long-lived execution sessions and output polling.",
+      "source": "[Codex execution configuration](https://learn.chatgpt.com/docs/config-file/config-reference), [Execution tools](https://developers.openai.com/cookbook/examples/gpt-5/codex_prompting_guide)"
+    },
+    {
+      "id": "F47",
+      "claim": "Claude Code supports background commands with task identifiers and output retrieval.",
+      "status": "confirmed",
+      "evidence": "It documents asynchronous execution, output files, task controls, and cleanup at exit, including detached descendants on supported systems.",
+      "source": "[Claude background commands](https://code.claude.com/docs/en/interactive-mode#background-bash-commands)"
+    },
+    {
+      "id": "F48",
+      "claim": "Claude Code checkpoints comprehensively undo everything a command changes.",
+      "status": "refuted",
+      "evidence": "Checkpointing tracks file-tool edits. Files changed only by Bash are not generally restored. Rewind can restore code, conversation, or both.",
+      "source": "[Claude checkpointing limitations](https://code.claude.com/docs/en/checkpointing)"
+    },
+    {
+      "id": "F49",
+      "claim": "Codex CLI guarantees an automatic checkpoint/undo system equivalent to repochat's checkpoint commits.",
+      "status": "unverified",
+      "evidence": "The current CLI guide recommends creating Git checkpoints. I did not establish a matching automatic, comprehensive undo contract; conversation rollback and app undo are not evidence of one.",
+      "source": "[Codex CLI checkpoint guidance](https://learn.chatgpt.com/docs/codex/cli)"
+    },
+    {
+      "id": "F50",
+      "claim": "Landlock can restrict unprivileged processes and their descendants.",
+      "status": "confirmed",
+      "evidence": "It restricts ambient filesystem and other supported rights. Available protections depend on the running kernel ABI.",
+      "source": "[Linux Landlock documentation](https://docs.kernel.org/userspace-api/landlock.html)"
+    },
+    {
+      "id": "F51",
+      "claim": "Landlock alone preserves repochat's complete exposure policy.",
+      "status": "refuted",
+      "evidence": "Documented gaps include stat/access and other metadata operations, special filesystems, and inherited descriptors. Denying file-content reads does not automatically prevent existence probes or access through other channels.",
+      "source": "[Landlock limitations](https://docs.kernel.org/userspace-api/landlock.html)"
+    },
+    {
+      "id": "F52",
+      "claim": "Seccomp alone provides filesystem isolation.",
+      "status": "refuted",
+      "evidence": "Kernel documentation explicitly distinguishes syscall filtering from a sandbox. Classic filters cannot dereference pathname pointers; architecture checks are also necessary.",
+      "source": "[Linux seccomp documentation](https://docs.kernel.org/userspace-api/seccomp_filter.html)"
+    },
+    {
+      "id": "F53",
+      "claim": "Apple provides a supported, documented custom Seatbelt-policy interface suitable for this design.",
+      "status": "refuted",
+      "evidence": "Apple DTS explains that custom sandbox policy is unsupported for third-party development and connects this to sandbox-exec's deprecation. The explanation is from 2020; current Codex usage establishes continued practice, not Apple support.",
+      "source": "[Apple DTS explanation](https://developer.apple.com/forums/thread/661939)"
+    },
+    {
+      "id": "F54",
+      "claim": "Applying thread-scoped restrictions from ordinary Go goroutines requires special care.",
+      "status": "confirmed",
+      "evidence": "Go's runtime documentation requires locking the OS thread for services depending on per-thread state. A dedicated launcher must establish and preserve restrictions through exec; merely calling restriction syscalls in a server handler is insufficient.",
+      "source": "[runtime.LockOSThread](https://pkg.go.dev/runtime#LockOSThread)"
+    },
+    {
+      "id": "F55",
+      "claim": "go.sum precisely identifies the dependencies that should be exposed.",
+      "status": "refuted",
+      "evidence": "It can contain checksums for unused versions and can be absent with local replacements. Provisioning must resolve the actual build graph and replacements.",
+      "source": "[Go module checksums](https://go.dev/ref/mod#go-sum-files)"
+    },
+    {
+      "id": "F56",
+      "claim": "GOPROXY=off and -mod=readonly make arbitrary Go tests safe.",
+      "status": "refuted",
+      "evidence": "These constrain module acquisition and go.mod updates. They do not confine test code, inherited environment, subprocesses, filesystem reads, or direct networking.",
+      "source": "[Go module environment](https://go.dev/ref/mod#environment-variables), [Build flags](https://go.dev/ref/mod#build-commands)"
+    },
+    {
+      "id": "F57",
+      "claim": "Go formatting must wait for command execution.",
+      "status": "refuted",
+      "evidence": "The standard library provides go/format, and repochat already calls format.Source to produce warnings. An explicit formatting option needs edit-policy integration, not a subprocess sandbox.",
+      "source": "[go/format](https://pkg.go.dev/go/format#Source), [changeset.go](internal/repo/changeset.go:1225)"
+    },
+    {
+      "id": "F58",
+      "claim": "Chat plus repochat is verified to provide equivalent agent work without consuming the shared Work/Codex allowance.",
+      "status": "unverified",
+      "evidence": "Official pricing confirms shared Work/Codex limits and different model availability in Chat. It does not establish this plugin workflow's accounting or equivalent coding performance. Both require measurement.",
+      "source": "[Pricing and model availability](https://learn.chatgpt.com/docs/pricing)"
+    }
+  ],
+  "verdicts": [
+    {
+      "id": "G0",
+      "verdict": "agree",
+      "objection_strength": "minor",
+      "critique": "The gate is essential, but the existing no-op write probe is insufficient. Declared capabilities are not demonstrated behavior, and one observed call-chain length is not a stable limit. Optional image/UI/protocol experiments should not hold up validating ordinary editing.",
+      "counter_proposal": "First run a disposable real task: discover tools, start, read anchors, perform a multi-file edit, recover from stale anchors, inspect checkpoints, undo, and explicitly finish. Measure confirmations, calls, latency, result truncation, interruption, reconnection, and allowance changes. Then separately test modern Tasks, progress, elicitation, images, and a minimal widget. Record account, selected model, protocol, client, and date. If Plus writes fail, stop the parity expansion and bring that result back to the owner."
+    },
+    {
+      "id": "G1",
+      "verdict": "partial",
+      "objection_strength": "strong",
+      "critique": "Verification is the largest capability gap, but a generic writable shell is too large a first execution milestone. Landlock plus seccomp does not by itself preserve the existing exposure contract. Allowing writes to the session bypasses protected paths, masked-line locks, validation, and checkpointing. Owner-declared test commands still execute mutable repository code. A portable, static, standard-library-only sandbox across Linux and macOS is not an established implementation path.",
+      "counter_proposal": "Split G1 into a feasibility gate and a Linux verification runner. Execute an immutable projection of one checkpoint, without the owner's Git database, with read-only source, private HOME/tmp/build cache, curated toolchain/dependency mounts, a scrubbed environment, and networking and host IPC denied. Projects needing source-directory writes can receive a disposable copy whose changes never flow back automatically. Start with owner-local task IDs plus narrowly typed test-selection arguments. Use bounded waiting: return completed results for short runs and a durable job handle otherwise. Add status/output/cancel tools and terminal cancellation. One active job per session is a reasonable initial quota, not an isolation mechanism. Add a separately enabled free-form command tool only after the same boundary passes adversarial tests. If macOS cannot meet the owner's combined constraints, keep execution unavailable there until that design conflict is explicitly resolved."
+    },
+    {
+      "id": "G2",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "Compound editing and verification can save a round trip, but then_run silently broadens an existing edit tool's effects and creates ambiguous partial success. Retrying after a lost response could duplicate an edit or launch another job. Failures-only output also hides skipped checks and incomplete coverage.",
+      "counter_proposal": "After measuring the separate loop, consider a distinct apply_and_check tool with its own clear approval scope. Persist an operation receipt containing the applied checkpoint and verification job ID. Apply atomically, then verify that exact checkpoint. A failed test leaves the edit intact; an execution-start failure reports that the edit succeeded. Return checkpoint, task/configuration identity, terminal status, exit code, coverage summary, bounded failures, and an output cursor."
+    },
+    {
+      "id": "G3",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "The instruction contradiction should be fixed early, but hash pinning does not promote tool output into ChatGPT's system-instruction hierarchy. Nor can a changed-file notice retract instructions already in the conversation. Dropping all endorsed guidance when the repository file changes can remove useful constraints unexpectedly.",
+      "counter_proposal": "Store an owner-reviewed instruction snapshot outside the repository, bound to repository identity and explicit path scope. A trust command may create that snapshot and record its source hash. Serve it as owner-endorsed guidance with a stable provenance header; retain the reviewed snapshot until replaced or revoked, and report source drift. Do not recursively trust referenced files, imported instructions, or executable configuration. Start with one root guidance file and clarify the server instruction exception. Evaluate adherence in real ChatGPT before building nested precedence machinery."
+    },
+    {
+      "id": "G4",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "This closes a real usability gap, but stash-like capture is only the easy half. The owner's index, unstaged edits, selected untracked files, and subsequent saves create distinct states. Merging a synthetic snapshot commit risks committing the owner's WIP as part of the agent's result.",
+      "counter_proposal": "Keep HEAD-based sessions as the default. Offer explicit policy-filtered WIP capture, preserving metadata about HEAD, index, working files, and selected untracked files. On finish, transfer only the agent's delta relative to the captured snapshot, with preconditions against the owner's current files and preservation of index state. Refuse overlaps and provide a reviewable patch when automatic transfer is unsafe. Do not describe ordinary fast-forward/squash merging as sufficient for this mode."
+    },
+    {
+      "id": "G5",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "A sandbox addresses the code-execution objection, but diagnostics and semantic navigation are separate products. A universal LSP layer brings server installation, plugin loading, workspace configuration, indexing, process lifetime, and result-versioning work. Compiler errors should not become an unconditional pre-edit gate.",
+      "counter_proposal": "Deliver compiler/type-checker diagnostics as G1 tasks first. Retain cheap existing syntax checks; report pre-existing and newly introduced diagnostic failures separately. Later add demand-driven definition/reference/rename support for one measured ecosystem, with owner-selected servers inside the execution boundary and checkpoint-tagged results. Replace the hub's blanket rejection with a scoped deferral. Promise a language-neutral execution interface, not immediate semantic support for every language."
+    },
+    {
+      "id": "G6",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "Mounting the owner's entire module cache, node_modules tree, or site-packages directory can expose unrelated private code and credentials. Dependency manifests and go.sum are not equivalent to a resolved, authorized dependency inventory. Masking does not make arbitrary executable access to those trees safe.",
+      "counter_proposal": "Make dependency provisioning part of G1. Build an owner-authorized, versioned dependency projection from the resolved graph, including explicit handling of local replacements and private packages. Keep shared host caches read-only and inaccessible except for selected artifacts. Add source-reading tools later over that same inventory, with package/version/path provenance and existing exposure checks."
+    },
+    {
+      "id": "G7",
+      "verdict": "agree",
+      "objection_strength": "minor",
+      "critique": "A surviving checkbox list is weaker than a surviving task state. Chat history cannot reliably reconstruct which checkout, checkpoint, environment, and test result the plan refers to.",
+      "counter_proposal": "Persist a bounded session brief: objective, acceptance criteria, steps, decisions, outstanding blockers, current checkpoint, and verification receipts. Model-written prose remains advisory; execution facts come from the server. Include it in session_status and initial session context. Keep it outside the repository and distinguish it from the existing propose_changes plan IDs."
+    },
+    {
+      "id": "G8",
+      "verdict": "agree",
+      "objection_strength": "minor",
+      "critique": "This belongs before a large execution project. The current terminal session command exposes status, finish, and abandon, but no dedicated diff or undo command. Reviewability should not depend on the model deciding to explain its changes.",
+      "counter_proposal": "Add session diff and undo using the existing checkpoint engine, with explicit checkpoint identifiers and a complete-diff path when terminal output is truncated. Prioritize a reliable aggregate diff and local recovery over a live pane. Test an embedded ChatGPT diff/test widget early; choose the main review surface from actual owner use rather than assuming a terminal-first UI."
+    },
+    {
+      "id": "T3",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "The hub and PR publishing can wait, but the rest should not be grouped as uniformly low value. Go formatting already fits the standard library. Compiler verification belongs in G1. Images and browser inspection become verification requirements when frontend work is in scope. The assertion that CLIs have no context-management equivalent is too broad; the relevant question is measured retrieval quality.",
+      "counter_proposal": "Keep the owner's hub project after execution and language work. Defer push/PR, a general browser harness, persistent indexes, repo_map/get_context, and external-model delegation. Allow explicit Go formatting with fresh anchors before G1. Add basic call/byte/latency measurements now, without building the hub benchmark project. Run a small widget experiment in G0. Promote image/browser work only when frontend acceptance criteria require it. Reuse ChatGPT conversation and web capabilities, but build local job cancellation and durable repository task state."
+    }
+  ],
+  "missing": [
+    {
+      "id": "M1",
+      "title": "Commands must not bypass the edit contract",
+      "severity": "critical",
+      "why": "A writable session mount lets tests, scripts, formatters, or a free-form command alter protected paths and masked lines without apply_changes. A checkpoint taken afterward would merely record the bypass.",
+      "proposal": "Initially execute read-only checkpoint projections or disposable copies. For later formatter/generator support, import their delta through the same path, secret-line, content, and concurrency validation as normal edits, creating a checkpoint only after validation. Never import Git metadata."
+    },
+    {
+      "id": "M2",
+      "title": "Output masking cannot contain secrets available to executed code",
+      "severity": "critical",
+      "why": "Allowed source files can contain values masked by read tools. Executed code can encode those values, split them across output, or reveal predicates about them. Withheld-file removal alone does not preserve the current model-visible exposure boundary.",
+      "proposal": "Decide the executable input contract before G1. Exclude secret-bearing inputs or use sanitized projections and synthetic fixtures, accepting that some tests then cannot run faithfully. Any owner-authorized raw-secret execution needs a separately stated exposure contract. Do not claim the output masker restores the stronger guarantee."
+    },
+    {
+      "id": "M3",
+      "title": "Durable operation identity and outcome recovery",
+      "severity": "major",
+      "why": "Transport interruption leaves the model uncertain whether an edit, merge, or job start happened. Current replay protection is limited to in-memory proposed plans; direct insertions can be repeated.",
+      "proposal": "Add persistent operation IDs and receipts, rejecting reuse with different arguments. Record accepted, applied, job-started, completed, and uncertain outcomes with session/checkpoint identity. Let the model query an operation after reconnecting. Cover response loss and process termination in integration tests."
+    },
+    {
+      "id": "M4",
+      "title": "Verification must identify exactly what was checked",
+      "severity": "major",
+      "why": "A green test result becomes misleading after another chat edits the session, an environment changes, or dependencies differ. Failure-only output cannot distinguish passed, skipped, cancelled, and never-started checks.",
+      "proposal": "Bind every result to checkpoint/tree identity, task definition, toolchain, dependency projection, relevant environment, exit status, and coverage summary. Mark results stale after changes. Capture a baseline when useful and keep infrastructure failures distinct from code failures."
+    },
+    {
+      "id": "M5",
+      "title": "Process lifetime, cancellation, and resource containment",
+      "severity": "critical",
+      "why": "Returning a job ID does not supervise descendants or bound memory, process count, disk use, and output. ChatGPT's stop control is not evidence that detached local work stops.",
+      "proposal": "Give jobs a supervisor, explicit terminal states, wall-time/output/resource limits, descendant cleanup, and local cancel controls. Define disconnect, tunnel shutdown, server restart, abandon, and revocation behavior. Preserve receipts across restart and mark interrupted work accurately. Test detached children, output floods, and cancellation races."
+    },
+    {
+      "id": "M6",
+      "title": "A shared session needs concurrency semantics before the hub",
+      "severity": "major",
+      "why": "Serializing calls prevents simultaneous writes but does not prevent two conversations from sequentially changing each other's work. A one-job quota does not solve that problem.",
+      "proposal": "Include session ID and expected checkpoint in mutating calls and verification starts. Reject stale session generations. Keep long jobs off the mutation lock by using immutable snapshots. If openai/session proves useful, add an optional writer lease without waiting for the multi-repository router; document its actual trust strength."
+    },
+    {
+      "id": "M7",
+      "title": "Environment readiness is a first-class capability",
+      "severity": "major",
+      "why": "Offline testing against an incomplete worktree can fail before reaching the code under review. Whole-cache access weakens exposure, while network access for a package-manager process also reaches its child processes unless separately controlled.",
+      "proposal": "Provide a readiness report with toolchain versions, dependency availability, unavailable fixtures, local replacements, and unsupported requirements. Separate disposable provisioning from offline verification. Provision through narrowly scoped network policy; do not treat the executable's package-manager name as a security boundary."
+    },
+    {
+      "id": "M8",
+      "title": "End-to-end workflow evaluation",
+      "severity": "major",
+      "why": "Unit and protocol tests cannot establish that the selected ChatGPT model uses anchors, continues after failures, selects the correct workspace, or hands back complete work economically.",
+      "proposal": "Maintain a small repeatable task set covering exploration, multi-file edits, stale anchors, undo, owner divergence, failed verification, lost responses, and cross-chat interference. Track accepted outcomes, owner interventions, tool calls, bytes, latency, and usage. Use it to choose between edit improvements, compound calls, and richer retrieval."
+    },
+    {
+      "id": "M9",
+      "title": "Review and handoff must bind to a revision",
+      "severity": "major",
+      "why": "A remembered finish_session approval does not establish that the owner reviewed the current diff. The branch may have changed since a review, even though every operation was serialized.",
+      "proposal": "Return a handoff receipt containing base, final checkpoint, changed files, complete-diff access, verification status, and unresolved limitations. Require finish to name the expected checkpoint. This adds a server precondition without introducing mandatory terminal approval."
+    },
+    {
+      "id": "M10",
+      "title": "Conflict recovery is a practical parity gap",
+      "severity": "major",
+      "why": "update_session aborts on conflicts, leaving the model unable to complete a common iterative workflow. WIP capture makes this more frequent and more complicated.",
+      "proposal": "After the basic verification loop works, add structured conflict inspection and resolution within a disposable session transaction, followed by validation and one checkpoint. Until then, provide a precise patch/export handoff and describe manual resolution as an explicit limitation."
+    },
+    {
+      "id": "M11",
+      "title": "The execution sandbox needs a falsifiable platform contract",
+      "severity": "critical",
+      "why": "Standard-library-only is a packaging constraint, not evidence of security. Linux ABI variation, metadata visibility, inherited descriptors, host sockets, and macOS's unsupported custom-policy interface determine what can actually be promised.",
+      "proposal": "Specify supported kernels, architectures, and required primitives; launch nothing when required confinement is unavailable. Test outside-file reads, existence probes, Git-history leakage, environment and descriptor inheritance, host IPC, process control, and writes. On Linux evaluate a projected filesystem using namespaces alongside Landlock/seccomp. Require a separate macOS feasibility result before promising execution there."
+    },
+    {
+      "id": "M12",
+      "title": "Native ChatGPT features do not automatically cover local orchestration",
+      "severity": "major",
+      "why": "Conversation history, memory, and a stop button do not persist authoritative local task state, supervise a job, or guarantee another model turn. No verified custom-MCP interface here gives repochat control over native ChatGPT subagents.",
+      "proposal": "Keep repochat responsible for jobs, cancellation, receipts, session briefs, and explicit continuation handles. Do not build another model loop or spend an external model allowance to imitate autonomy. Treat host continuation and native subagent access as measured capabilities, not roadmap assumptions."
+    }
+  ],
+  "order": [
+    {
+      "id": "G0",
+      "reason": "Prove real Plus editing and measure the complete workflow first. Run optional protocol, image, and widget probes separately so their absence does not block useful text-tool validation."
+    },
+    {
+      "id": "G8",
+      "reason": "Make existing edits reviewable and recoverable: aggregate terminal diff, undo, revision-bound handoff, and durable operation receipts from M3/M9. Add explicit Go formatting if measured use warrants it."
+    },
+    {
+      "id": "G3",
+      "reason": "Resolve instruction handling with a small owner-reviewed guidance snapshot. This improves task consistency before introducing a much larger execution surface."
+    },
+    {
+      "id": "G1a",
+      "reason": "Settle M1/M2/M11 and prove Linux confinement before building command UX. Establish the executable input policy, projected filesystem, launcher, minimum platform support, and adversarial acceptance tests."
+    },
+    {
+      "id": "G1b",
+      "reason": "Deliver one useful offline verification profile, initially Go, with dependency readiness, immutable checkpoint inputs, bounded-wait jobs, cancellation, receipts, and attributable diagnostic results. This closes the largest capability gap."
+    },
+    {
+      "id": "G7",
+      "reason": "Persist a small task brief alongside the new verification receipts. It makes interrupted turns and new conversations resumable without recreating ChatGPT conversation storage."
+    },
+    {
+      "id": "G2",
+      "reason": "Add compound apply-and-check only if observed round trips justify it, using the already established operation and job semantics. Expand to free-form sandboxed commands only after confinement is proven."
+    },
+    {
+      "id": "G4",
+      "reason": "Add policy-filtered WIP capture and delta-based handoff once the ordinary edit/verify/finish loop is dependable. Pair this with improved conflict recovery from M10."
+    },
+    {
+      "id": "G5",
+      "reason": "Compiler diagnostics arrive with G1; semantic navigation and refactoring follow when measurements show grep/read is insufficient. Implement one ecosystem at a time."
+    },
+    {
+      "id": "G6",
+      "reason": "Expose dependency sources through the curated dependency inventory already needed for execution, rather than inventing another exposure mechanism."
+    },
+    {
+      "id": "T3",
+      "reason": "Keep the owner's hub as the subsequent project. Promote widgets, image/browser verification, or retrieval improvements only when the actual workload demonstrates their value; leave publishing integrations optional."
+    }
+  ],
+  "cut": [
+    {
+      "id": "C1",
+      "reason": "Cut generic writable-shell execution from the first G1 release. Verification against checkpoint snapshots provides substantial value without bypassing the edit engine."
+    },
+    {
+      "id": "C2",
+      "reason": "Cut the promise of simultaneous Linux/macOS execution parity under the current constraints. Preserve Linux-first delivery and require evidence for the macOS backend."
+    },
+    {
+      "id": "C3",
+      "reason": "Cut mandatory asynchronous start/poll choreography for short tasks. Use synchronous completion within a small wait budget, with durable handles for longer work."
+    },
+    {
+      "id": "C4",
+      "reason": "Cut dependence on legacy MCP Tasks or notifications to resume ChatGPT automatically. Negotiate the actual revision and retain ordinary job tools as a fallback."
+    },
+    {
+      "id": "C5",
+      "reason": "Cut annotations chosen merely to induce stronger confirmation. Describe actual effects and enforce the boundary in repochat."
+    },
+    {
+      "id": "C6",
+      "reason": "Cut whole-HOME and whole-cache mounts, and the claim that output redaction makes raw-secret execution safe."
+    },
+    {
+      "id": "C7",
+      "reason": "Cut universal LSP support, persistent semantic indexes, and repo_map/get_context from the initial parity milestone. Keep lightweight workflow measurements."
+    },
+    {
+      "id": "C8",
+      "reason": "Cut a custom conversation store, general web search, external-model delegation, native-subagent emulation, and push/PR automation from core parity."
+    },
+    {
+      "id": "C9",
+      "reason": "Cut the assumption that ChatGPT's stop button replaces local cancellation, or that chat history replaces authoritative session state."
+    },
+    {
+      "id": "C10",
+      "reason": "Cut mandatory live terminal UI polish before a complete diff and reliable recovery exist. Test the embedded review alternative before committing to either presentation."
+    }
+  ],
+  "overall_verdict": "partial",
+  "summary": "Verification is the largest missing capability, but the next deliverable should validate and strengthen the existing edit loop. Then build a Linux runner against isolated checkpoint snapshots, with durable receipts, bounded waiting, and real cancellation. The strongest objections are secret exposure through executable inputs, commands bypassing edit guarantees, and an unproven macOS implementation under the owner's constraints. No consensus is claimed yet. Round 2 should settle those boundaries and whether bounded verification tasks provide enough initial parity before a free-form shell."
+}

@@ -1,0 +1,175 @@
+{
+  "responses": [
+    {
+      "id": "C-P2",
+      "decision": "maintain",
+      "reason": "I accept the projection policy, file classes, explicit exposure decision, and independent content digest. Whole-line masking before the display cut is confirmed by F70. My remaining objection is only the equivalence assertion: enlarging read_file's result budget does not remove its line shortening, line-count cap, encoding conversion, or control escaping. A permitted 3,000-byte line therefore cannot satisfy literal equality between projection bytes and reader output. See F71.",
+      "counter_proposal": "Replace the final sentence with: 'For every projected text file, decoded logical lines, after reader normalization, equal the shared reader's masked lines before display transformations. Separately assert preservation of every unmasked byte range, including line endings and BOM. Reader display tests apply the same rendering transformations to both representations.' This closes M13 without changing the agreed exposure policy or requiring an unlimited public tool."
+    },
+    {
+      "id": "C-M14",
+      "decision": "accept",
+      "reason": "The projection-specific label, complete input identities, transformation and omission summaries, and limited statement about final source modifications address M14. The false-pass acceptance case directly exercises the implementation-derived risk in F72.",
+      "counter_proposal": "Retain the previously accepted M3/M4 operation and lifecycle semantics, including infrastructure failures and cancellation. Bind the concrete typed arguments, or their canonical digest, alongside the task definition hash so different test selections remain distinguishable."
+    },
+    {
+      "id": "C-M15",
+      "decision": "accept",
+      "reason": "The profiles distinguish socket prohibition from isolated local networking. Network namespaces isolate protocol stacks, ports, and abstract Unix sockets; the repository's TCP and Unix-socket tests justify job-local as the Go default. See F79.",
+      "counter_proposal": "Include host pathname sockets and inherited socket descriptors in the existing M11 denial tests: network namespaces alone do not replace the projected filesystem and descriptor-cleanup requirements."
+    },
+    {
+      "id": "C-M17",
+      "decision": "accept",
+      "reason": "Delegation is realistic for an unprivileged process launched in an appropriately delegated systemd user service or scope. Upstream systemd v255 already delegates cpu, memory, and pids to its user manager. Delegation belongs on services or scopes, rather than slices. WSL2 supports systemd, but neither that nor the reported namespace probe proves usable delegation on the owner's installation. See F76–F78.",
+      "counter_proposal": "Doctor must exercise controller enablement, actual limit enforcement, and descendant cleanup. Keep the supervisor outside the job subtree and cgroup controls inaccessible to repository code. Specify swap and inode limits when choosing numerical resource limits; memory.max alone does not cap swap. Preserve the proposed unavailable-on-failure behavior."
+    },
+    {
+      "id": "C-M18",
+      "decision": "maintain",
+      "reason": "Accept private caches, -count=1, projected local replacements, and rejection of prebuilt dependency binaries. The unresolved part is constructing the restricted module cache: go list -m all returns the selected build list, while resolving it can require metadata for versions absent from that list. Go's own Go 1.25 regression fixture selects sampler v1.3.1 but subsequently requires v1.3.0 metadata when resolving offline. A cache restricted only to the output inventory is therefore insufficient in general. See F73–F75 and the [upstream fixture](https://raw.githubusercontent.com/golang/go/go1.25.0/src/cmd/go/testdata/script/work_goproxy_off.txt).",
+      "counter_proposal": "Define two inventories: an owner-authorized resolution-metadata closure, including required nonselected versions, and the selected dependency-source projection. Stage the metadata closure before sandboxed resolution, then admit only selected, authorized source modules for execution. Record both inventories. Prepopulate required cache metadata and checksum evidence; extracted source directories alone are insufficient. Missing inputs make the task unsupported, without broadening mounts or enabling network access. Pin the installed toolchain and explicitly support or reject workspace/vendor modes. This makes offline resolution workable without circularly defining its inputs from its output."
+    },
+    {
+      "id": "final_order",
+      "decision": "accept",
+      "reason": "The relative order remains sound: measured editing first, confinement feasibility before a useful Go profile, and broader execution after the same acceptance gate. None of the remaining corrections requires reordering.",
+      "counter_proposal": "Include the corrected projection-equivalence assertion and dependency-resolution inventories in G1a's contract; demonstrate offline resolution and a useful check in G1b."
+    }
+  ],
+  "new_issues": [],
+  "facts": [
+    {
+      "id": "F70",
+      "claim": "For supported lines retained within maxLineBytes, masking precedes the 2,000-byte display cut.",
+      "status": "confirmed",
+      "evidence": "lineSource.next calls readLongLine and then maskLine. maskLine calls RedactState.Masked on the retained line. render subsequently calls truncateLine. Redactor.Line searches and replaces across its entire input. Beyond maxLineBytes, general masking does not process the complete line; the proposed unsupported classification handles that case.",
+      "source": "[read.go](internal/repo/read.go:206), [line pipeline](internal/repo/anchor.go:128), [redactor](internal/repo/redact.go:102)"
+    },
+    {
+      "id": "F71",
+      "claim": "An unlimited result budget makes current read_file output equal the complete masked file content.",
+      "status": "refuted",
+      "evidence": "ReadFile still caps maxLines at 2,000. truncateLine independently limits displayed lines to 2,000 bytes. maskLine removes trailing carriage returns; prepareText decodes UTF-16; rendering escapes controls. The existing anchor test explicitly distinguishes a 2,510-byte complete line from its shortened display.",
+      "source": "[read limits](internal/repo/read.go:46), [display cut](internal/repo/read.go:342), [normalization](internal/repo/anchor.go:128), [existing assertion](internal/repo/anchor_test.go:140)"
+    },
+    {
+      "id": "F72",
+      "claim": "Masking can turn inequality between two credential-shaped constants into equality.",
+      "status": "confirmed",
+      "evidence": "The GitHub-token rule replaces distinct matching values with the same placeholder. TestAnchorDoesNotDependOnTheSecret constructs distinct values with identical visible content. The false-pass consequence follows from these transformations; I did not execute the proposed acceptance case.",
+      "source": "[token rule](internal/repo/redact.go:28), [replacement](internal/repo/redact.go:113), [existing test](internal/repo/anchor_test.go:157)"
+    },
+    {
+      "id": "F73",
+      "claim": "The selected module build list is sufficient to enumerate all metadata needed to compute that list.",
+      "status": "refuted",
+      "evidence": "Go documents that minimal version selection may load go.mod files from multiple versions of a dependency. Its output selects one version per module path. Thus selected source versions and resolution metadata require distinct treatment.",
+      "source": "[MVS](https://go.dev/ref/mod#minimal-version-selection), [go.sum and multiple-version metadata](https://go.dev/ref/mod#go-sum-files)"
+    },
+    {
+      "id": "F74",
+      "claim": "Upstream Go contains a concrete offline-resolution example requiring a nonselected module version.",
+      "status": "confirmed",
+      "evidence": "The Go 1.25 workspace fixture first asserts selected sampler v1.3.1. After clearing the cache and setting GOPROXY=off, it expects go list -m all to fail requesting sampler v1.3.0. This is upstream test evidence, not a locally executed experiment.",
+      "source": "[Go 1.25 work_goproxy_off fixture](https://raw.githubusercontent.com/golang/go/go1.25.0/src/cmd/go/testdata/script/work_goproxy_off.txt)"
+    },
+    {
+      "id": "F75",
+      "claim": "Offline operation against a restricted read-only module cache is possible when all required cache inputs are already present.",
+      "status": "confirmed",
+      "evidence": "Go's GoMod implementation reads cached metadata before attempting lookup. Its tests explicitly prefetch .info files for later module listing. Building additionally checks cached .ziphash data. These support conditional feasibility, rather than a guarantee that copying selected extracted directories suffices.",
+      "source": "[Go 1.25 cache implementation](https://raw.githubusercontent.com/golang/go/go1.25.0/src/cmd/go/internal/modfetch/cache.go), [metadata-prefetch fixture](https://raw.githubusercontent.com/golang/go/go1.25.0/src/cmd/go/testdata/script/mod_gonoproxy.txt), [module checks](https://raw.githubusercontent.com/golang/go/go1.25.0/src/cmd/go/internal/modfetch/fetch.go)"
+    },
+    {
+      "id": "F76",
+      "claim": "systemd provides a realistic delegation route for an unprivileged supervisor.",
+      "status": "confirmed",
+      "evidence": "Upstream v255 user@.service specifies Delegate=pids memory cpu. systemd supports further delegation through service and scope units, explicitly excluding slice units. Actual controller availability remains configuration-dependent.",
+      "source": "[systemd v255 user manager unit](https://raw.githubusercontent.com/systemd/systemd/v255/units/user@.service.in), [delegation contract](https://systemd.io/CGROUP_DELEGATION/)"
+    },
+    {
+      "id": "F77",
+      "claim": "The owner's WSL2 installation has usable delegation for the complete proposed launcher.",
+      "status": "unverified",
+      "evidence": "Microsoft documents WSL2 systemd support and enablement. The supplied local evidence establishes namespace creation and a Landlock ABI result, not delegated controllers or enforced job limits. This read-only review did not create cgroups or launch a sandbox.",
+      "source": "[WSL systemd documentation](https://learn.microsoft.com/en-us/windows/wsl/systemd), docs/design/cli-parity/round2-prompt.md V2"
+    },
+    {
+      "id": "F78",
+      "claim": "cgroup.kill supports descendant cleanup, while swap requires a separate limit.",
+      "status": "confirmed",
+      "evidence": "The kernel documents recursive SIGKILL through cgroup.kill, including handling concurrent forks. memory.swap.max separately limits swap and defaults to max. These must be exercised or configured alongside the proposed RAM, process, and CPU controls.",
+      "source": "[cgroup interfaces](https://docs.kernel.org/admin-guide/cgroup-v2.html#core-interface-files), [swap interface](https://docs.kernel.org/admin-guide/cgroup-v2.html#memory-interface-files)"
+    },
+    {
+      "id": "F79",
+      "claim": "A private network namespace fits the repository's local-socket requirements.",
+      "status": "confirmed",
+      "evidence": "Linux documents isolation of network stacks, ports, and abstract Unix sockets. Repository tests use a TCP listener and pathname Unix-socket connections. Filesystem isolation and inherited-descriptor cleanup remain necessary for the latter channels.",
+      "source": "[network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html), [TCP test](internal/cli/cli_test.go:199), [Unix-socket test](internal/cli/signal_test.go:167)"
+    }
+  ],
+  "order": [
+    {
+      "id": "G0",
+      "reason": "Measure a real Plus editing task; keep optional probes separate."
+    },
+    {
+      "id": "edit_loop_hardening",
+      "reason": "Establish durable operations, concurrency preconditions, review, undo, and formatting."
+    },
+    {
+      "id": "G3",
+      "reason": "Introduce the owner-reviewed guidance snapshot."
+    },
+    {
+      "id": "G1a",
+      "reason": "Settle projection and dependency-input contracts; demonstrate complete confinement and supervision."
+    },
+    {
+      "id": "G1b",
+      "reason": "Demonstrate one useful offline Go profile with readiness and attributable receipts."
+    },
+    {
+      "id": "G7",
+      "reason": "Persist the bounded session brief and authoritative execution facts."
+    },
+    {
+      "id": "G2",
+      "reason": "Add apply_and_check when measured workflow costs justify it."
+    },
+    {
+      "id": "free_form_commands",
+      "reason": "Expand syntax only after the execution boundary passes acceptance."
+    },
+    {
+      "id": "G4",
+      "reason": "Pair WIP capture with conflict recovery."
+    },
+    {
+      "id": "G5",
+      "reason": "Expand diagnostics by ecosystem, then measured semantic navigation."
+    },
+    {
+      "id": "G6",
+      "reason": "Expose dependency sources through the authorized inventory."
+    },
+    {
+      "id": "hub_and_optional_surfaces",
+      "reason": "Keep the hub later and promote optional surfaces on demonstrated need."
+    }
+  ],
+  "consensus": "no",
+  "remaining_disagreements": [
+    {
+      "id": "C-P2",
+      "summary": "The projection policy is accepted. Replace the literal unlimited-budget read_file equivalence assertion with comparison before display transformations and separate byte-preservation assertions."
+    },
+    {
+      "id": "C-M18",
+      "summary": "Define how authorized resolution metadata is staged before computing the selected build list, including required nonselected versions. A selected-source-only cache does not generally support offline resolution."
+    }
+  ],
+  "summary": "The architecture and order are accepted. Two narrow text corrections remain before I would sign: projection equivalence and offline dependency-resolution inputs. No files were modified, code written, or tests run."
+}

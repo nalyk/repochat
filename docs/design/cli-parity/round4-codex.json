@@ -1,0 +1,77 @@
+{
+  "responses": [
+    {
+      "id": "C-P2",
+      "decision": "accept",
+      "reason": "The replacement matches the round-3 counter verbatim. It separates normalized logical-content equivalence from byte preservation and display rendering, closing the remaining objection without changing the accepted exposure policy, file classes, long-line decision, or digest.",
+      "counter_proposal": ""
+    },
+    {
+      "id": "C-M18",
+      "decision": "accept",
+      "reason": "The amendment closes the remaining objection: authorized resolution metadata is staged before resolution, includes required non-selected versions, and is recorded separately from selected executable dependency sources. Missing inputs remain unsupported. Toolchain pinning and explicit workspace/vendor decisions complete the accepted contract.",
+      "counter_proposal": ""
+    },
+    {
+      "id": "overall_plan",
+      "decision": "accept",
+      "reason": "I sign the cumulative rounds 1–4 plan, including every accepted counter and the final order. Argument digests, socket-denial tests, resource enforcement, supervisor isolation, and the strengthened G1a/G1b gates are incorporated. No sentence still requires correction. This signs the design; implementation and platform feasibility remain subject to its agreed gates.",
+      "counter_proposal": ""
+    }
+  ],
+  "new_issues": [],
+  "facts": [],
+  "order": [
+    {
+      "id": "G0",
+      "reason": "Measure a real Plus editing task; keep optional probes separate."
+    },
+    {
+      "id": "edit_loop_hardening",
+      "reason": "Establish durable operations, concurrency preconditions, revision-bound handoff, terminal review/undo, and explicit formatting."
+    },
+    {
+      "id": "G3",
+      "reason": "Add the owner-reviewed guidance snapshot."
+    },
+    {
+      "id": "G1a",
+      "reason": "Include both corrected contracts and demonstrate complete confinement, resource enforcement, supervision, and adversarial acceptance."
+    },
+    {
+      "id": "G1b",
+      "reason": "Demonstrate offline resolution and one useful Go check with readiness reporting and attributable receipts."
+    },
+    {
+      "id": "G7",
+      "reason": "Persist the bounded session brief and authoritative execution facts."
+    },
+    {
+      "id": "G2",
+      "reason": "Add apply_and_check when workflow measurements justify it."
+    },
+    {
+      "id": "free_form_commands",
+      "reason": "Expand execution syntax after the same boundary passes acceptance."
+    },
+    {
+      "id": "G4",
+      "reason": "Pair WIP capture with conflict recovery."
+    },
+    {
+      "id": "G5",
+      "reason": "Expand diagnostics by ecosystem, then measured semantic navigation."
+    },
+    {
+      "id": "G6",
+      "reason": "Expose dependency sources through the authorized inventory."
+    },
+    {
+      "id": "hub_and_optional_surfaces",
+      "reason": "Keep the hub later; promote optional surfaces on demonstrated need."
+    }
+  ],
+  "consensus": "yes",
+  "remaining_disagreements": [],
+  "summary": "Signed: C-P2, C-M18, and the cumulative plan and final order are accepted. No further text changes are required. Review was read-only; no files were modified and no tests were run."
+}

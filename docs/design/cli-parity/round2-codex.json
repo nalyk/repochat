@@ -1,0 +1,215 @@
+{
+  "responses": [
+    {
+      "id": "P1",
+      "decision": "accept",
+      "reason": "A disposable writable copy preserves the edit boundary because its changes never reach the session or owner checkout. It also removes an unnecessary execution-mode choice. Overlay and full-copy implementations still need the same adversarial acceptance suite; one semantic mode does not eliminate backend-specific testing.",
+      "counter_proposal": "Use one writable-disposable execution contract. Build its immutable backing projection independently of the live worktree; give every job fresh writable storage. Never substitute the owner checkout or session worktree as an overlay lower layer. Bound materialization as well as subsequent job writes. A full copy is an acceptable first implementation; overlay support is an optimization."
+    },
+    {
+      "id": "P2",
+      "decision": "maintain",
+      "reason": "I accept the no-raw-secret decision and withdraw any need for a raw-secret variant. However, 'the text read tools would serve' is not yet a complete executable-input specification. Current readers also omit binary content, decode UTF-16, repair invalid UTF-8, escape controls, and shorten lines. Copying rendered text changes programs; exporting additional raw bytes can exceed the stated boundary. Sanitization can also produce false passes, so identifying missing secret-dependent tests is insufficient. See F62–F64.",
+      "counter_proposal": "G1a must define a versioned canonical projection shared with the read policy, distinct from display headers, anchors, pagination, and output budgets. Specify handling of binary files, long lines, encodings, symlinks, submodules, and incomplete scans; omit unsupported content without a raw fallback. Any expansion of readable content must be explicit. Receipts must identify the original checkpoint, actual projected-content digest, policy/projection version, and transformations or omissions. Describe success as verification of that projection, with its limitations, rather than unconditional verification of the original checkpoint."
+    },
+    {
+      "id": "P3",
+      "decision": "accept",
+      "reason": "Requiring namespaces, Landlock, and seccomp is consistent with the promised exposure boundary. A weaker adoption mode would change that promise. V3 needs correction: Ubuntu introduced the restriction in 23.10 without enabling it by default; 24.04 enabled it. The release notes also distinguish namespace creation from subsequent capability restrictions. [Ubuntu release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions).",
+      "counter_proposal": "Keep execution unavailable when the complete required confinement cannot be established. Doctor should exercise the actual launcher operations, rather than infer support from distribution version, a sysctl, or namespace creation alone. Explain the observed failure and the owner’s options, including a narrowly scoped AppArmor profile. V2 is useful feasibility evidence, not proof that the complete launcher works."
+    },
+    {
+      "id": "P4",
+      "decision": "accept",
+      "reason": "Supervisor-owned jobs and request-owned observation are the correct separation. Forty-five seconds is a reasonable initial wait ceiling. It must account for time already spent: the current server creates the request deadline before waiting for a worker slot, so starting a fresh 45-second wait after admission or projection setup can exceed the remaining deadline. See F65.",
+      "counter_proposal": "Treat 45 seconds as a maximum observation budget, capped by the remaining request deadline minus response-delivery margin and reduced if G0 measures a shorter host limit. Persist the operation-to-job association before acknowledging acceptance. Cancellation of an observing request stops observation; explicit cancellation and supervisor lifecycle/resource policies govern the job. Recover a lost initial handle through the operation ID."
+    },
+    {
+      "id": "order_v2",
+      "decision": "accept",
+      "reason": "I accept the relative ordering. It puts real workflow evidence first, hardens editing before execution, separates confinement feasibility from the Go profile, and postpones compound calls and broader execution until their foundations exist.",
+      "counter_proposal": "Make G1a’s exit criteria include the canonical projection and verification-meaning decisions in P2, plus demonstrated resource containment. G1b must demonstrate a useful check against that projection and explicitly report unsupported checks. These strengthen existing gates without reordering the roadmap."
+    }
+  ],
+  "new_issues": [
+    {
+      "id": "M13",
+      "title": "Rendered text is not a canonical execution projection",
+      "severity": "critical",
+      "why": "The current reader’s representation is lossy and incomplete for some files. For example, copying bytes beyond a displayed line’s truncated suffix would expose content that read_file did not serve; writing the truncation marker into the file changes its contents. Binary and encoding behavior create similar ambiguities. The existing Snapshot.Generation tracks membership and policy, not file-content changes. See F62 and F63.",
+      "proposal": "Define the projection at the content-policy layer, with deterministic handling of every supported file class. Give it a content digest independent of display budgets and membership generations. Reject or omit unsupported inputs explicitly. Test equivalence between permitted reader content and execution inputs, including long lines and incomplete scans."
+    },
+    {
+      "id": "M14",
+      "title": "Sanitized or writable inputs narrow the meaning of a passing check",
+      "severity": "major",
+      "why": "Two different credential-shaped string constants can become the same placeholder, making an equality test pass when it fails on the original tree. This is a logical consequence of the current masker, not merely a missing-secret failure. Writable jobs can also modify sources during execution; an initial checkpoint identity does not prove that all later computation used unchanged sources. See F64.",
+      "proposal": "Report the initial projection identity, transformations, task identity, and observed process outcome. Label results as checks performed in a writable sanitized projection. Capture a baseline under the same projection rules where useful. Surface source modifications when detected, but do not claim that matching final hashes prove no transient changes occurred. Add a false-pass sanitization example to acceptance tests."
+    },
+    {
+      "id": "M15",
+      "title": "Offline verification and prohibition of all sockets have different usefulness",
+      "severity": "major",
+      "why": "repochat’s own tests launch Git subprocesses and use TCP and Unix sockets. A profile containing only Go, or one rejecting every socket operation, cannot run the complete suite faithfully. This is already relevant to the first ecosystem, not a later frontend concern. See F66.",
+      "proposal": "Inventory ancillary executables and runtime files alongside module dependencies. Under a literal prohibition of all networking, report affected checks as unsupported. If job-local sockets are desired, explicitly define no host or external networking and isolate them in a job-owned network namespace; do not silently broaden the contract. Keep unsupported, skipped, failed, and passed checks distinct."
+    },
+    {
+      "id": "M16",
+      "title": "Readiness reports must preserve withheld-name confidentiality",
+      "severity": "major",
+      "why": "A readiness report that names a missing secret fixture can disclose a path that ordinary tools deliberately withhold. 'Names it' in P2 therefore needs to mean an allowed requirement or failure category, not unrestricted enumeration of omitted files.",
+      "proposal": "Apply the exposure policy to readiness reports, projection manifests, receipts, errors, and retained logs. Model-facing reports should identify the visible task and an aggregate unavailable-input category without confirming withheld paths. Keep any more detailed owner-local diagnostic outside model-facing output."
+    },
+    {
+      "id": "M17",
+      "title": "Namespace availability does not establish resource-control feasibility",
+      "severity": "major",
+      "why": "V2 establishes useful namespace and Landlock prerequisites, but does not demonstrate enforcement of M5’s aggregate memory, process-count, storage, and descendant-cleanup guarantees. Cgroup-based enforcement also depends on usable delegation and controllers. [Kernel cgroup documentation](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation).",
+      "proposal": "Include the chosen resource-control mechanism in G1a and doctor’s capability checks. Demonstrate limits across descendants, cancellation after detachment, and bounded writable storage. If required controls cannot be established, execution remains unavailable; do not present successful namespace creation as a successful sandbox check."
+    },
+    {
+      "id": "M18",
+      "title": "Dependency and cache artifacts can bypass source sanitization",
+      "severity": "major",
+      "why": "P2’s source projection does not cover an executable or cached artifact previously built from unsanitized repository content. Such an artifact is another input carrying repository-derived information. This is a concrete extension of M2 and M7, even when whole-cache mounts are already forbidden.",
+      "proposal": "Use fresh private build and test caches initially. Authorize dependency artifacts by provenance and content, including local replacements and prebuilt binaries; do not treat location inside an approved cache as sufficient. Record whether checks actually executed or reused results. For fresh Go test execution, explicitly disable test-result reuse with -count=1. [Go command documentation](https://pkg.go.dev/cmd/go#hdr-Test_packages)."
+    }
+  ],
+  "facts": [
+    {
+      "id": "F59",
+      "claim": "Native Ubuntu 23.10 and later all enabled the AppArmor unprivileged-user-namespace restriction by default.",
+      "status": "refuted",
+      "evidence": "Ubuntu’s 24.04 release notes say the feature was introduced in 23.10, where it was not enabled by default. They document 24.04 restrictions and application profiles granting userns permission.",
+      "source": "[Ubuntu 24.04 release notes](https://documentation.ubuntu.com/release-notes/24.04/#unprivileged-user-namespace-restrictions)"
+    },
+    {
+      "id": "F60",
+      "claim": "Linux supports mounting OverlayFS from an appropriately privileged user namespace starting with Linux 5.11, but the version number alone does not establish that a particular overlay setup works.",
+      "status": "confirmed",
+      "evidence": "user_namespaces(7) lists OverlayFS support since 5.11. OverlayFS documentation separately requires suitable backing filesystems and an upper/work directory arrangement; changes to underlying trees while mounted are unsupported.",
+      "source": "[Linux user namespaces](https://man7.org/linux/man-pages/man7/user_namespaces.7.html), [OverlayFS requirements](https://docs.kernel.org/filesystems/overlayfs.html)"
+    },
+    {
+      "id": "F61",
+      "claim": "Landlock alone does not prevent filesystem existence and metadata probes through all stat/access operations.",
+      "status": "confirmed",
+      "evidence": "The current kernel documentation explicitly lists stat and access among syscall families containing actions that Landlock cannot restrict.",
+      "source": "[Landlock filesystem limitations](https://docs.kernel.org/userspace-api/landlock.html#filesystem-flags)"
+    },
+    {
+      "id": "F62",
+      "claim": "Current repochat read output transforms more than secret values and does not provide complete contents for every listed file.",
+      "status": "confirmed",
+      "evidence": "read.go omits binary contents, decodes supported UTF-16, limits displayed lines to 2,000 bytes, and caps scanning. anchor.go repairs invalid UTF-8 and normalizes line content; redact.go escapes control characters. ReadFile also refuses working-tree symlinks and submodules.",
+      "source": "[read.go](internal/repo/read.go:15), [anchor.go](internal/repo/anchor.go:128), [redact.go](internal/repo/redact.go:327)"
+    },
+    {
+      "id": "F63",
+      "claim": "The current file-set Snapshot.Generation identifies complete file contents.",
+      "status": "refuted",
+      "evidence": "Snapshot.Generation describes path-set and policy changes. TestSnapshot explicitly asserts that an ordinary content edit leaves it unchanged.",
+      "source": "[Snapshot definition](internal/repo/fileset.go:37), [content-change assertion](internal/repo/files_test.go:153)"
+    },
+    {
+      "id": "F64",
+      "claim": "Replacing masked values can change a failing comparison into a passing comparison.",
+      "status": "confirmed",
+      "evidence": "The masker replaces different matching values with the same kind-specific placeholder. A comparison between two distinct matching constants therefore changes after projection. This is a deduction from the implementation, not an executed experiment. Existing anchor tests deliberately verify that distinct masked values produce identical visible content.",
+      "source": "[masking rules](internal/repo/redact.go:24), [masking implementation](internal/repo/redact.go:115), [equivalent masked reads](internal/repo/anchor_test.go:157)"
+    },
+    {
+      "id": "F65",
+      "claim": "The server’s request deadline starts before waiting for a worker, and handlers execute synchronously within runTool.",
+      "status": "confirmed",
+      "evidence": "toolsCall creates callCtx before dispatch. runTool later acquires s.sem and invokes tool.Handler directly. Consequently, handler entry does not imply a fresh 60-second budget.",
+      "source": "[request context](internal/mcp/server.go:707), [worker admission and handler execution](internal/mcp/server.go:757)"
+    },
+    {
+      "id": "F66",
+      "claim": "repochat’s Go tests require capabilities beyond compiling pure Go source.",
+      "status": "confirmed",
+      "evidence": "Repository test helpers execute Git to create fixtures. CLI test helpers listen on TCP and spawn children; signal tests connect to Unix sockets. These are source observations, not results from running the suite under a sandbox.",
+      "source": "[Git fixture helper](internal/repo/helpers_test.go:17), [TCP listener](internal/cli/cli_test.go:199), [Unix socket test](internal/cli/signal_test.go:167)"
+    },
+    {
+      "id": "F67",
+      "claim": "A separate network namespace can isolate job-local network resources from the host, including the abstract Unix socket namespace.",
+      "status": "confirmed",
+      "evidence": "network_namespaces(7) documents isolation of network devices, protocol stacks, ports, and abstract Unix sockets. Whether repochat can establish its intended complete configuration still requires a launcher test.",
+      "source": "[Linux network namespaces](https://man7.org/linux/man-pages/man7/network_namespaces.7.html)"
+    },
+    {
+      "id": "F68",
+      "claim": "An ordinary successful go test result can come from cached test results rather than a fresh test execution.",
+      "status": "confirmed",
+      "evidence": "Go documents successful-result reuse in package-list mode and recommends -count=1 to disable test caching explicitly.",
+      "source": "[Go test caching](https://pkg.go.dev/cmd/go#hdr-Test_packages)"
+    },
+    {
+      "id": "F69",
+      "claim": "V2 proves that the owner’s machine supports the complete proposed execution boundary.",
+      "status": "unverified",
+      "evidence": "The owner reports Landlock ABI 7 and successful unshare -Urm. I have not independently reproduced those measurements on that machine. They do not exercise the complete projected root, seccomp policy, descriptor cleanup, IPC isolation, resource controls, or supervisor lifecycle.",
+      "source": "Round-2 brief, V2; [cgroup delegation requirements](https://docs.kernel.org/admin-guide/cgroup-v2.html#delegation)"
+    }
+  ],
+  "order": [
+    {
+      "id": "G0",
+      "reason": "Accept: establish real Plus editing behavior and seed repeatable workflow measurements; optional probes remain independent."
+    },
+    {
+      "id": "edit_loop_hardening",
+      "reason": "Accept: M3, M6, M9, terminal diff/undo, and explicit Go formatting make the existing product dependable before execution expands its scope."
+    },
+    {
+      "id": "G3",
+      "reason": "Accept: resolve guidance handling through the reviewed external snapshot and explicit instruction exception."
+    },
+    {
+      "id": "G1a",
+      "reason": "Accept: settle canonical inputs, projected verification semantics, complete Linux confinement, resource controls, supervision, and adversarial acceptance criteria."
+    },
+    {
+      "id": "G1b",
+      "reason": "Accept: deliver one useful offline Go profile with ancillary-tool inventory, readiness, bounded observation, and attributable projection-specific receipts."
+    },
+    {
+      "id": "G7",
+      "reason": "Accept: persist the bounded session brief alongside authoritative execution facts."
+    },
+    {
+      "id": "G2",
+      "reason": "Accept: add distinct apply_and_check only when measurements justify it and operation recovery already works."
+    },
+    {
+      "id": "free_form_commands",
+      "reason": "Accept: introduce a separate tool only after the same confinement boundary passes acceptance tests."
+    },
+    {
+      "id": "G4",
+      "reason": "Accept: pair WIP capture and delta handoff with M10 conflict recovery after the ordinary loop is dependable."
+    },
+    {
+      "id": "G5",
+      "reason": "Accept: expand diagnostics by ecosystem; add semantic navigation when measured tasks justify it."
+    },
+    {
+      "id": "G6",
+      "reason": "Accept: expose dependency sources through the already authorized execution inventory."
+    },
+    {
+      "id": "project_4_and_optional_surfaces",
+      "reason": "Accept: keep the hub later and promote widgets, image/browser verification, or publishing only for demonstrated workload needs."
+    }
+  ],
+  "consensus": "no",
+  "remaining_disagreements": [
+    {
+      "id": "P2",
+      "summary": "The no-raw-secret boundary is agreed. Before signing the boundaries, I need explicit acceptance of a canonical projection contract covering the current readers’ lossy and unsupported cases, and of projection-specific verification claims that acknowledge possible false passes. These are M13 and M14; they do not require reordering the roadmap."
+    }
+  ],
+  "summary": "Accept P1, P3, P4, and the relative order. Maintain P2 only on its incomplete content definition and verification claims; no raw-secret mode is requested. V3 is refuted as written: default enablement began in Ubuntu 24.04. This was a read-only review; no files were modified and no tests were run."
+}

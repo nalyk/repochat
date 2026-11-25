@@ -40,3 +40,14 @@ Codex a schimbat patru decizii: repornirea serverului MCP eșuează închis, lis
 ## Regula K2, inversată (19 noiembrie 2026)
 
 Regula K2 din [`00-design-brief.md`](00-design-brief.md), „Read-only forever” (niciun instrument care scrie), a fost inversată de proprietar pe 19 noiembrie 2026, pentru un mod de scriere pornit doar explicit, cu `--write`. Fără `--write` regula rămâne în vigoare neschimbată: aceleași 13 instrumente doar-citire. Restul lui K2 rămâne valabil și în modul de scriere: nicio comandă arbitrară, iar modelul nu furnizează niciodată argumente brute pentru git. Designul și ce se schimbă în garanții: [`../superpowers/specs/2026-11-19-write-mode-edits-design.md`](../superpowers/specs/2026-11-19-write-mode-edits-design.md).
+
+## Paritatea cu Claude Code / Codex CLI (25 noiembrie 2026)
+
+Ce îi lipsește perechii ChatGPT + repochat ca să lucreze pe un repository ca un agent din terminal și în ce ordine se construiește. Patru runde cu Codex CLI (`codex exec`, sandbox doar-citire, căutare web live), răspunsuri JSON validate pe schemă; Codex a semnat în runda 4. Rezultatul: [`../superpowers/specs/2026-11-25-cli-parity-design.md`](../superpowers/specs/2026-11-25-cli-parity-design.md).
+
+| Fișier | Conținut |
+|---|---|
+| `cli-parity/round1-*` | poziția inițială (G0–G8), 58 de fapte verificate, verdicte, 12 omisiuni (M1–M12), ordine |
+| `cli-parity/round2-*` | concesii și contrapropuneri P1–P4; M13–M18 |
+| `cli-parity/round3-*` | textul contractului de execuție; două corecturi rămase |
+| `cli-parity/round4-*` | corecturile acceptate; consens |

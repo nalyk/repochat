@@ -142,7 +142,9 @@ Evaluarea propunerii „RepoChat 2.0” a dus la această ordine; nimic din ea n
 3. **Simboluri în memorie:** `find_symbol`, `symbol_context`, apariții etichetate „lexical, nedovedit”, `analyze_changes`. Persistența pe disc doar dacă un cost măsurat o justifică, și atunci ca optimizare privată, niciodată ca sursă de autorizare.
 4. **Hartă de importuri și manifeste**, etichetată pe dovezi.
 
-**Respinse:** servere de limbaj (rulează unelte definite de proiect), „Agent Context Bridge” (fișierele din repository se pot citi deja; transcrierile din afara lui ar rupe granița), un instrument separat `impact_analysis`, repoziționarea produsului înainte de măsurători.
+**Amânate, nu respinse:** serverele de limbaj rulează unelte definite de proiect, deci vin doar în interiorul granițelor de execuție din [`2026-11-25-cli-parity-design.md`](2026-11-25-cli-parity-design.md), întâi ca diagnostice de compilator, apoi navigare semantică pentru un singur ecosistem, când măsurătorile o cer (consens cu Codex, `docs/design/cli-parity/`).
+
+**Respinse:** „Agent Context Bridge” (fișierele din repository se pot citi deja; transcrierile din afara lui ar rupe granița), un instrument separat `impact_analysis`, repoziționarea produsului înainte de măsurători.
 
 ## Lăsat constructorului
 

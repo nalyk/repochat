@@ -154,7 +154,7 @@ A change set is refused as a whole when any of these holds:
 - a path is withheld by the exposure policy, or a new path would be;
 - a path is, or passes through, a symbolic link or a submodule;
 - a path has a `filter` attribute (Git LFS, git-crypt and similar). The workspace holds such files as git stores them, because no filter program is ever run, so an edit would be written to the owner's checkout in the wrong form (my call);
-- a file would be left syntactically broken, for the formats repochat can check with the standard library: Go source must parse and JSON must be valid. Other languages are not checked in this project (project 3 extends this through language servers);
+- a file would be left syntactically broken, for the formats repochat can check with the standard library: Go source must parse and JSON must be valid. Other languages are not checked in this project (project 3 extends this with the project's own compiler and, later, language servers, run only inside the execution boundary of [`2026-11-25-cli-parity-design.md`](2026-11-25-cli-parity-design.md));
 - a file would contain conflict markers, NUL bytes or invalid UTF-8;
 - the size limits are exceeded (files per change set, bytes of new text, size of a resulting file).
 
