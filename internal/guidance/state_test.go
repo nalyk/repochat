@@ -399,3 +399,30 @@ func TestSaveRefusesAnotherAssignment(t *testing.T) {
 		t.Fatal(err)
 	}
 }
+
+// I1: a review of the same root replaces the assignment even when the rest of
+// the binding changed (an unrelated merge, a re-clone at that path); another
+// root is still refused.
+func TestSaveReplacesTheAssignmentOfTheSameRoot(t *testing.T) {
+	s, _ := newStore(t)
+	must(t, s.Save(rec("k1")))
+	changed := rec("k1")
+	changed.Binding.Roots = []string{"abc", "def"}
+	changed.Binding.RootIno, changed.Binding.CommonIno = 7, 8
+	if err := s.Save(changed); err != nil {
+		t.Fatalf("same root, changed binding: %v", err)
+	}
+	got, err := s.Load("k1")
+	if err != nil || got == nil || got.Generation != 2 || !got.Binding.Equal(&changed.Binding) {
+		t.Fatalf("record %+v err %v", got, err)
+	}
+	a, err := s.Assignment("k1")
+	if err != nil || a == nil || !a.Equal(&changed.Binding) {
+		t.Fatalf("assignment %+v err %v", a, err)
+	}
+	other := rec("k1")
+	other.Binding.Root = "/elsewhere"
+	if err := s.Save(other); err == nil || !strings.Contains(err.Error(), "--release-tunnel") {
+		t.Fatalf("another root: %v", err)
+	}
+}

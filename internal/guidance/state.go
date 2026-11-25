@@ -351,7 +351,9 @@ func (s *Store) bump(key string) (uint64, error) {
 }
 
 // Save stores r under r.Key: it bumps the key's generation, sets r.Generation
-// and r.Checksum, writes the record and records the key's assignment.
+// and r.Checksum, writes the record and records the key's assignment. A key
+// assigned to another canonical root is refused; one assigned to the same
+// root has its assignment replaced by r's binding.
 func (s *Store) Save(r *Record) error {
 	if err := validKey(r.Key); err != nil {
 		return err
@@ -368,7 +370,10 @@ func (s *Store) Save(r *Record) error {
 	if err != nil {
 		return err
 	}
-	if a, ok := as[r.Key]; ok && !a.Equal(&r.Binding) {
+	// The same canonical root may be reviewed again after the rest of its
+	// binding changed (an unrelated merge, a re-clone at that path): the
+	// owner reviewed it, so the assignment follows. Another root never.
+	if a, ok := as[r.Key]; ok && a.Root != r.Binding.Root {
 		return fmt.Errorf("this tunnel is assigned to %s; to give it to another repository run `repochat trust --release-tunnel` from that profile first", a.Root)
 	}
 	// Lifecycle first: a crash afterwards leaves a skipped generation, never a

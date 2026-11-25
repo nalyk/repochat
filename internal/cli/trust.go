@@ -241,11 +241,18 @@ func trustReview(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 		c.fail("%v", err)
 		return 1
 	} else if a != nil {
-		if !a.Equal(bind) {
+		// The canonical root decides, as in Store.Save: the same root
+		// after the rest of its binding changed (an unrelated merge, a
+		// re-clone at that path) is this repository, reviewed again.
+		switch {
+		case a.Root != bind.Root:
 			c.fail("this tunnel is assigned to another repository (%s). To give it to this one, run `repochat trust --release-tunnel` from that profile, then delete the plugin in ChatGPT and create it again", repo.SanitizeLine(a.Root))
 			return 1
+		case !a.Equal(bind):
+			assigned = "assigned to this repository, which changed since its last review (this review replaces it)"
+		default:
+			assigned = "assigned to this repository"
 		}
-		assigned = "assigned to this repository"
 	}
 
 	name := repo.SanitizeLine(filepath.Base(r.Root))

@@ -557,3 +557,51 @@ func TestStatusStatesFollowDrift(t *testing.T) {
 	_, errs, _ := runCLI("trust", "--root", e.repo, "--status")
 	wantIn(t, errs, "File:       could not be compared")
 }
+
+// I1: after a change of the binding at the same root, the share points the
+// owner at `repochat trust`; that must work, and the share must start after.
+func TestTrustAgainRecoversAfterTheRootsChange(t *testing.T) {
+	e := assigned(t)
+	side := t.TempDir()
+	gitRun(t, side, "init", "-q")
+	gitRun(t, side, "symbolic-ref", "HEAD", "refs/heads/main")
+	if err := os.WriteFile(filepath.Join(side, "side.txt"), []byte("side\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, side, "add", "-A")
+	gitRun(t, side, "commit", "-q", "-m", "side")
+	gitRun(t, e.repo, "fetch", "-q", side, "main")
+	gitRun(t, e.repo, "merge", "-q", "--allow-unrelated-histories", "-m", "merge", "FETCH_HEAD")
+	_, errs, code := runCLI("--root", e.repo, "--print-command")
+	if code == 0 {
+		t.Fatalf("served a repository whose roots changed: %q", errs)
+	}
+	wantIn(t, errs, "run repochat trust again")
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatalf("trust after the roots changed: code %d, %q", code, errs)
+	}
+	if rec := e.stored(t); rec == nil || rec.Generation != 2 || len(rec.Binding.Roots) != 2 {
+		t.Fatalf("record %+v", rec)
+	}
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code != 0 {
+		t.Fatalf("the share still refuses after trust: %q", errs)
+	}
+}
+
+func TestTrustAgainRecoversAfterAReclone(t *testing.T) {
+	e := assigned(t)
+	old := e.repo + ".old"
+	if err := os.Rename(e.repo, old); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, filepath.Dir(e.repo), "clone", "-q", old, e.repo)
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code == 0 {
+		t.Fatalf("served a replaced repository: %q", errs)
+	}
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatalf("trust after a re-clone: code %d, %q", code, errs)
+	}
+	if _, errs, code := runCLI("--root", e.repo, "--print-command"); code != 0 {
+		t.Fatalf("the share still refuses after trust: %q", errs)
+	}
+}
