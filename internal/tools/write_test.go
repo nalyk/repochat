@@ -22,6 +22,7 @@ import (
 // repo.Sessions on a state directory outside it, and the write-mode tools.
 type writeFixture struct {
 	dir   string
+	state string // the Sessions' state directory
 	owner *repo.Repo
 	s     *repo.Sessions
 	tools map[string]mcp.Tool
@@ -55,7 +56,7 @@ func newWriteFixture(t *testing.T, opts repo.Options, files map[string]string) *
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { s.Close() })
-	f := &writeFixture{dir: dir, owner: owner, s: s, tools: map[string]mcp.Tool{}, list: NewWrite(owner, s)}
+	f := &writeFixture{dir: dir, state: filepath.Join(state, "sessions"), owner: owner, s: s, tools: map[string]mcp.Tool{}, list: NewWrite(owner, s)}
 	for _, tool := range f.list {
 		f.tools[tool.Name] = tool
 	}
@@ -629,13 +630,13 @@ func TestFinishTextWhenTheBranchCannotBeRead(t *testing.T) {
 	fin := &repo.Finished{Commit: land, Files: []string{"a.txt"}, Notes: []string{
 		"WARNING: git reported the merge of " + land + " as done, but where main is now could not be read (boom); the session, its branch and its workspace are kept. Check the checkout with git status and git log.",
 	}}
-	text := finishText("main", "", fin, true, true)
+	text := finishText("main", fin, true, true)
 	if strings.Contains(text, "main is at") || !strings.Contains(text, "the merged commit is "+land[:12]) {
 		t.Fatalf("finish text:\n%s", text)
 	}
 	// Otherwise the branch position is known and stated.
 	fin.Notes = []string{"WARNING: git reported the merge as done, but main is at " + land + ", not at the merged commit x; kept."}
-	if text := finishText("main", "", fin, true, true); !strings.Contains(text, "main is at "+land[:12]) {
+	if text := finishText("main", fin, true, true); !strings.Contains(text, "main is at "+land[:12]) {
 		t.Fatalf("finish text:\n%s", text)
 	}
 }
@@ -856,10 +857,13 @@ func TestFinishHandoffNamesTheRevision(t *testing.T) {
 	_, am := f.must(t, "apply_changes", map[string]any{"changes": changesJSON(t, map[string]string{"op": "create", "path": "x.txt", "text": "x\n"})})
 	cp, _ := am["checkpoint"].(string)
 	text, m := f.must(t, "finish_session", map[string]any{"expected_checkpoint": cp, "operation_id": "fin-handoff-1"})
-	for _, want := range []string{"Merged revision: session at ", ", from " + sm["base"].(string)[:12], "repochat session diff", "git diff " + sm["start_branch"].(string) + "..." + sm["branch"].(string), "No checks were run: repochat cannot run commands yet."} {
+	for _, want := range []string{"Merged revision: the session at ", "the session started at " + sm["base"].(string)[:12], "Full diff: `git diff ", "No checks were run: repochat cannot run commands yet."} {
 		if !strings.Contains(text, want) {
 			t.Errorf("finish text lacks %q:\n%s", want, text)
 		}
+	}
+	if strings.Contains(text, "repochat session diff") {
+		t.Errorf("the finish text offers `repochat session diff`, which needs an open session:\n%s", text)
 	}
 	if m["head"] == nil || m["base"] != sm["base"] {
 		t.Errorf("finish meta: %v", m)
@@ -867,6 +871,41 @@ func TestFinishHandoffNamesTheRevision(t *testing.T) {
 	again, am2 := f.must(t, "finish_session", map[string]any{"expected_checkpoint": cp, "operation_id": "fin-handoff-1"})
 	if !strings.HasPrefix(again, "Operation fin-handoff-1 was already done: ") || am2["replayed"] != true {
 		t.Errorf("finish replay:\n%s\n%v", again, am2)
+	}
+	if strings.Contains(again, "repochat session diff") {
+		t.Errorf("the replayed finish offers `repochat session diff`:\n%s", again)
+	}
+}
+
+var fullDiffRe = regexp.MustCompile("Full diff: `git diff ([0-9a-f]{40,64}) ([0-9a-f]{40,64})`")
+
+// The command the finish hands over shows the merged change when run in the
+// user's checkout after the finish, for a fast-forward and for a squash, and
+// in the replayed answer too.
+func TestFinishHandoffDiffCommandShowsTheChange(t *testing.T) {
+	for _, squash := range []bool{false, true} {
+		t.Run(fmt.Sprintf("squash=%v", squash), func(t *testing.T) {
+			f := newWriteFixture(t, repo.Options{}, nil)
+			f.must(t, "start_session", map[string]any{})
+			_, am := f.must(t, "apply_changes", map[string]any{"changes": changesJSON(t, map[string]string{"op": "create", "path": "handoff.txt", "text": "handed over\n"})})
+			cp, _ := am["checkpoint"].(string)
+			args := map[string]any{"expected_checkpoint": cp, "operation_id": "fin-diffcmd-1", "squash": squash}
+			if squash {
+				args["message"] = "squashed"
+			}
+			text, _ := f.must(t, "finish_session", args)
+			again, _ := f.must(t, "finish_session", args)
+			for _, out := range []string{text, again} {
+				m := fullDiffRe.FindStringSubmatch(out)
+				if m == nil {
+					t.Fatalf("no full diff command in:\n%s", out)
+				}
+				diff := gitOut(t, f.dir, "diff", m[1], m[2])
+				if !strings.Contains(diff, "handoff.txt") || !strings.Contains(diff, "+handed over") {
+					t.Errorf("`git diff %s %s` shows:\n%s", m[1], m[2], diff)
+				}
+			}
+		})
 	}
 }
 
@@ -881,6 +920,40 @@ func TestStartAndAbandonReplayThroughTheTools(t *testing.T) {
 	text, m3 := f.must(t, "abandon_session", map[string]any{"operation_id": "abandon-op-01"})
 	if !strings.HasPrefix(text, "Operation abandon-op-01 was already done: ") || m3["replayed"] != true {
 		t.Fatalf("abandon replay:\n%s\n%v", text, m3)
+	}
+}
+
+// A replayed start says whether that call started the session or resumed it.
+func TestStartReplaySaysStartedOrResumed(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{"operation_id": "start-new-001"})
+	text, _ := f.must(t, "start_session", map[string]any{"operation_id": "start-new-001"})
+	if !strings.Contains(text, "was started by that call") {
+		t.Errorf("replay of a start that opened the session:\n%s", text)
+	}
+	f.must(t, "start_session", map[string]any{"operation_id": "start-res-001"})
+	text, _ = f.must(t, "start_session", map[string]any{"operation_id": "start-res-001"})
+	if !strings.Contains(text, "was resumed by that call") || strings.Contains(text, "started by that call") {
+		t.Errorf("replay of a start that resumed the session:\n%s", text)
+	}
+}
+
+// A start whose receipt cannot be written says so in its result, not only on
+// the terminal.
+func TestStartReceiptFailureIsInTheResult(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	dir := filepath.Join(f.state, f.owner.ID)
+	if err := os.Chmod(dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(dir, 0o700) })
+	text, _ := f.must(t, "start_session", map[string]any{"operation_id": "start-nowrite"})
+	if !strings.Contains(text, "receipt") || !strings.Contains(text, "not recognised") {
+		t.Errorf("the start result does not tell of the unwritten receipt:\n%s", text)
 	}
 }
 

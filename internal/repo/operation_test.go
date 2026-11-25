@@ -744,11 +744,11 @@ func TestDamagedOrUnreadableReceiptsRefuseAnOperationCall(t *testing.T) {
 func TestStartedReceiptsAreNeverEvicted(t *testing.T) {
 	f := newSessionFixture(t, nil)
 	s := f.sessions(t, Options{})
-	if err := s.putReceipt(opCall("fin-keepme01", "f1f1f1f1f1f1f1f1"), "finish", receiptStarted, nil, nil); err != nil {
+	if err := s.putReceipt(opCall("fin-keepme01", "f1f1f1f1f1f1f1f1"), "s1", "finish", receiptStarted, nil, nil); err != nil {
 		t.Fatal(err)
 	}
 	for i := 0; i < 70; i++ {
-		if err := s.putReceipt(opCall(fmt.Sprintf("aban-%04d", i), "b1b1b1b1b1b1b1b1"), "abandon", receiptDone, nil, nil); err != nil {
+		if err := s.putReceipt(opCall(fmt.Sprintf("aban-%04d", i), "b1b1b1b1b1b1b1b1"), "s1", "abandon", receiptDone, nil, nil); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -884,6 +884,231 @@ func TestExpectedFullHeadInASHA256Repository(t *testing.T) {
 		expect := st.Info.Head[:cut]
 		if _, err := s.ApplyCall(bg, Call{Expect: expect}, "", []Change{{Op: "create", Path: fmt.Sprintf("n%d.txt", i), Text: "x\n"}}, "add"); err != nil {
 			t.Errorf("ApplyCall with expect %q: %v", expect, err)
+		}
+	}
+}
+
+// I2: a receipt belongs to the session it was made in.
+
+func TestAbandonIDFromAnEarlierSessionIsRefused(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, _ := f.start(t, Options{})
+	call := opCall("aban-reuse-01", "b1b1b1b1b1b1b1b1")
+	if replayed, err := s.AbandonCall(bg, call, false); err != nil || replayed {
+		t.Fatalf("first: %v, %v", replayed, err)
+	}
+	b, err := s.Start(bg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	replayed, err := s.AbandonCall(bg, call, false)
+	if err == nil || replayed || !strings.Contains(err.Error(), "belongs to an earlier session") || !strings.Contains(err.Error(), "nothing was changed") {
+		t.Fatalf("reuse in a later session: replayed=%v, %v", replayed, err)
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != b.ID {
+		t.Errorf("the later session did not stay open: %+v, %v", cur, err)
+	}
+	// With no session open, the id is the earlier call's retry: replayed.
+	if err := s.Abandon(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	if replayed, err := s.AbandonCall(bg, call, false); err != nil || !replayed {
+		t.Errorf("retry with no session open: %v, %v", replayed, err)
+	}
+}
+
+func TestStartIDFromAnEarlierSessionIsRefused(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s := f.sessions(t, Options{})
+	call := opCall("start-reuse-1", "a1a1a1a1a1a1a1a1")
+	a, err := s.StartCall(bg, call, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if err := s.Abandon(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	// No session open: the receipt's session is closed, so nothing is
+	// replayed and nothing is started.
+	info, err := s.StartCall(bg, call, false)
+	if err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Fatalf("reuse after the session closed: %+v, %v", info, err)
+	}
+	if _, err := s.Current(bg); !errors.Is(err, ErrNoSession) {
+		t.Errorf("a session was opened: %v", err)
+	}
+	// Another session open: refused, and that session stays.
+	b, err := s.Start(bg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if b.ID == a.ID {
+		t.Fatal("the new session has the old id")
+	}
+	if info, err := s.StartCall(bg, call, false); err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Fatalf("reuse while another session is open: %+v, %v", info, err)
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != b.ID {
+		t.Errorf("current: %+v, %v", cur, err)
+	}
+}
+
+func TestFinishIDFromAnEarlierSessionIsRefused(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	call := opCall("fin-reuse-001", "f1f1f1f1f1f1f1f1")
+	if _, err := c.s.FinishCall(bg, call, false, ""); err != nil {
+		t.Fatal(err)
+	}
+	b, err := c.s.Start(bg, false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if fin, err := c.s.FinishCall(bg, call, false, ""); err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Fatalf("reuse in a later session: %+v, %v", fin, err)
+	}
+	if cur, err := c.s.Current(bg); err != nil || cur.ID != b.ID {
+		t.Errorf("the later session did not stay open: %+v, %v", cur, err)
+	}
+}
+
+func TestReceiptWithoutASessionMatchesNoOpenSession(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, info := f.start(t, Options{})
+	put := func(rs ...receipt) {
+		t.Helper()
+		data, _ := json.Marshal(rs)
+		if err := os.WriteFile(filepath.Join(s.dir, "operations.json"), data, 0o600); err != nil {
+			t.Fatal(err)
+		}
+	}
+	stored := *info
+	put(receipt{ID: "aban-old-0001", Tool: "abandon", Digest: "b1b1b1b1b1b1b1b1", State: "done", Time: time.Now()},
+		receipt{ID: "start-old-001", Tool: "start", Digest: "a1a1a1a1a1a1a1a1", State: "done", Time: time.Now(), Info: &stored},
+		receipt{ID: "fin-old-00001", Tool: "finish", Digest: "f1f1f1f1f1f1f1f1", State: "done", Time: time.Now(), Finished: &Finished{Commit: info.Base}})
+	if _, err := s.AbandonCall(bg, opCall("aban-old-0001", "b1b1b1b1b1b1b1b1"), false); err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Errorf("old abandon receipt with a session open: %v", err)
+	}
+	if _, err := s.StartCall(bg, opCall("start-old-001", "a1a1a1a1a1a1a1a1"), false); err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Errorf("old start receipt with a session open: %v", err)
+	}
+	if _, err := s.FinishCall(bg, opCall("fin-old-00001", "f1f1f1f1f1f1f1f1"), false, ""); err == nil || !strings.Contains(err.Error(), "belongs to an earlier session") {
+		t.Errorf("old finish receipt with a session open: %v", err)
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != info.ID {
+		t.Fatalf("the session changed: %+v, %v", cur, err)
+	}
+	if err := s.Abandon(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	// With none open they are replayed, as before.
+	if replayed, err := s.AbandonCall(bg, opCall("aban-old-0001", "b1b1b1b1b1b1b1b1"), false); err != nil || !replayed {
+		t.Errorf("old abandon receipt with no session: %v, %v", replayed, err)
+	}
+	if fin, err := s.FinishCall(bg, opCall("fin-old-00001", "f1f1f1f1f1f1f1f1"), false, ""); err != nil || !fin.Replayed {
+		t.Errorf("old finish receipt with no session: %+v, %v", fin, err)
+	}
+}
+
+func TestReceiptsRecordTheirSession(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s := f.sessions(t, Options{})
+	a, err := s.StartCall(bg, opCall("start-rec-001", "a1a1a1a1a1a1a1a1"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.AbandonCall(bg, opCall("aban-rec-0001", "b1b1b1b1b1b1b1b1"), false); err != nil {
+		t.Fatal(err)
+	}
+	for _, r := range readReceipts(t, s) {
+		if r.Session != a.ID {
+			t.Errorf("receipt %s has session %q, want %s", r.ID, r.Session, a.ID)
+		}
+	}
+}
+
+// m1: a zero-byte receipt file is what a crash before the first write can
+// leave: it holds no receipts. Anything else that does not parse still
+// refuses.
+func TestEmptyReceiptFileHoldsNone(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s := f.sessions(t, Options{})
+	path := filepath.Join(s.dir, "operations.json")
+	if err := os.MkdirAll(s.dir, 0o700); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.WriteFile(path, nil, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartCall(bg, opCall("start-empty-1", "a1a1a1a1a1a1a1a1"), false); err != nil {
+		t.Fatalf("start with an empty receipt file: %v", err)
+	}
+	if rs := readReceipts(t, s); len(rs) != 1 {
+		t.Errorf("receipts: %+v", rs)
+	}
+	if err := os.WriteFile(path, []byte("\n"), 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartCall(bg, opCall("start-empty-2", "a1a1a1a1a1a1a1a1"), false); err == nil || !strings.Contains(err.Error(), "damaged") {
+		t.Errorf("a receipt file holding only a newline: %v", err)
+	}
+}
+
+// m2: a start receipt that cannot be written is a note of the result.
+func TestStartReceiptFailureIsANote(t *testing.T) {
+	if os.Geteuid() == 0 {
+		t.Skip("permissions do not bind root")
+	}
+	f := newSessionFixture(t, nil)
+	s, _ := f.start(t, Options{})
+	if err := os.Chmod(s.dir, 0o500); err != nil {
+		t.Fatal(err)
+	}
+	t.Cleanup(func() { os.Chmod(s.dir, 0o700) })
+	info, err := s.StartCall(bg, opCall("start-nowrite", "a1a1a1a1a1a1a1a1"), false)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(info.Notes) != 1 || !strings.Contains(info.Notes[0], "receipt") || !strings.Contains(info.Notes[0], "not recognised") {
+		t.Errorf("notes: %q", info.Notes)
+	}
+}
+
+// m3: the receipt says whether the start resumed the open session.
+func TestStartReceiptKnowsItResumed(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s := f.sessions(t, Options{})
+	a, err := s.StartCall(bg, opCall("start-new-001", "a1a1a1a1a1a1a1a1"), false)
+	if err != nil || a.Resumed {
+		t.Fatalf("new start: %+v, %v", a, err)
+	}
+	b, err := s.StartCall(bg, opCall("start-res-001", "a1a1a1a1a1a1a1a1"), false)
+	if err != nil || !b.Resumed {
+		t.Fatalf("resume: %+v, %v", b, err)
+	}
+	for op, want := range map[string]bool{"start-new-001": false, "start-res-001": true} {
+		r, err := s.StartCall(bg, opCall(op, "a1a1a1a1a1a1a1a1"), false)
+		if err != nil || !r.Replayed || r.Resumed != want {
+			t.Errorf("replay of %s: %+v, %v; want Resumed=%v", op, r, err, want)
+		}
+	}
+}
+
+// I1: the finish records where the owner's branch was before the merge.
+func TestFinishRecordsTheBranchBeforeTheMerge(t *testing.T) {
+	for _, squash := range []bool{false, true} {
+		c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+		before := gitCmd(t, c.f.dir, "rev-parse", "refs/heads/main")
+		c.replaceLine(t, "a.txt", 1, "A")
+		fin, err := c.s.FinishCall(bg, Call{}, squash, "squashed")
+		if err != nil {
+			t.Fatal(err)
+		}
+		if fin.Before != before {
+			t.Errorf("squash=%v: Before %q, want %s", squash, fin.Before, before)
+		}
+		if diff := gitCmd(t, c.f.dir, "diff", fin.Before, fin.Commit); !strings.Contains(diff, "+A") {
+			t.Errorf("squash=%v: git diff Before Commit:\n%s", squash, diff)
 		}
 	}
 }

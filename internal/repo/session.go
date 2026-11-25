@@ -55,6 +55,11 @@ type SessionInfo struct {
 	// Replayed is set when the answer is the stored one of an earlier call
 	// with the same operation id.
 	Replayed bool
+	// Resumed is set when the start resumed the session that was open
+	// instead of opening one.
+	Resumed bool
+	// Notes are what the caller should hear about the start besides it.
+	Notes []string
 }
 
 // ErrNoSession is returned when an operation needs a session and none is open.
@@ -283,6 +288,13 @@ func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*Sessi
 		if r.Info == nil {
 			return nil, errors.New("the receipt of this operation_id holds no result (nothing was run)")
 		}
+		open, err := s.openSessionID()
+		if err != nil {
+			return nil, err
+		}
+		if err := checkReceiptSession(r, call, open, true); err != nil {
+			return nil, err
+		}
 		info := *r.Info
 		info.Replayed = true
 		return &info, nil
@@ -299,6 +311,7 @@ func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*Sessi
 		if rec != nil {
 			info, err := s.info(ctx, rec)
 			if err == nil {
+				info.Resumed = true
 				s.recordStart(call, info)
 			}
 			return info, err
@@ -422,11 +435,19 @@ func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*Sessi
 }
 
 // recordStart keeps the answer of a start call that has an operation id. The
-// session is open by now, so a receipt that cannot be written is a notice.
+// session is open by now, so a receipt that cannot be written is a note of
+// the answer and a notice.
 func (s *Sessions) recordStart(call Call, info *SessionInfo) {
 	stored := *info
-	if err := s.putReceipt(call, "start", receiptDone, nil, &stored); err != nil {
-		s.notify("The session was started, but " + err.Error() + "; a retry of this call is not recognised.")
+	stored.Notes = nil
+	if err := s.putReceipt(call, info.ID, "start", receiptDone, nil, &stored); err != nil {
+		verb := "started"
+		if info.Resumed {
+			verb = "resumed"
+		}
+		msg := "The session was " + verb + ", but " + err.Error() + "; a retry of this call is not recognised."
+		info.Notes = append(info.Notes, msg)
+		s.notify(msg)
 	}
 }
 

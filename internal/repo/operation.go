@@ -150,9 +150,11 @@ const (
 // behind for a retry to find: these calls leave no checkpoint to carry a
 // trailer. A finish writes "started" right before it merges into the owner's
 // branch and "done" once the session is closed; start and abandon write
-// "done" only.
+// "done" only. Session is the session the call acted on: a receipt answers a
+// retry only while no other session is open (see checkReceiptSession).
 type receipt struct {
 	ID       string       `json:"id"`
+	Session  string       `json:"session,omitempty"`
 	Tool     string       `json:"tool"`
 	Digest   string       `json:"digest"`
 	State    string       `json:"state"`
@@ -161,9 +163,11 @@ type receipt struct {
 	Info     *SessionInfo `json:"info,omitempty"`
 }
 
-// readReceipts returns the receipts, oldest first. A missing file, or one
-// that is empty, gives none; a file that cannot be read or parsed is an error naming it, so
-// that a call with an operation id is never run on a guess.
+// readReceipts returns the receipts, oldest first. A missing file gives none,
+// and so does a zero-byte one, which is what a crash before the first write
+// can leave. A file that cannot be read, or that holds anything else that
+// does not parse, is an error naming it, so that a call with an operation id
+// is never run on a guess.
 func (s *Sessions) readReceipts() ([]receipt, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, operationsFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -171,6 +175,9 @@ func (s *Sessions) readReceipts() ([]receipt, error) {
 	}
 	if err != nil {
 		return nil, fmt.Errorf("the operation receipts cannot be read, so the retry check cannot be made: %v", pathErrCause(err))
+	}
+	if len(data) == 0 {
+		return nil, nil
 	}
 	var rs []receipt
 	if err := json.Unmarshal(data, &rs); err != nil {
@@ -197,7 +204,7 @@ func (s *Sessions) findReceipt(tool string, call Call) (*receipt, error) {
 			continue
 		}
 		if r.Digest != call.Digest || r.Tool != tool {
-			return nil, refusal("", "operation_id %s was already used for a different call; choose a new id (nothing was changed)", call.Op)
+			return nil, fmt.Errorf("operation_id %s was already used for a different call; choose a new id (nothing was changed)", call.Op)
 		}
 		if r.State != receiptDone {
 			return nil, fmt.Errorf("the %s_session call with this operation_id began merging and did not report its outcome; the owner can check with `repochat session` and `git log` (nothing was run)", tool)
@@ -207,9 +214,37 @@ func (s *Sessions) findReceipt(tool string, call Call) (*receipt, error) {
 	return nil, nil
 }
 
-// putReceipt records r, replacing an earlier receipt of the same id and
-// keeping the newest maxReceipts. The lock is held.
-func (s *Sessions) putReceipt(call Call, tool, state string, fin *Finished, info *SessionInfo) error {
+// checkReceiptSession refuses to answer call from r while a session other
+// than r's is open: an id used again in a later session names work that
+// session has not had done. open is the ID of the session open now, "" for
+// none. A start is answered only while its own session is open (needOpen);
+// a finish or an abandon also when none is, which is what a retry after
+// its session closed finds. A receipt without a session, written before
+// receipts named theirs, matches no open session.
+func checkReceiptSession(r *receipt, call Call, open string, needOpen bool) error {
+	if open == "" && !needOpen {
+		return nil
+	}
+	if r.Session != "" && r.Session == open {
+		return nil
+	}
+	return fmt.Errorf("operation_id %s belongs to an earlier session; choose a new id (nothing was changed)", call.Op)
+}
+
+// openSessionID is the ID of the session session.json records, "" for none.
+// The lock is held.
+func (s *Sessions) openSessionID() (string, error) {
+	rec, err := s.readRecord()
+	if err != nil || rec == nil {
+		return "", err
+	}
+	return rec.ID, nil
+}
+
+// putReceipt records the receipt of call, made in the session named,
+// replacing an earlier receipt of the same id and keeping the newest
+// maxReceipts. The lock is held.
+func (s *Sessions) putReceipt(call Call, session, tool, state string, fin *Finished, info *SessionInfo) error {
 	if call.Op == "" {
 		return nil
 	}
@@ -218,7 +253,7 @@ func (s *Sessions) putReceipt(call Call, tool, state string, fin *Finished, info
 		return err
 	}
 	rs = slices.DeleteFunc(rs, func(r receipt) bool { return r.ID == call.Op })
-	rs = append(rs, receipt{ID: call.Op, Tool: tool, Digest: call.Digest, State: state, Time: time.Now().UTC(), Finished: fin, Info: info})
+	rs = append(rs, receipt{ID: call.Op, Session: session, Tool: tool, Digest: call.Digest, State: state, Time: time.Now().UTC(), Finished: fin, Info: info})
 	// A "started" receipt is never evicted: it is what refuses a retry of a
 	// merge that may have run. The oldest "done" ones go first.
 	for len(rs) > maxReceipts {

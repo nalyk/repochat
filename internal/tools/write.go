@@ -313,8 +313,12 @@ func (c *catalog) startSession(ctx context.Context, a mcp.Args) (mcp.Result, err
 		return c.writeFail(err, false)
 	}
 	if info.Replayed {
+		verb := "started"
+		if info.Resumed {
+			verb = "resumed"
+		}
 		var b strings.Builder
-		b.WriteString(replayedText(a.String("operation_id"), fmt.Sprintf("session %s on branch %s was opened by that call", info.ID, info.Branch)) + "\n")
+		b.WriteString(replayedText(a.String("operation_id"), fmt.Sprintf("session %s on branch %s was %s by that call", info.ID, info.Branch, verb)) + "\n")
 		fmt.Fprintf(&b, "Branch %s, made from %s at %s.\n", info.Branch, info.StartBranch, short(info.Base))
 		return c.finish("start_session", b.String(), 0, meta{
 			"session": info.ID, "branch": info.Branch, "start_branch": info.StartBranch,
@@ -330,6 +334,10 @@ func (c *catalog) startSession(ctx context.Context, a mcp.Args) (mcp.Result, err
 	}
 	fmt.Fprintf(&b, "Branch %s, made from %s at %s; the session is at %s.\n", info.Branch, info.StartBranch, short(info.Base), short(info.Head))
 	b.WriteString("Every tool now reads and edits the session workspace, not the user's checkout. Read files (again) before editing: their lines carry anchors like `12:abc|`. Nothing reaches the user's branch until finish_session.\n")
+	if len(info.Notes) > 0 {
+		b.WriteString("Notes:\n")
+		bullets(&b, info.Notes)
+	}
 	return c.finish("start_session", b.String(), 0, meta{
 		"session": info.ID, "branch": info.Branch, "start_branch": info.StartBranch,
 		"base": info.Base, "head": info.Head, "resumed": resumed, "complete": true,
@@ -541,9 +549,9 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 	if a.String("expected_checkpoint") == "" {
 		return c.writeFail(errors.New("finish_session needs expected_checkpoint: the checkpoint the session is at. Call session_status, read the checkpoint it shows, and call finish_session again with it as expected_checkpoint. If this tool has no expected_checkpoint parameter, its description is out of date: ask the user to Refresh tools (reconnect the app) in the chat settings. Nothing was changed"), true)
 	}
-	branch, sessionBranch := "the user's branch", ""
+	branch := "the user's branch"
 	if info, err := c.currentInfo(ctx); err == nil {
-		branch, sessionBranch = info.StartBranch, info.Branch
+		branch = info.StartBranch
 	}
 	fin, err := c.s.FinishCall(ctx, callOf("finish_session", a), a.Bool("squash"), a.String("message"))
 	if err != nil {
@@ -553,7 +561,7 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 	}
 	if fin.Replayed {
 		// The session that is open now, if any, is not the one that merged.
-		branch, sessionBranch = "the user's branch", ""
+		branch = "the user's branch"
 	}
 	open, known := c.sessionOpen(ctx)
 	warnings := 0
@@ -574,7 +582,7 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 	}
 	footerList(m, "runs_later", fin.RunsLater)
 	footerList(m, "file_list", fin.Files) // "files" is their number here
-	text := finishText(branch, sessionBranch, fin, open, known)
+	text := finishText(branch, fin, open, known)
 	if fin.Replayed {
 		text = replayedText(a.String("operation_id"), "the session was merged") + "\n" + text
 	}
@@ -604,7 +612,7 @@ func (c *catalog) sessionOpen(ctx context.Context) (open, known bool) {
 }
 
 // finishText is the result of a Finish: what needs telling first, first.
-func finishText(branch, sessionBranch string, fin *repo.Finished, open, known bool) string {
+func finishText(branch string, fin *repo.Finished, open, known bool) string {
 	var warnings, notes []string
 	for _, n := range fin.Notes {
 		if strings.HasPrefix(n, "WARNING") {
@@ -638,12 +646,12 @@ func finishText(branch, sessionBranch string, fin *repo.Finished, open, known bo
 		fmt.Fprintf(&b, "Merged the session into %s (%s): it is now at %s. %d file(s) changed.\n", branch, how, short(fin.Commit), len(fin.Files))
 	}
 	if fin.Head != "" {
-		fmt.Fprintf(&b, "Merged revision: session at %s, from %s.\n", short(fin.Head), short(fin.Base))
-		if sessionBranch != "" {
-			fmt.Fprintf(&b, "Full diff: `git diff %s...%s` or `repochat session diff`.\n", branch, sessionBranch)
-		} else {
-			b.WriteString("Full diff: `repochat session diff`.\n")
-		}
+		fmt.Fprintf(&b, "Merged revision: the session at %s (the session started at %s).\n", short(fin.Head), short(fin.Base))
+	}
+	// Both ends stay reachable after the finish, for a fast-forward and a
+	// squash alike: the branch the merge started from and where it is now.
+	if fin.Before != "" && fin.Commit != "" {
+		fmt.Fprintf(&b, "Full diff: `git diff %s %s` in the user's checkout.\n", fin.Before, fin.Commit)
 	}
 	b.WriteString("No checks were run: repochat cannot run commands yet.\n")
 	if len(fin.RunsLater) > 0 {
