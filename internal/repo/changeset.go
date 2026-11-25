@@ -1236,7 +1236,8 @@ var (
 // conflict markers (see sideMarkerRe), and the syntax gate; a gofmt difference is a warning.
 // before is nil for a new file; gateAsNew judges the syntax as for a new
 // file. lockedAfter marks lines of after that hold a value the model was
-// not shown.
+// not shown. formatted is set for a file the change set runs gofmt on: the
+// gofmt warning is then not given.
 func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]bool, gateAsNew, formatted bool, plan *Plan) error {
 	if len(after) > maxPlannedFile {
 		return refusal(p, "would be %d bytes; a resulting file may be at most 2 MiB (%d bytes)", len(after), maxPlannedFile)
@@ -1277,7 +1278,7 @@ func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]
 	// gofmt aligns comments by the length of neighbouring lines, so on a
 	// file holding a masked value the warning would measure the value.
 	if !formatted && syntaxKind(p) == "go" && len(lockedAfter) == 0 && goParse(p, after) == nil {
-		if formatted, err := format.Source(after); err == nil && !bytes.Equal(formatted, after) {
+		if want, err := format.Source(after); err == nil && !bytes.Equal(want, after) {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("%s is not formatted as gofmt would format it; it was left as written", Sanitize(p)))
 		}
 	}
@@ -1308,6 +1309,12 @@ func (r *Repo) formatGo(ctx context.Context, p string, content []byte) ([]byte, 
 	out, err := format.Source(content)
 	if err != nil {
 		return nil, refusal(p, "gofmt cannot format it: %s", SanitizeLine(goMessage(err.Error())))
+	}
+	// Nor may gofmt's output mask a line: a value must stay as it was.
+	if locked, err := r.lockedLines(ctx, out); err != nil {
+		return nil, err
+	} else if len(locked) > 0 {
+		return nil, refusal(p, "holds a masked value after gofmt; format it by hand")
 	}
 	return out, nil
 }
