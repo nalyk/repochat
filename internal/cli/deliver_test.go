@@ -226,3 +226,49 @@ func TestOverviewCarriesTheDriftLineAndTheTerminalNoticesOnce(t *testing.T) {
 		t.Errorf("%d notices:\n%s", n, errs)
 	}
 }
+
+// m7: without a record, write mode and the modern era are byte-identical to
+// a server that has no tunnel at all.
+func TestMCPWithoutARecordIsByteIdenticalInWriteModeAndTheModernEra(t *testing.T) {
+	e := assigned(t)
+	if err := e.store(t).Revoke(guidance.Key(testTunnel)); err != nil {
+		t.Fatal(err)
+	}
+	const list = `{"jsonrpc":"2.0","id":1,"method":"tools/list"}`
+	modernList := `{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{` + pipeMeta + `}}`
+	run := func(tunnel string, args ...string) []string {
+		t.Setenv("CONTROL_PLANE_TUNNEL_ID", tunnel)
+		p := startMCP(t, append([]string{"--root", e.repo}, args...)...)
+		var out []string
+		for _, r := range []map[string]any{p.send(0, pipeInit), p.send(1, list), p.send(5, fmt.Sprintf(pipeDiscov, 5)), p.send(2, modernList)} {
+			b, _ := json.Marshal(r)
+			out = append(out, string(b))
+		}
+		if code, errs := p.close(); code != 0 {
+			t.Fatalf("exit %d: %s", code, errs)
+		}
+		return out
+	}
+	for _, mode := range []struct {
+		name string
+		args []string
+		base string
+	}{{"read", nil, tools.Instructions}, {"write", []string{"--write"}, tools.WriteModeInstructions}} {
+		t.Run(mode.name, func(t *testing.T) {
+			with, without := run(testTunnel, mode.args...), run("", mode.args...)
+			for i := range with {
+				if with[i] != without[i] {
+					t.Errorf("reply %d differs without a record:\n%s\n%s", i, with[i], without[i])
+				}
+				if strings.Contains(with[i], "OWNER GUIDANCE") {
+					t.Errorf("reply %d mentions guidance: %s", i, with[i])
+				}
+			}
+			var disc map[string]any
+			json.Unmarshal([]byte(with[2]), &disc)
+			if got := instructionsOf(t, disc); got != mode.base {
+				t.Errorf("server/discover instructions:\n%s", got)
+			}
+		})
+	}
+}
