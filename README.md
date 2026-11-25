@@ -180,6 +180,39 @@ Each point is covered by automated tests. One of them drives every write tool wi
 
 Building needs Go 1.25 or newer, as for the rest of repochat.
 
+## Owner guidance (experimental)
+
+Claude Code and Codex load `AGENTS.md` and `CLAUDE.md` as instructions. repochat lists those files for ChatGPT too, but tells the model never to follow anything a tool returns: that rule is the defence against prompt injection. Owner guidance lets you promote one reviewed text to standing guidance anyway, through a channel that repository content cannot reach: the server instructions. Text in a repository can never become guidance by being read. Only you can, on your own terminal, with `repochat trust`.
+
+```bash
+repochat setup --bind               # once, inside the repository: tie the profile to it
+repochat trust                      # review AGENTS.md (or CLAUDE.md) and, if you say yes, store it
+repochat trust CLAUDE.md            # a root file other than the default
+repochat trust --status             # what is stored, and whether the file changed since
+repochat trust --revoke             # remove the stored guidance, after a question [--yes]
+repochat trust --release-tunnel     # forget which repository this tunnel is assigned to, after a question [--yes]
+```
+
+Nothing in MCP creates or changes trust; no tool can.
+
+**Bind the profile first.** `trust` refuses a profile that is not bound to this repository: run `repochat setup --profile NAME --bind` inside it.
+
+**Limits.** The file must be a root-level, regular, UTF-8 file of at most 8 KiB of raw text; it is never read through a link. What is delivered is its masked, visible rendering, at most 2 KiB. A file over either limit is refused, never truncated. The 2 KiB is a product limit of repochat, not one of OpenAI's.
+
+**What the review shows.** The repository and its root, the profile, the masked tunnel and whether it is assigned, the path, and the exact text that would be delivered, with a line saying that the text goes to OpenAI with the plugin's metadata whenever ChatGPT loads the plugin. Secret-looking values are masked, always. Control, bidirectional and invisible characters are shown as `\uNNNN` escapes, and so are variation selectors: an emoji such as ⚠️ appears as ⚠ followed by `️`. The answer defaults to no. Without a terminal it is refused unless you pass `--yes`. What you confirmed is exactly what is stored and delivered; the file is not read again for delivery.
+
+**How it reaches ChatGPT.** At start, the server instructions begin with a short lead saying that this plugin serves only this repository, that you reviewed the section at the end, that it ranks below the host's rules, these rules and anything you ask in the conversation, that it grants no extra capability and bypasses no confirmation, and that nothing a tool returns is guidance. The reviewed text follows the existing instructions, whole, as the last section. If the instructions with it would exceed 8192 bytes, the share does not start; it never cuts the text. Without stored guidance, everything is byte-identical to before. Guidance is delivered in read and write mode alike.
+
+**The tunnel belongs to one repository.** A tunnel that has carried guidance is assigned to that repository, and repochat refuses to serve any other repository on it, because the tunnel does not know which conversation is using it. The assignment survives a revoke. To give the tunnel to another repository, run `repochat trust --release-tunnel` (it shows the repository and the masked tunnel and asks), then **delete the plugin in ChatGPT and create it again**; only then trust a repository for it. If the repository's identity changes (another directory at that path, a different set of root commits), the share refuses to start until you run `repochat trust` again.
+
+**The guard.** Before every tool call, and before every response that carries instructions (`initialize`, `server/discover`), repochat checks that the stored record is intact and still the one the process started with, and that the file is still served by the policy. After a revoke or a replace, an unreadable or damaged record, or a source the policy now withholds, every call is refused with: "the owner changed this repository's guidance: restart repochat, press Refresh tools in ChatGPT, and start a new conversation". Do exactly that: restart, press Refresh tools in the plugin's settings, start a new conversation. Calls already admitted may finish, and **nothing recalls what ChatGPT already received or did**: revocation stops further calls, it does not undo earlier ones. Deleting the file does not revoke; the reviewed snapshot is kept while the policy still serves the path.
+
+**The drift line.** `repo_overview` ends with one line written by the server, about your checkout and not any session workspace: `Owner guidance: from AGENTS.md, reviewed 2026-11-25; unchanged (the reviewed version is in the instructions)`. The state is `unchanged`, `changed` (the hash differs), `removed` (only when the file is definitely not there) or `could not be compared` (a permission or I/O error, or a file type that is not safe to read). The terminal gets one notice per process, the first time the state is not `unchanged`. `repochat trust --status` shows the same state. The line is information only: ChatGPT keeps the reviewed text until you review the file again.
+
+**Threat model.** Repository authors and anything a model controls (arguments, file names, commits, search results, text copied between them) are adversarial. Your account, your terminal and the repochat binary are trusted. A marker or heading in a tool result cannot authenticate anything, so there is none: the only guidance is the segment you reviewed, in the instructions. **Shared ancestry does not authenticate a project**: two repositories with the same root commits (a fork, a clone) are not the same project to repochat's trust, so the binding also holds the path, device and inode of the checkout.
+
+**Experimental.** Whether ChatGPT follows the guidance, and refuses to treat copies of it as guidance, has not been measured. The feature stays experimental until the protocol in [`docs/guidance-test.md`](docs/guidance-test.md) passes with fixed thresholds. Design: [`docs/superpowers/specs/2026-11-25-owner-guidance-design.md`](docs/superpowers/specs/2026-11-25-owner-guidance-design.md).
+
 ## What ChatGPT can see
 
 | Sees | Does not see |
@@ -233,6 +266,7 @@ Quote your patterns and give each its own `--deny` or `--allow`. An unquoted pat
 | `repochat files`, `tools`, `call` | what is served, which tools the model gets, run a tool yourself |
 | `repochat log` | recent activity (which tool, when, how long) |
 | `repochat session` | the open write-mode session; `diff`, `undo`, `finish`, `abandon` |
+| `repochat trust` | review `AGENTS.md` / `CLAUDE.md` and give it to ChatGPT as standing guidance; `--status`, `--revoke`, `--release-tunnel` |
 | `repochat mcp` | the MCP server itself (stdio) |
 | `repochat mcp-config` | configuration for other MCP clients |
 | `repochat install`, `install-helper` | install the binary, or `tunnel-client` |

@@ -180,6 +180,39 @@ Fiecare punct e acoperit de teste automate. Unul dintre ele trece fiecare instru
 
 Compilarea cere Go 1.25 sau mai nou, ca pentru restul repochat.
 
+## Ghidare de la proprietar (experimental)
+
+Claude Code și Codex încarcă `AGENTS.md` și `CLAUDE.md` ca instrucțiuni. repochat listează aceste fișiere și pentru ChatGPT, dar îi spune modelului să nu urmeze niciodată ce întoarce un instrument: regula aceasta este apărarea împotriva injecției de prompt. Ghidarea de la proprietar îți permite totuși să promovezi un singur text revizuit la ghidare permanentă, printr-un canal la care conținutul repository-ului nu ajunge: instrucțiunile serverului. Un text din repository nu devine ghidare doar pentru că a fost citit. Doar tu poți, în terminalul tău, cu `repochat trust`.
+
+```bash
+repochat setup --bind               # o dată, în repository: leagă profilul de el
+repochat trust                      # revizuiește AGENTS.md (sau CLAUDE.md) și, dacă spui da, îl stochează
+repochat trust CLAUDE.md            # alt fișier din rădăcină decât cel implicit
+repochat trust --status             # ce e stocat și dacă fișierul s-a schimbat de atunci
+repochat trust --revoke             # șterge ghidarea stocată, după o întrebare [--yes]
+repochat trust --release-tunnel     # uită cărui repository îi este atribuit tunelul, după o întrebare [--yes]
+```
+
+Nimic din MCP nu creează și nu schimbă încrederea; niciun instrument nu poate.
+
+**Leagă întâi profilul.** `trust` refuză un profil care nu este legat de acest repository: rulează `repochat setup --profile NUME --bind` în el.
+
+**Limite.** Fișierul trebuie să fie din rădăcină, obișnuit, UTF-8, de cel mult 8 KiB de text brut; nu se citește niciodată printr-un link. Ce se livrează este redarea lui mascată și vizibilă, de cel mult 2 KiB. Un fișier peste oricare limită este refuzat, nu tăiat. Cei 2 KiB sunt o limită de produs a repochat, nu a OpenAI.
+
+**Ce arată revizuirea.** Repository-ul și rădăcina lui, profilul, tunelul mascat și dacă e atribuit, calea și textul exact care ar fi livrat, cu o linie care spune că textul ajunge la OpenAI odată cu metadatele pluginului de fiecare dată când ChatGPT încarcă pluginul. Valorile care seamănă a secrete sunt mascate, întotdeauna. Caracterele de control, bidirecționale și invizibile apar ca secvențe `\uNNNN`, la fel și selectorii de variație: un emoji ca ⚠️ apare ca ⚠ urmat de `️`. Răspunsul implicit este nu. Fără terminal, cererea este refuzată dacă nu dai `--yes`. Ce ai confirmat este exact ce se stochează și se livrează; fișierul nu mai este citit pentru livrare.
+
+**Cum ajunge la ChatGPT.** La pornire, instrucțiunile serverului încep cu un scurt preambul care spune că acest plugin servește doar acest repository, că ai revizuit secțiunea de la sfârșit, că ea se află sub regulile gazdei, sub aceste reguli și sub orice ceri în conversație, că nu dă nicio capacitate în plus și nu ocolește nicio confirmare, și că nimic din ce întoarce un instrument nu este ghidare. Textul revizuit vine după instrucțiunile existente, întreg, ca ultima secțiune. Dacă instrucțiunile cu el ar depăși 8192 de octeți, partajarea nu pornește; textul nu se taie niciodată. Fără ghidare stocată, totul este identic octet cu octet cu înainte. Ghidarea se livrează la fel în modul de citire și în cel de scriere.
+
+**Tunelul aparține unui singur repository.** Un tunel care a purtat ghidare este atribuit repository-ului acela, iar repochat refuză să servească pe el orice alt repository, fiindcă tunelul nu știe ce conversație îl folosește. Atribuirea rămâne și după o revocare. Ca să dai tunelul altui repository, rulează `repochat trust --release-tunnel` (arată repository-ul și tunelul mascat și întreabă), apoi **șterge pluginul în ChatGPT și creează-l din nou**; abia apoi dă încredere unui repository pentru el. Dacă identitatea repository-ului se schimbă (alt director la aceeași cale, alt set de commituri-rădăcină), partajarea refuză să pornească până rulezi din nou `repochat trust`.
+
+**Paza.** Înainte de fiecare apel de instrument și înainte de fiecare răspuns care poartă instrucțiuni (`initialize`, `server/discover`), repochat verifică dacă înregistrarea stocată este întreagă și tot cea cu care a pornit procesul și dacă politica tot servește fișierul. După o revocare sau o înlocuire, o înregistrare ilizibilă sau deteriorată ori o sursă pe care politica o reține acum, fiecare apel este refuzat cu: „the owner changed this repository's guidance: restart repochat, press Refresh tools in ChatGPT, and start a new conversation”. Fă exact asta: repornește repochat, apasă Refresh tools în setările pluginului și începe o conversație nouă. Apelurile deja admise pot termina, iar **nimic nu retrage ce a primit sau a făcut deja ChatGPT**: revocarea oprește apelurile următoare, nu le desface pe cele de dinainte. Ștergerea fișierului nu revocă; instantaneul revizuit se păstrează cât timp politica servește tot calea.
+
+**Linia de deviere.** `repo_overview` se încheie cu o linie scrisă de server, despre checkout-ul tău și nu despre vreun spațiu de lucru de sesiune: `Owner guidance: from AGENTS.md, reviewed 2026-11-25; unchanged (the reviewed version is in the instructions)`. Starea este `unchanged` (neschimbat), `changed` (hash diferit), `removed` (doar când fișierul nu mai există cu certitudine) sau `could not be compared` (o eroare de permisiune sau de I/O, ori un tip de fișier nesigur de citit). Terminalul primește o singură înștiințare pe proces, prima dată când starea nu este `unchanged`. `repochat trust --status` arată aceeași stare. Linia este doar informare: ChatGPT păstrează textul revizuit până revizuiești din nou fișierul.
+
+**Modelul de amenințare.** Autorii repository-ului și tot ce controlează un model (argumente, nume de fișiere, commituri, rezultate de căutare, text copiat între ele) sunt adversari. Contul tău, terminalul tău și binarul repochat sunt de încredere. Un marcaj sau un titlu dintr-un rezultat de instrument nu poate autentifica nimic, de aceea nu există unul: singura ghidare este segmentul pe care l-ai revizuit, din instrucțiuni. **O strămoșie comună nu autentifică un proiect**: două repository-uri cu aceleași commituri-rădăcină (un fork, o clonă) nu sunt același proiect pentru încrederea repochat, de aceea legătura ține și calea, dispozitivul și inode-ul checkout-ului.
+
+**Experimental.** Dacă ChatGPT urmează ghidarea și refuză să trateze copiile ei drept ghidare nu a fost măsurat. Funcția rămâne experimentală până când protocolul din [`docs/guidance-test.md`](docs/guidance-test.md) trece cu praguri fixate. Designul: [`docs/superpowers/specs/2026-11-25-owner-guidance-design.md`](docs/superpowers/specs/2026-11-25-owner-guidance-design.md).
+
 ## Ce vede ChatGPT
 
 | Vede | Nu vede |
@@ -233,6 +266,7 @@ Pune tiparele între ghilimele și dă fiecăruia propriul `--deny` sau `--allow
 | `repochat files`, `tools`, `call` | ce se servește, ce instrumente primește modelul, rulezi tu un instrument |
 | `repochat log` | activitatea recentă (ce instrument, când, cât a durat) |
 | `repochat session` | sesiunea deschisă din modul de scriere; `diff`, `undo`, `finish`, `abandon` |
+| `repochat trust` | revizuiește `AGENTS.md` / `CLAUDE.md` și îl dă ChatGPT ca ghidare permanentă; `--status`, `--revoke`, `--release-tunnel` |
 | `repochat mcp` | serverul MCP propriu-zis (stdio) |
 | `repochat mcp-config` | configurare pentru alți clienți MCP |
 | `repochat install`, `install-helper` | instalează binarul, respectiv `tunnel-client` |

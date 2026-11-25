@@ -1,6 +1,6 @@
 # Owner-reviewed guidance (AGENTS.md / CLAUDE.md): design
 
-Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-25 · status: **agreed with Codex CLI over three rounds; experimental; not built**
+Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-25 · status: **agreed with Codex CLI over three rounds; built on 2026-11-25; experimental; not yet measured in ChatGPT**
 
 Item 3 of [`2026-11-25-cli-parity-design.md`](2026-11-25-cli-parity-design.md). The debate is in [`docs/design/guidance/`](../../design/guidance/). Codex signed in round 3: "I sign the cumulative design for experimental implementation." Anything marked "my call" is the author's.
 
