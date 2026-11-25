@@ -520,7 +520,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	hostileIDs := []string{"..", "../..", "../../etc/passwd", "/etc/passwd", "short", "ab\x00cdefghij", "abcdefgh\nxyz",
 		"op id with spaces", "-rf --all", "abcdef1; rm -rf /", strings.Repeat("a", 65), strings.Repeat("a", 10<<10)}
 	hostileExpect := []string{"..", "../" + first, "/etc/passwd", "abc", "abcdef1\x00", "xyz1234", "abcdef1 --all", "HEAD", "main",
-		strings.Repeat("g", 40), strings.Repeat("a", 41), strings.Repeat("a", 10<<10)}
+		strings.Repeat("g", 40), strings.Repeat("a", 65), strings.Repeat("a", 10<<10)}
 	for _, c := range []struct {
 		name string
 		args map[string]any

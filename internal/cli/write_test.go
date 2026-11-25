@@ -892,6 +892,37 @@ func TestSessionUndoNeedsConfirmation(t *testing.T) {
 	if got := gitOut(t, ws[0], "rev-parse", "HEAD"); got != head {
 		t.Errorf("head moved without confirmation")
 	}
+	for _, f := range []string{"notes.md", "other.md"} {
+		if _, err := os.Stat(filepath.Join(ws[0], f)); err != nil {
+			t.Errorf("%s changed without confirmation: %v", f, err)
+		}
+	}
+	if got := gitOut(t, ws[0], "status", "--porcelain"); got != "" {
+		t.Errorf("workspace changed without confirmation:\n%s", got)
+	}
+}
+
+func TestSessionUndoToTheCurrentCheckpointAndMisplacedArgument(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	a := applyTwoNotes(t, d)
+	ws := sessionWorkspaces(t)
+	head := gitOut(t, ws[0], "rev-parse", "HEAD")
+	out, errText, code := runCLI("session", "undo", head[:12], "--yes", "--root", e.repo)
+	if code != 0 || !strings.Contains(out+errText, "nothing needed restoring") {
+		t.Errorf("undo to the current checkpoint: %d %s %s", code, out, errText)
+	}
+	if got := gitOut(t, ws[0], "rev-parse", "HEAD"); got != head {
+		t.Error("an undo to the current checkpoint moved the head")
+	}
+	st, _ := stateDir()
+	log, _ := os.ReadFile(filepath.Join(st, auditFile))
+	if strings.Contains(string(log), "undo to") {
+		t.Errorf("a no-op undo was recorded:\n%s", log)
+	}
+	_, errText, code = runCLI("session", "undo", "--yes", a, "--root", e.repo)
+	if code != 2 || !strings.Contains(errText, "right after undo") {
+		t.Errorf("checkpoint after an option: %d %s", code, errText)
+	}
 }
 
 func TestSessionUndoNeedsACheckpoint(t *testing.T) {

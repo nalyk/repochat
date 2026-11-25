@@ -87,7 +87,7 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 
 	opID := mcp.Param{Name: "operation_id", Kind: S, MaxLen: 64,
 		Desc: "An id you choose for this call, 8–64 letters, digits, `.`, `_` or `-`, new for every call. If the result does not arrive, call again with the same operation_id and the same arguments: work already done is reported, not repeated."}
-	expected := mcp.Param{Name: "expected_checkpoint", Kind: S, MaxLen: 40,
+	expected := mcp.Param{Name: "expected_checkpoint", Kind: S, MaxLen: 64,
 		Desc: "The checkpoint the session is at, as the last session_status, start_session or apply_changes result showed it. Refused if the session has moved since."}
 	// finish_session's is required, but the handler enforces that: the server
 	// validates the schema before the handler runs, and a schema-level

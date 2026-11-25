@@ -118,6 +118,7 @@ unless you start it with --write.
   --confirm-merge          with --write: finish_session does not merge; you merge in the terminal
   repochat session diff            what finish would land, or one checkpoint [--checkpoint ID] [--stat]
   repochat session                 the open session: branch, checkpoints, changed files
+  repochat session undo ID         restore a checkpoint as a new one, after asking [--yes]
   repochat session finish          merge it into your branch, after asking [--squash] [--message TEXT] [--yes]
   repochat session abandon         remove its workspace; the branch is kept [--delete-branch]
   repochat tools --write / call --write   the write-mode tools, from the terminal

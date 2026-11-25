@@ -5,6 +5,7 @@ import (
 	"errors"
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"sync"
@@ -191,7 +192,7 @@ func TestExpectedCheckpointIsAcceptedByEveryCallWhenTheSessionIsThere(t *testing
 }
 
 func TestExpectedCheckpointRejectsMalformed(t *testing.T) {
-	for _, bad := range []string{"zzzzzzz", "abc", strings.Repeat("a", 41), "0123456 ", "0x01234567"} {
+	for _, bad := range []string{"zzzzzzz", "abc", strings.Repeat("a", 65), "0123456 ", "0x01234567"} {
 		for _, k := range callKinds {
 			t.Run(fmt.Sprintf("%s/%q", k.name, bad), func(t *testing.T) {
 				m := newMovedSession(t)
@@ -240,12 +241,12 @@ func TestExpectedCheckpointRejectsMalformed(t *testing.T) {
 }
 
 func TestExpectedCheckpointPatterns(t *testing.T) {
-	for _, ok := range []string{"0123456", "abcdef0123456789", "ABCDEF0", strings.Repeat("f", 40)} {
+	for _, ok := range []string{"0123456", "abcdef0123456789", "ABCDEF0", strings.Repeat("f", 40), strings.Repeat("f", 64)} {
 		if !ExpectRe.MatchString(ok) {
 			t.Errorf("ExpectRe refuses %q", ok)
 		}
 	}
-	for _, bad := range []string{"", "abc", "012345", "zzzzzzz", strings.Repeat("a", 41), "0123456\n"} {
+	for _, bad := range []string{"", "abc", "012345", "zzzzzzz", strings.Repeat("a", 65), "0123456\n"} {
 		if ExpectRe.MatchString(bad) {
 			t.Errorf("ExpectRe accepts %q", bad)
 		}
@@ -832,5 +833,57 @@ func TestFinishRefusedByTheMergeCanBeRetried(t *testing.T) {
 	os.Remove(filepath.Join(c.f.dir, "c.txt"))
 	if fin, err := c.s.FinishCall(bg, call, false, ""); err != nil || fin.Replayed {
 		t.Fatalf("retry: %+v, %v", fin, err)
+	}
+}
+
+func TestExpectedCheckpointMatchesA64HexHead(t *testing.T) {
+	head := strings.Repeat("ab12", 16)
+	for _, expect := range []string{head, head[:12], head[:7], strings.ToUpper(head)} {
+		if err := validateCall(Call{Expect: expect}); err != nil {
+			t.Errorf("validateCall(%q): %v", expect, err)
+		}
+		if err := checkExpected(head, expect); err != nil {
+			t.Errorf("checkExpected refuses %q: %v", expect, err)
+		}
+	}
+	if err := checkExpected(head, strings.Repeat("c", 64)); err == nil {
+		t.Error("checkExpected accepts another 64-hex checkpoint")
+	}
+}
+
+func TestExpectedFullHeadInASHA256Repository(t *testing.T) {
+	dir := newDirPath(t)
+	t.Setenv("HOME", t.TempDir())
+	cmd := exec.Command("git", "init", "-q", "--object-format=sha256", "-b", "main", dir)
+	if out, err := cmd.CombinedOutput(); err != nil {
+		t.Skipf("this git has no sha256 repositories: %v %s", err, out)
+	}
+	gitCmd(t, dir, "config", "user.name", "Ada")
+	gitCmd(t, dir, "config", "user.email", "ada@example.com")
+	write(t, dir, "notes.txt", "hello\n")
+	commit(t, dir, "start")
+	state, _ := filepath.EvalSymlinks(t.TempDir())
+	owner := open(t, dir, Options{})
+	s, err := NewSessions(owner, SessionOptions{StateDir: filepath.Join(state, "sessions")})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s.Close()
+	info, err := s.Start(bg, false)
+	if err != nil {
+		t.Fatalf("Start: %v", err)
+	}
+	if len(info.Head) != 64 {
+		t.Fatalf("head %q is not 64 characters", info.Head)
+	}
+	for i, cut := range []int{64, 12} {
+		st, err := s.Status(bg)
+		if err != nil {
+			t.Fatal(err)
+		}
+		expect := st.Info.Head[:cut]
+		if _, err := s.ApplyCall(bg, Call{Expect: expect}, "", []Change{{Op: "create", Path: fmt.Sprintf("n%d.txt", i), Text: "x\n"}}, "add"); err != nil {
+			t.Errorf("ApplyCall with expect %q: %v", expect, err)
+		}
 	}
 }
