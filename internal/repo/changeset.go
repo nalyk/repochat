@@ -38,7 +38,7 @@ const (
 
 // Change is one operation of a change set.
 type Change struct {
-	Op     string `json:"op"`      // replace | insert | delete | create | remove | move
+	Op     string `json:"op"`      // replace | insert | delete | create | remove | move | format
 	Path   string `json:"path"`    //
 	From   string `json:"from"`    // anchor "<line>:<hash>": first line of a range (replace, delete)
 	To     string `json:"to"`      // anchor: last line of the range; empty = same as From
@@ -166,6 +166,7 @@ var (
 		"create":  set("text"),
 		"remove":  set("file_tag"),
 		"move":    set("to_path"),
+		"format":  set(),
 	}
 )
 
@@ -197,7 +198,7 @@ func checkAnchor(name, a string) error {
 func checkShape(c Change) error {
 	takes, ok := opTakes[c.Op]
 	if !ok {
-		return fmt.Errorf("unknown op %q (replace, insert, delete, create, remove or move)", SanitizeLine(c.Op))
+		return fmt.Errorf("unknown op %q (replace, insert, delete, create, remove, move or format)", SanitizeLine(c.Op))
 	}
 	if c.Path == "" {
 		return fmt.Errorf("%s needs a path", c.Op)
@@ -252,6 +253,10 @@ func checkShape(c Change) error {
 	case "move":
 		if c.ToPath == "" {
 			return errors.New("move needs to_path")
+		}
+	case "format":
+		if !strings.HasSuffix(c.Path, ".go") {
+			return errors.New("format works on .go files only")
 		}
 	}
 	if strings.Contains(strings.ReplaceAll(c.Text, "\r\n", ""), "\r") {
@@ -349,6 +354,7 @@ type changeWork struct {
 	edits   map[string][]int // path → indexes of its replace/insert/delete
 	whole   map[string]int   // path → index of its create, remove or move
 	targets map[string]int   // move target → index of the move
+	formats map[string]int   // path → index of its format
 	paths   []string         // every touched path, sorted
 }
 
@@ -383,7 +389,7 @@ func gather(changes []Change) (*changeWork, error) {
 	if text > maxChangeText {
 		return nil, refusal("", "the change set carries %d bytes of new text; at most 1 MiB (%d bytes) is allowed", text, maxChangeText)
 	}
-	w := &changeWork{changes: changes, edits: map[string][]int{}, whole: map[string]int{}, targets: map[string]int{}}
+	w := &changeWork{changes: changes, edits: map[string][]int{}, whole: map[string]int{}, targets: map[string]int{}, formats: map[string]int{}}
 	for i, c := range changes {
 		p, err := plainPath(c.Path)
 		if err != nil {
@@ -392,6 +398,12 @@ func gather(changes []Change) (*changeWork, error) {
 		switch c.Op {
 		case "replace", "insert", "delete":
 			w.edits[p] = append(w.edits[p], i)
+			continue
+		case "format":
+			if j, dup := w.formats[p]; dup {
+				return nil, refusal(p, "operations %d and %d both format it; at most one format per path", j+1, i+1)
+			}
+			w.formats[p] = i
 			continue
 		}
 		if j, dup := w.whole[p]; dup {
@@ -422,8 +434,19 @@ func gather(changes []Change) (*changeWork, error) {
 			return nil, refusal(p, "operation %d edits the lines of a path that operation %d moves a file onto; anchors refer to the files before the change set", idx[0]+1, i+1)
 		}
 	}
+	for p, i := range w.formats {
+		if j, ok := w.whole[p]; ok {
+			if changes[j].Op == "create" {
+				return nil, refusal(p, "operation %d formats a file that operation %d creates; write the new file already formatted", i+1, j+1)
+			}
+			return nil, refusal(p, "operation %d formats it and operation %d %ss it; a file that is removed or moved is not formatted", i+1, j+1, changes[j].Op)
+		}
+		if j, ok := w.targets[p]; ok {
+			return nil, refusal(p, "operation %d formats a path that operation %d moves a file onto; a file that is removed or moved is not formatted", i+1, j+1)
+		}
+	}
 	seen := map[string]bool{}
-	for _, m := range []map[string]int{w.whole, w.targets} {
+	for _, m := range []map[string]int{w.whole, w.targets, w.formats} {
 		for p := range m {
 			seen[p] = true
 		}
@@ -655,7 +678,8 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 		if w.isNew(p) {
 			continue
 		}
-		needText := len(w.edits[p]) > 0
+		_, formatted := w.formats[p]
+		needText := len(w.edits[p]) > 0 || formatted
 		if i, ok := w.whole[p]; ok && changes[i].Op == "remove" {
 			needText = true
 		}
@@ -709,7 +733,7 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 			if len(lines) > 0 {
 				f.Regions = [][2]int{{0, len(lines)}}
 			}
-			if err := r.checkContent(p, nil, after, nil, true, plan); err != nil {
+			if err := r.checkContent(p, nil, after, nil, true, false, plan); err != nil {
 				return nil, err
 			}
 			add(f)
@@ -730,7 +754,38 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 			if isWhole { // a move
 				to = c.ToPath
 			}
-			if idx := w.edits[p]; len(idx) > 0 {
+			fi, formatted := w.formats[p]
+			if idx := w.edits[p]; formatted {
+				// format runs last: the other operations are applied first,
+				// then gofmt, and the file's diff is one hunk from the
+				// original to the final content.
+				mid := src.data
+				if len(idx) > 0 {
+					e, err := r.editFile(ctx, key, p, src, changes, idx)
+					if err != nil {
+						return nil, err
+					}
+					mid = e.after
+				}
+				formattedAfter, err := r.formatGo(ctx, p, mid)
+				if err != nil {
+					return nil, err
+				}
+				if len(idx) == 0 && bytes.Equal(formattedAfter, src.data) {
+					return nil, refusal(p, "operation %d: already formatted as gofmt formats it; nothing to apply", fi+1)
+				}
+				e := wholeEdit(src, formattedAfter)
+				after = formattedAfter
+				if e.a != e.b || len(e.lines) > 0 {
+					regions = [][2]int{{e.a, e.a + len(e.lines)}}
+					plan.Added += len(e.lines)
+					plan.Removed += e.b - e.a
+					hunks = unifiedHunks(src.shown, []lineEdit{e})
+				}
+				if err := r.checkContent(p, src.data, after, nil, false, true, plan); err != nil {
+					return nil, err
+				}
+			} else if len(idx) > 0 {
 				e, err := r.editFile(ctx, key, p, src, changes, idx)
 				if err != nil {
 					return nil, err
@@ -739,7 +794,7 @@ func (r *Repo) planChanges(ctx context.Context, changes []Change) (*Plan, error)
 				plan.Added += e.added
 				plan.Removed += e.removed
 				hunks = unifiedHunks(src.shown, e.edits)
-				if err := r.checkContent(to, src.data, after, e.lockedAfter, isWhole && syntaxKind(p) != syntaxKind(to), plan); err != nil {
+				if err := r.checkContent(to, src.data, after, e.lockedAfter, isWhole && syntaxKind(p) != syntaxKind(to), false, plan); err != nil {
 					return nil, err
 				}
 			} else if isWhole {
@@ -1181,8 +1236,9 @@ var (
 // conflict markers (see sideMarkerRe), and the syntax gate; a gofmt difference is a warning.
 // before is nil for a new file; gateAsNew judges the syntax as for a new
 // file. lockedAfter marks lines of after that hold a value the model was
-// not shown.
-func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]bool, gateAsNew bool, plan *Plan) error {
+// not shown. formatted is set for a file the change set runs gofmt on: the
+// gofmt warning is then not given.
+func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]bool, gateAsNew, formatted bool, plan *Plan) error {
 	if len(after) > maxPlannedFile {
 		return refusal(p, "would be %d bytes; a resulting file may be at most 2 MiB (%d bytes)", len(after), maxPlannedFile)
 	}
@@ -1221,12 +1277,66 @@ func (r *Repo) checkContent(p string, before, after []byte, lockedAfter map[int]
 	}
 	// gofmt aligns comments by the length of neighbouring lines, so on a
 	// file holding a masked value the warning would measure the value.
-	if syntaxKind(p) == "go" && len(lockedAfter) == 0 && goParse(p, after) == nil {
-		if formatted, err := format.Source(after); err == nil && !bytes.Equal(formatted, after) {
+	if !formatted && syntaxKind(p) == "go" && len(lockedAfter) == 0 && goParse(p, after) == nil {
+		if want, err := format.Source(after); err == nil && !bytes.Equal(want, after) {
 			plan.Warnings = append(plan.Warnings, fmt.Sprintf("%s is not formatted as gofmt would format it; it was left as written", Sanitize(p)))
 		}
 	}
 	return nil
+}
+
+// formatGo runs gofmt on the final content of a file that has a format
+// operation. It refuses what gofmt could damage or cannot handle: CRLF line
+// endings, a byte order mark, a masked value anywhere in the file (gofmt
+// aligns by line length and could move it), and code that does not parse.
+func (r *Repo) formatGo(ctx context.Context, p string, content []byte) ([]byte, error) {
+	lines, bom := splitRaw(content)
+	if bom != "" {
+		return nil, refusal(p, "has a byte order mark; gofmt would drop it, so format it by hand")
+	}
+	for _, l := range lines {
+		if l.term == "\r\n" {
+			return nil, refusal(p, "has CRLF line endings; gofmt would change every line, so format it by hand")
+		}
+	}
+	locked, err := r.lockedLines(ctx, content)
+	if err != nil {
+		return nil, err
+	}
+	if len(locked) > 0 {
+		return nil, refusal(p, "holds a masked value; gofmt could move it: format it by hand")
+	}
+	out, err := format.Source(content)
+	if err != nil {
+		return nil, refusal(p, "gofmt cannot format it: %s", SanitizeLine(goMessage(err.Error())))
+	}
+	// Nor may gofmt's output mask a line: a value must stay as it was.
+	if locked, err := r.lockedLines(ctx, out); err != nil {
+		return nil, err
+	} else if len(locked) > 0 {
+		return nil, refusal(p, "holds a masked value after gofmt; format it by hand")
+	}
+	return out, nil
+}
+
+// wholeEdit is the one edit that turns src into after, once the lines they
+// share at both ends are trimmed away.
+func wholeEdit(src *source, after []byte) lineEdit {
+	old, _ := splitRaw(src.data)
+	now, _ := splitRaw(after)
+	pre := 0
+	for pre < len(old) && pre < len(now) && old[pre] == now[pre] {
+		pre++
+	}
+	suf := 0
+	for suf < len(old)-pre && suf < len(now)-pre && old[len(old)-1-suf] == now[len(now)-1-suf] {
+		suf++
+	}
+	e := lineEdit{a: pre, b: len(old) - suf}
+	for _, l := range now[pre : len(now)-suf] {
+		e.lines = append(e.lines, l.text)
+	}
+	return e
 }
 
 // syntaxKind names the format the syntax gate checks for a path: "go",

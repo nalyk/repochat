@@ -4,6 +4,7 @@ import (
 	"encoding/json"
 	"errors"
 	"fmt"
+	"go/format"
 	"os"
 	"os/exec"
 	"path/filepath"
@@ -1040,4 +1041,116 @@ func TestLongRangeNeedsTheCurrentFileTag(t *testing.T) {
 	// A locked line in the range is still the first thing said.
 	c2 := newApplyFixture(t, map[string]string{"s.txt": "a\naws_key = \"" + fakeAWSKey + "\"\nb\n"}, nil)
 	c2.refuse(t, "line 2 holds a value you were not shown", Change{Op: "delete", Path: "s.txt", From: c2.anchor(t, "s.txt", 1), To: c2.anchor(t, "s.txt", 3)})
+}
+
+func TestFormatAloneReformatsAGoFile(t *testing.T) {
+	orig := "package x\n\nfunc a() {}\n\nfunc f( ){}\n\nfunc z() {}\n"
+	c := newChangeFixture(t, map[string]string{"x.go": orig}, Options{})
+	plan := c.accept(t, Change{Op: "format", Path: "x.go"})
+	want, err := format.Source([]byte(orig))
+	if err != nil {
+		t.Fatal(err)
+	}
+	if got := afterOf(t, plan, "x.go"); got != string(want) {
+		t.Errorf("after %q, want %q", got, want)
+	}
+	if len(plan.Warnings) != 0 {
+		t.Errorf("warnings %q", plan.Warnings)
+	}
+	f := plannedFile(t, plan, "x.go")
+	if len(f.Regions) != 1 || f.Regions[0] != [2]int{4, 5} {
+		t.Errorf("regions %v, want [[4 5]]", f.Regions)
+	}
+	if plan.Added != 1 || plan.Removed != 1 {
+		t.Errorf("added %d removed %d", plan.Added, plan.Removed)
+	}
+	if !strings.Contains(plan.Diff, "-func f( ){}\n+func f() {}\n") {
+		t.Errorf("diff %q", plan.Diff)
+	}
+}
+
+func TestFormatAfterEditsInTheSameSet(t *testing.T) {
+	c := newChangeFixture(t, map[string]string{"x.go": "package x\n\nfunc a() {}\n\nfunc  b( ){}\n\nfunc z() {}\n"}, Options{})
+	plan := c.accept(t,
+		Change{Op: "format", Path: "x.go"},
+		Change{Op: "replace", Path: "x.go", From: c.anchor(t, "x.go", 3), Text: "func  a( ){ return }"},
+	)
+	got := afterOf(t, plan, "x.go")
+	if want := "package x\n\nfunc a() { return }\n\nfunc b() {}\n\nfunc z() {}\n"; got != want {
+		t.Errorf("after %q, want %q", got, want)
+	}
+	if len(plan.Warnings) != 0 {
+		t.Errorf("warnings %q", plan.Warnings)
+	}
+	f := plannedFile(t, plan, "x.go")
+	if len(f.Regions) != 1 || f.Regions[0] != [2]int{2, 5} {
+		t.Errorf("regions %v, want [[2 5]]", f.Regions)
+	}
+	if plan.Added != 3 || plan.Removed != 3 {
+		t.Errorf("added %d removed %d", plan.Added, plan.Removed)
+	}
+	for _, want := range []string{"-func a() {}\n", "+func a() { return }\n", "-func  b( ){}\n", "+func b() {}\n"} {
+		if !strings.Contains(plan.Diff, want) {
+			t.Errorf("diff lacks %q: %q", want, plan.Diff)
+		}
+	}
+}
+
+func TestFormatWithEditsRefusesAMaskedFile(t *testing.T) {
+	orig := "package s\n\nvar k = \"" + fakeAWSKey + "\" // key\nfunc  f(){}\n"
+	c := newChangeFixture(t, map[string]string{"s.go": orig}, Options{})
+	c.refuse(t, "holds a masked value; gofmt could move it: format it by hand",
+		Change{Op: "insert", Path: "s.go", At: "end", Text: "var x = 1"},
+		Change{Op: "format", Path: "s.go"})
+	data, err := os.ReadFile(filepath.Join(c.ws.Root, "s.go"))
+	if err != nil || string(data) != orig {
+		t.Errorf("the file changed: %q %v", data, err)
+	}
+}
+
+func TestFormatRefusesCRLFBOMAndMaskedFiles(t *testing.T) {
+	files := map[string]string{
+		"crlf.go":   "package x\r\n\r\nfunc  f(){}\r\n",
+		"bom.go":    "\ufeffpackage x\n\nfunc  f(){}\n",
+		"masked.go": "package s\n\nvar k = \"" + fakeAWSKey + "\" // key\nfunc  f(){}\n",
+		"bad.go":    "package x\nfunc (\n",
+	}
+	c := newChangeFixture(t, files, Options{})
+	for _, tc := range []struct{ path, want string }{
+		{"crlf.go", "CRLF"},
+		{"bom.go", "byte order mark"},
+		{"masked.go", "holds a masked value; gofmt could move it: format it by hand"},
+		{"bad.go", "gofmt"},
+	} {
+		t.Run(tc.path, func(t *testing.T) {
+			c.refuse(t, tc.want, Change{Op: "format", Path: tc.path})
+			c.refuse(t, tc.want, Change{Op: "format", Path: tc.path}, Change{Op: "create", Path: "other.txt", Text: "x"})
+			data, err := os.ReadFile(filepath.Join(c.ws.Root, tc.path))
+			if err != nil || string(data) != files[tc.path] {
+				t.Errorf("the file changed: %q %v", data, err)
+			}
+		})
+	}
+}
+
+func TestFormatRefusesNonGoRemovedMovedAndRepeated(t *testing.T) {
+	c := newChangeFixture(t, map[string]string{"x.go": "package x\nfunc  f(){}\n", "n.txt": "a\n", "y.go": "package y\nfunc  f(){}\n"}, Options{})
+	c.refuse(t, ".go", Change{Op: "format", Path: "n.txt"})
+	c.refuse(t, "format", Change{Op: "format", Path: "x.go", Text: "x"})
+	c.refuse(t, "format", Change{Op: "format", Path: "x.go", From: "1:abc"})
+	c.refuse(t, "at most one", Change{Op: "format", Path: "x.go"}, Change{Op: "format", Path: "x.go"})
+	c.refuse(t, "format", Change{Op: "format", Path: "x.go"}, Change{Op: "remove", Path: "x.go", FileTag: c.tag(t, "x.go")})
+	c.refuse(t, "format", Change{Op: "format", Path: "x.go"}, Change{Op: "move", Path: "x.go", ToPath: "z.go"})
+	c.refuse(t, "format", Change{Op: "format", Path: "y.go"}, Change{Op: "move", Path: "x.go", ToPath: "y.go"})
+	c.refuse(t, "format", Change{Op: "format", Path: "new.go"}, Change{Op: "create", Path: "new.go", Text: "package n"})
+}
+
+func TestFormatOfAFormattedFileIsRefused(t *testing.T) {
+	c := newChangeFixture(t, map[string]string{"x.go": "package x\n\nfunc f() {}\n"}, Options{})
+	c.refuse(t, "already formatted as gofmt formats it; nothing to apply", Change{Op: "format", Path: "x.go"})
+	// With another operation the file is not "only" formatted: it is accepted.
+	plan := c.accept(t, Change{Op: "insert", Path: "x.go", At: "end", Text: "\nfunc g() {}"}, Change{Op: "format", Path: "x.go"})
+	if got := afterOf(t, plan, "x.go"); got != "package x\n\nfunc f() {}\n\nfunc g() {}\n" {
+		t.Errorf("after %q", got)
+	}
 }
