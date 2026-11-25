@@ -203,7 +203,7 @@ func (s *Sessions) UpdateCall(ctx context.Context, call Call) (*Applied, error) 
 	if err != nil {
 		return nil, err
 	}
-	if applied, err := s.replayOperation(ctx, chain, call); applied != nil || err != nil {
+	if applied, err := s.replayOperation(ctx, rec, chain, call); applied != nil || err != nil {
 		return applied, err
 	}
 	if err := checkExpected(head, call.Expect); err != nil {

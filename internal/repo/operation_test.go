@@ -287,7 +287,7 @@ func createC(c *changeFixture, call Call) (*Applied, error) {
 
 func TestOperationReplayReturnsTheSameCheckpoint(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
-	call := opCall("op-aaaa1111", "d1")
+	call := opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")
 	first, err := createC(c, call)
 	if err != nil {
 		t.Fatal(err)
@@ -310,11 +310,11 @@ func TestOperationReplayReturnsTheSameCheckpoint(t *testing.T) {
 
 func TestOperationReuseWithOtherArgumentsIsRefused(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
-	if _, err := createC(c, opCall("op-aaaa1111", "d1")); err != nil {
+	if _, err := createC(c, opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")); err != nil {
 		t.Fatal(err)
 	}
 	head := c.head(t)
-	_, err := c.s.ApplyCall(bg, opCall("op-aaaa1111", "d2"), "", []Change{{Op: "create", Path: "d.txt", Text: "D"}}, "D")
+	_, err := c.s.ApplyCall(bg, opCall("op-aaaa1111", "d2d2d2d2d2d2d2d2"), "", []Change{{Op: "create", Path: "d.txt", Text: "D"}}, "D")
 	if err == nil || !strings.Contains(err.Error(), "different call") {
 		t.Fatalf("got %v; want a refusal naming a different call", err)
 	}
@@ -325,7 +325,7 @@ func TestOperationReuseWithOtherArgumentsIsRefused(t *testing.T) {
 
 func TestOperationSurvivesRestart(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
-	call := opCall("op-aaaa1111", "d1")
+	call := opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")
 	first, err := createC(c, call)
 	if err != nil {
 		t.Fatal(err)
@@ -348,7 +348,7 @@ func TestOperationSurvivesRestart(t *testing.T) {
 func TestOperationReplayWinsOverExpect(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
 	before := c.head(t)
-	call := opCall("op-aaaa1111", "d1")
+	call := opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")
 	call.Expect = before[:12]
 	first, err := createC(c, call)
 	if err != nil {
@@ -385,7 +385,7 @@ func TestStoredPlanReplayWinsOverExpect(t *testing.T) {
 
 func TestConcurrentSameOperationAppliesOnce(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
-	call := opCall("op-aaaa1111", "d1")
+	call := opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")
 	res := make([]*Applied, 2)
 	errs := make([]error, 2)
 	var wg sync.WaitGroup
@@ -413,7 +413,7 @@ func TestConcurrentSameOperationAppliesOnce(t *testing.T) {
 func TestOperationFromAnAbandonedSessionIsNotReplayed(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
 	c.replaceLine(t, "a.txt", 1, "A")
-	call := opCall("op-aaaa1111", "d1")
+	call := opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")
 	changes := []Change{{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), To: c.anchor(t, "a.txt", 1), Text: "AA\n"}}
 	if _, err := c.s.ApplyCall(bg, call, "", changes, "AA"); err != nil {
 		t.Fatal(err)
@@ -450,7 +450,7 @@ func TestUndoAndUpdateCarryOperations(t *testing.T) {
 	first := c.head(t)
 	c.replaceLine(t, "b.txt", 1, "B")
 
-	undo := opCall("op-undo0001", "u1")
+	undo := opCall("op-undo0001", "a1a1a1a1a1a1a1a1")
 	u1, err := c.s.UndoToCall(bg, undo, first[:12])
 	if err != nil {
 		t.Fatal(err)
@@ -466,7 +466,7 @@ func TestUndoAndUpdateCarryOperations(t *testing.T) {
 
 	write(t, c.f.dir, "owner.txt", "owner\n")
 	commit(t, c.f.dir, "owner's own")
-	up := opCall("op-updt0001", "m1")
+	up := opCall("op-updt0001", "b1b1b1b1b1b1b1b1")
 	m1, err := c.s.UpdateCall(bg, up)
 	if err != nil || m1.Checkpoint.Kind != "update" {
 		t.Fatalf("update: %+v, %v", m1, err)
@@ -476,14 +476,14 @@ func TestUndoAndUpdateCarryOperations(t *testing.T) {
 	if err != nil || !m2.Replayed || m2.Checkpoint.ID != m1.Checkpoint.ID || c.head(t) != head {
 		t.Fatalf("update replay: %+v, %v", m2, err)
 	}
-	if _, err := c.s.UpdateCall(bg, opCall("op-updt0001", "other")); err == nil || !strings.Contains(err.Error(), "different call") {
+	if _, err := c.s.UpdateCall(bg, opCall("op-updt0001", "c0c0c0c0c0c0c0c0")); err == nil || !strings.Contains(err.Error(), "different call") {
 		t.Errorf("update with another digest: %v", err)
 	}
 }
 
 func TestCheckpointMessagesHideTheOperationTrailer(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
-	if _, err := createC(c, opCall("op-aaaa1111", "d1")); err != nil {
+	if _, err := createC(c, opCall("op-aaaa1111", "d1d1d1d1d1d1d1d1")); err != nil {
 		t.Fatal(err)
 	}
 	cp := c.checkpoints(t)[0]
@@ -500,22 +500,35 @@ func TestTwoTrailerCheckpointsStillParse(t *testing.T) {
 	for _, bad := range []string{
 		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: short d\n",
 		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111\n",
-		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1 extra\n",
-		"x\n\nMade-through: repochat\nRepochat-Kind: change\nOther: op-aaaa1111 d1\n",
-		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1\nMore: x\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1d1d1d1d1d1d1d1 extra\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nOther: op-aaaa1111 d1d1d1d1d1d1d1d1\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1d1d1d1d1d1d1d1\nMore: x\n",
 	} {
 		if k, _, _, _ := checkpointKind(bad); k != "unknown" {
 			t.Errorf("%q parsed as %s", bad, k)
 		}
 	}
-	// A commit made with the old message on a real session lists as change.
+	// A commit made with the old two-trailer message, on a real session.
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	old := gitCmd(t, c.ws.Root, "commit-tree", "-p", "HEAD", "-m", "old\n\nMade-through: repochat\nRepochat-Kind: change", "HEAD^{tree}")
+	gitCmd(t, c.ws.Root, "update-ref", "refs/heads/"+c.branch(t), old)
+	cps := c.checkpoints(t)
+	if cps[0].Kind != "change" || cps[0].Message != "old" || cps[0].Operation != "" {
+		t.Errorf("%+v", cps[0])
+	}
 	_, msg := commitMessage("old", "change", Call{})
 	if strings.Contains(string(msg), "Operation") {
 		t.Errorf("a call without an operation wrote %q", msg)
 	}
-	c.apply(t, "old", Change{Op: "create", Path: "c.txt", Text: "C"})
-	if k := c.checkpoints(t)[0].Kind; k != "change" {
-		t.Errorf("kind %s", k)
+}
+
+func TestDigestMustBeSixteenHexCharacters(t *testing.T) {
+	for _, bad := range []string{"", "d1", "D1D1D1D1D1D1D1D1", "d1d1d1d1d1d1d1d1d", "d1d1d1d1d1d1d1\x1e1", "d1d1d1d1d1d1d1\x1f1", "d1d1d1d1d1d1d1\x001", "d1d1d1d1d1d1d1 1"} {
+		if err := validateCall(Call{Op: "op-aaaa1111", Digest: bad}); err == nil {
+			t.Errorf("digest %q was accepted", bad)
+		}
+	}
+	if err := validateCall(Call{Op: "op-aaaa1111", Digest: "0123456789abcdef"}); err != nil {
+		t.Error(err)
 	}
 }

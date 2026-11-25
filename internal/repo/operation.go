@@ -7,7 +7,6 @@ import (
 	"regexp"
 	"slices"
 	"strings"
-	"unicode"
 )
 
 // Call is what a mutating call says about itself, beyond its arguments.
@@ -25,6 +24,9 @@ var (
 	// OperationIDRe is the form of an operation id.
 	OperationIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
 	// ExpectRe is the form of an expected checkpoint.
+	// DigestRe is the form of an argument digest: the first 16 hexadecimal
+	// characters of a SHA-256.
+	DigestRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
 	ExpectRe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
 )
 
@@ -38,8 +40,8 @@ func validateCall(call Call) error {
 		if !OperationIDRe.MatchString(call.Op) {
 			return fmt.Errorf("the operation_id %q is not an operation id: give 8 to 64 letters, digits, dots, underscores or hyphens (nothing was changed)", SanitizeLine(truncate(call.Op, 40)))
 		}
-		if call.Digest == "" || strings.ContainsFunc(call.Digest, unicode.IsSpace) {
-			return errors.New("an operation id needs a digest of the call's arguments without whitespace (nothing was changed)")
+		if !DigestRe.MatchString(call.Digest) {
+			return errors.New("an operation id needs a digest of the call's arguments: 16 lower-case hexadecimal characters (nothing was changed)")
 		}
 	}
 	return nil
@@ -60,11 +62,11 @@ func checkExpected(head, expect string) error {
 // written), other arguments are refused. It returns nil, nil when the call
 // has no operation id or the id is new. chain is the session's checkpoints,
 // newest first, and the lock is held.
-func (s *Sessions) replayOperation(ctx context.Context, chain []string, call Call) (*Applied, error) {
+func (s *Sessions) replayOperation(ctx context.Context, rec *sessionRecord, chain []string, call Call) (*Applied, error) {
 	if call.Op == "" {
 		return nil, nil
 	}
-	cp, digest, found, err := s.findOperation(ctx, chain, call.Op)
+	cp, digest, found, err := s.findOperation(ctx, rec, chain, call.Op)
 	if err != nil || !found {
 		return nil, err
 	}
@@ -78,7 +80,7 @@ func (s *Sessions) replayOperation(ctx context.Context, chain []string, call Cal
 // operation id op: it reads the messages of the whole chain (newest first,
 // the base last) with one git log. Operation ids of an earlier session are
 // not on this chain and are not found.
-func (s *Sessions) findOperation(ctx context.Context, chain []string, op string) (cp *Checkpoint, digest string, found bool, err error) {
+func (s *Sessions) findOperation(ctx context.Context, rec *sessionRecord, chain []string, op string) (cp *Checkpoint, digest string, found bool, err error) {
 	if len(chain) < 2 {
 		return nil, "", false, nil
 	}
@@ -87,8 +89,8 @@ func (s *Sessions) findOperation(ctx context.Context, chain []string, op string)
 	if err != nil {
 		return nil, "", false, err
 	}
-	for _, rec := range strings.Split(string(out), "\x1e") {
-		id, msg, ok := strings.Cut(strings.TrimLeft(rec, "\n"), "\x1f")
+	for _, entry := range strings.Split(string(out), "\x1e") {
+		id, msg, ok := strings.Cut(strings.TrimLeft(entry, "\n"), "\x1f")
 		if !ok {
 			continue
 		}
@@ -101,7 +103,7 @@ func (s *Sessions) findOperation(ctx context.Context, chain []string, op string)
 		if i < 0 || i+1 >= len(chain) {
 			return nil, "", false, errors.New("git log named a commit that is not on the session's chain")
 		}
-		pol, err := ws.Policy(ctx)
+		pol, err := s.policy(ctx, rec)
 		if err != nil {
 			return nil, "", false, err
 		}

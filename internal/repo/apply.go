@@ -206,14 +206,14 @@ func (s *Sessions) ApplyCall(ctx context.Context, call Call, planID string, chan
 	if rec == nil {
 		return nil, ErrNoSession
 	}
+	s.freshPolicy()
 	head, chain, err := s.chain(ctx, rec)
 	if err != nil {
 		return nil, err
 	}
-	if applied, err := s.replayOperation(ctx, chain, call); applied != nil || err != nil {
+	if applied, err := s.replayOperation(ctx, rec, chain, call); applied != nil || err != nil {
 		return applied, err
 	}
-	s.freshPolicy()
 	// Looked up only now: ensure drops the plans made before the workspace
 	// was last brought in line with other options or rules.
 	var sp *storedPlan
