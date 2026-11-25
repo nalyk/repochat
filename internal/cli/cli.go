@@ -50,6 +50,8 @@ func Main(args []string, stdin *os.File, stdout, stderr io.Writer) int {
 		return cmdFiles(c, rest)
 	case "log":
 		return cmdLog(c, rest)
+	case "trust":
+		return cmdTrust(c, rest)
 	case "mcp-config":
 		return cmdMCPConfig(c, rest)
 	case "install":
@@ -90,6 +92,8 @@ unless you start it with --write.
   repochat stop            stop sharing (from another terminal)
   repochat doctor          check each part of the setup
   repochat setup           enter or change the tunnel ID / API key, manage profiles
+  repochat trust [PATH]    review AGENTS.md or CLAUDE.md and give it to ChatGPT as standing guidance
+                           [--status] [--revoke] [--release-tunnel] [--yes] [--profile NAME]
   repochat help chatgpt    the one-time ChatGPT plugin steps
 
 %s
