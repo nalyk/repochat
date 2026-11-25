@@ -41,6 +41,11 @@ type SessionOptions struct {
 	// Observe makes a Sessions that never changes the workspace's files or
 	// index (see errObserving).
 	Observe bool
+	// NoResync makes a Sessions that refuses, instead of syncing the
+	// workspace, when the session was last brought in line by a run with
+	// other exposure options. A terminal command that writes (undo) uses it:
+	// its options may differ from the share's, and a resync would fight it.
+	NoResync bool
 }
 
 // SessionInfo describes the open session.
@@ -453,6 +458,10 @@ func (s *Sessions) ensure(ctx context.Context) (*sessionRecord, error) {
 	if err != nil {
 		s.closeWorkspace()
 		return nil, err
+	}
+	if s.opts.NoResync && rec.SyncedWith != mine {
+		s.closeWorkspace()
+		return nil, errOtherOptions
 	}
 	// The open handle outlives its directory. A workspace removed behind
 	// this process's back goes through resume like after a restart, which
@@ -1002,6 +1011,10 @@ func writeFileAtomic(dir, name string, data []byte) error {
 	}
 	return err
 }
+
+// errOtherOptions is what a NoResync Sessions answers when the session was
+// last synced with other exposure options.
+var errOtherOptions = errors.New("the session was last brought in line by a repochat run with other exposure options; run this with the same options as the share, or undo from ChatGPT")
 
 // errObserving is what an observing Sessions answers to anything that would
 // change the workspace.

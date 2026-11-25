@@ -20,7 +20,7 @@ type Call struct {
 	// Digest is the digest of the call's arguments, recorded with Op.
 	Digest string
 	// Expect is the checkpoint the session must be at, as a hexadecimal
-	// prefix of 7 to 40 characters of its ID; "" for no check.
+	// prefix of 7 to 64 characters of its ID; "" for no check.
 	Expect string
 }
 
@@ -28,7 +28,7 @@ var (
 	// OperationIDRe is the form of an operation id.
 	OperationIDRe = regexp.MustCompile(`^[A-Za-z0-9._-]{8,64}$`)
 	// ExpectRe is the form of an expected checkpoint.
-	ExpectRe = regexp.MustCompile(`^[0-9a-fA-F]{7,40}$`)
+	ExpectRe = regexp.MustCompile(`^[0-9a-fA-F]{7,64}$`)
 	// DigestRe is the form of an argument digest: the first 16 hexadecimal
 	// characters of a SHA-256.
 	DigestRe = regexp.MustCompile(`^[0-9a-f]{16}$`)
@@ -38,7 +38,7 @@ var (
 // no session state, so it runs before the lock is taken.
 func validateCall(call Call) error {
 	if call.Expect != "" && !ExpectRe.MatchString(call.Expect) {
-		return fmt.Errorf("the expected checkpoint %q is not a checkpoint ID: give 7 to 40 hexadecimal characters of the ID that session_status shows (nothing was changed)", SanitizeLine(truncate(call.Expect, 40)))
+		return fmt.Errorf("the expected checkpoint %q is not a checkpoint ID: give 7 to 64 hexadecimal characters of the ID that session_status shows (nothing was changed)", SanitizeLine(truncate(call.Expect, 40)))
 	}
 	if call.Op != "" {
 		if !OperationIDRe.MatchString(call.Op) {
