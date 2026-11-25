@@ -38,6 +38,12 @@ var errRepoChanged = errors.New("the repository changed since its guidance was r
 // guidance for another repository, or for this one after it changed. It
 // returns nil, without capturing anything, when the tunnel has no assignment.
 func checkTunnelAssignment(ctx context.Context, r *repo.Repo, tunnelID string) error {
+	return checkTunnelKey(ctx, r, guidance.Key(tunnelID))
+}
+
+// checkTunnelKey is checkTunnelAssignment for a caller that holds only the
+// tunnel's guidance key.
+func checkTunnelKey(ctx context.Context, r *repo.Repo, key string) error {
 	store, err := openAssignments(r.Root)
 	if err != nil {
 		return err
@@ -45,7 +51,6 @@ func checkTunnelAssignment(ctx context.Context, r *repo.Repo, tunnelID string) e
 	if store == nil {
 		return nil
 	}
-	key := guidance.Key(tunnelID)
 	a, err := store.Assignment(key)
 	if err != nil {
 		return err
@@ -55,7 +60,7 @@ func checkTunnelAssignment(ctx context.Context, r *repo.Repo, tunnelID string) e
 	}
 	b, err := r.CaptureBinding(ctx)
 	if err != nil {
-		return fmt.Errorf("this tunnel carries owner guidance for %s, and this repository cannot be checked against it: %v", repo.SanitizeLine(a.Root), err)
+		return fmt.Errorf("this tunnel carries owner guidance for %s, and this repository cannot be checked against it: %v", repo.SanitizeLine(a.Root), repo.SanitizeLine(err.Error()))
 	}
 	if b.Root != a.Root {
 		return assignedElsewhere(a.Root)

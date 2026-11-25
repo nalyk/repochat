@@ -63,6 +63,9 @@ type session struct {
 	Write        bool `json:"write,omitempty"`
 	NewSession   bool `json:"new_session,omitempty"`
 	ConfirmMerge bool `json:"confirm_merge,omitempty"`
+	// GuidanceKey is guidance.Key of the tunnel, set by the launcher. It is
+	// never the tunnel ID itself.
+	GuidanceKey string `json:"guidance_key,omitempty"`
 }
 
 type listFlag []string
@@ -818,8 +821,8 @@ func serverEnvironment(env []string) (kept []string, removed bool) {
 			kept = append(kept, kv)
 		} else {
 			removed = true
-			// The tunnel ID is not a secret; the server keeps it, under
-			// its own name, to check the tunnel's guidance assignment.
+			// The tunnel ID is not a secret; a server started by hand keeps
+			// it, under its own name, to check the tunnel's assignment.
 			if id, ok := strings.CutPrefix(kv, "CONTROL_PLANE_TUNNEL_ID="); ok && id != "" {
 				kept = append(kept, mcpTunnelVar+"="+id)
 			}
@@ -835,7 +838,7 @@ var serverEnvNames = map[string]bool{
 	"PATH": true, "HOME": true, "USER": true, "LOGNAME": true, "SHELL": true,
 	"LANG": true, "LANGUAGE": true, "TZ": true, "TMPDIR": true, "TERM": true, "NO_COLOR": true,
 	"XDG_CONFIG_HOME": true, "XDG_STATE_HOME": true, "XDG_DATA_HOME": true, "XDG_RUNTIME_DIR": true,
-	"REPOCHAT_CONFIG_DIR": true, "REPOCHAT_STATE_DIR": true, "REPOCHAT_DATA_DIR": true,
+	"REPOCHAT_CONFIG_DIR": true, mcpTunnelVar: true, "REPOCHAT_STATE_DIR": true, "REPOCHAT_DATA_DIR": true,
 }
 
 // CleanServerStart must be the first thing the program does. When this

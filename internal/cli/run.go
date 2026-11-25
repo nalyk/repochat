@@ -528,6 +528,7 @@ func selfPath() (string, error) {
 // helperArgs builds the tunnel-client command line. The API key is never
 // part of it: tunnel-client is told to read it from its environment.
 func (l *launcher) helperArgs(sess session, healthURLFile string) ([]string, error) {
+	sess.GuidanceKey = guidance.Key(l.creds.TunnelID)
 	exe, err := selfPath()
 	if err != nil {
 		return nil, err

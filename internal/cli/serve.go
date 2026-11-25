@@ -14,6 +14,7 @@ import (
 	"syscall"
 	"time"
 
+	"github.com/nalyk/repochat/internal/guidance"
 	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
 )
@@ -44,6 +45,10 @@ func cmdMCP(c *console, args []string) int {
 	if tunnelID == "" {
 		tunnelID = strings.TrimSpace(os.Getenv(mcpTunnelVar))
 	}
+	guidanceKey := ""
+	if tunnelID != "" {
+		guidanceKey = guidance.Key(tunnelID)
+	}
 	os.Unsetenv(mcpTunnelVar)
 	scrubSecretsFromEnv()
 
@@ -55,6 +60,9 @@ func cmdMCP(c *console, args []string) int {
 			return 2
 		}
 		s = *decoded
+		if s.GuidanceKey != "" {
+			guidanceKey = s.GuidanceKey
+		}
 		// The launcher has started or resumed the session already; this
 		// process resumes that one and never starts another.
 		s.NewSession = false
@@ -98,8 +106,8 @@ func cmdMCP(c *console, args []string) int {
 	}
 	defer r.Close()
 	r.Logf = stderrLogf(c.errw)
-	if tunnelID != "" {
-		if err := checkTunnelAssignment(ctx, r, tunnelID); err != nil {
+	if guidanceKey != "" {
+		if err := checkTunnelKey(ctx, r, guidanceKey); err != nil {
 			fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
 			return 1
 		}

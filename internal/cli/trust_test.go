@@ -4,9 +4,11 @@ import (
 	"bufio"
 	"bytes"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/nalyk/repochat/internal/guidance"
 )
@@ -356,15 +358,12 @@ func TestUnbindRefusedWhileAssigned(t *testing.T) {
 	}
 	// Binding the assigned tunnel to another repository is refused too.
 	other := makeRepo(t, "other")
-	cmd := func() int {
-		t.Chdir(other)
-		_, errs, code := runCLI("setup", "--bind")
-		wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
-		return code
-	}
-	if cmd() == 0 {
+	t.Chdir(other)
+	_, errs, code = runCLI("setup", "--bind")
+	if code == 0 {
 		t.Fatal("bound an assigned tunnel to another repository")
 	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
 	cfg, _ = loadConfig()
 	if cfg.Profiles["default"].BoundRepo != e.repo {
 		t.Fatal("the binding moved")
@@ -409,4 +408,84 @@ func TestServerEnvironmentKeepsTheTunnelID(t *testing.T) {
 	if !removed || strings.Contains(strings.Join(kept, " "), testKey) || !strings.Contains(strings.Join(kept, " "), "REPOCHAT_TUNNEL_ID="+testTunnel) {
 		t.Fatalf("kept %v", kept)
 	}
+	again, removed := serverEnvironment(kept)
+	if removed || strings.Join(again, "\x00") != strings.Join(kept, "\x00") {
+		t.Fatalf("second pass removed=%v: %v", removed, again)
+	}
+}
+
+// mcpSubprocess runs `repochat mcp args...` as a real process, through
+// CleanServerStart, with extra environment.
+func mcpSubprocess(t *testing.T, env []string, args ...string) (string, error) {
+	t.Helper()
+	exe, err := os.Executable()
+	if err != nil {
+		t.Fatal(err)
+	}
+	cmd := exec.Command(exe, append([]string{"mcp"}, args...)...)
+	cmd.Env = append(os.Environ(), env...)
+	out, err := cmd.CombinedOutput()
+	return string(out), err
+}
+
+func TestMCPSubprocessRefusesThroughTheEnvironment(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	out, err := mcpSubprocess(t, []string{"CONTROL_PLANE_TUNNEL_ID=" + testTunnel, "CONTROL_PLANE_API_KEY=" + testKey}, "--root", other)
+	if err == nil {
+		t.Fatalf("served another repository: %q", out)
+	}
+	wantIn(t, out, "this tunnel carries owner guidance for "+e.repo)
+}
+
+func TestMCPSubprocessRefusesThroughTheSessionKey(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	blob := session{Root: other, GuidanceKey: guidance.Key(testTunnel)}.encode()
+	out, err := mcpSubprocess(t, []string{"CONTROL_PLANE_TUNNEL_ID="}, "--session", blob)
+	if err == nil {
+		t.Fatalf("served another repository: %q", out)
+	}
+	wantIn(t, out, "this tunnel carries owner guidance for "+e.repo)
+}
+
+func TestTakeoverRefusedForAnotherRepository(t *testing.T) {
+	e := assigned(t)
+	other := makeRepo(t, "other")
+	cfg, _ := loadConfig()
+	cfg.Profiles["default"].BoundRepo = ""
+	if err := saveConfig(cfg); err != nil {
+		t.Fatal(err)
+	}
+	_, errb, done := start("--root", e.repo)
+	waitFor(t, "the first instance to connect", func() bool { return strings.Contains(errb.String(), "connected to OpenAI") })
+	_, errs, code := runCLI("--root", other, "--yes")
+	if code == 0 {
+		t.Fatalf("took over an assigned tunnel: %q", errs)
+	}
+	wantIn(t, errs, "this tunnel carries owner guidance for "+e.repo)
+	select {
+	case c := <-done:
+		t.Fatalf("the first instance was stopped (exit %d)", c)
+	case <-time.After(300 * time.Millisecond):
+	}
+	if strings.Contains(errb.String(), "stopped") {
+		t.Fatalf("a stop was sent:\n%s", errb)
+	}
+	runCLI("stop")
+	<-done
+}
+
+func TestReplacedRepositoryAtTheSamePathIsRefused(t *testing.T) {
+	e := assigned(t)
+	old := e.repo + ".old"
+	if err := os.Rename(e.repo, old); err != nil {
+		t.Fatal(err)
+	}
+	gitRun(t, filepath.Dir(e.repo), "clone", "-q", old, e.repo)
+	_, errs, code := runCLI("--root", e.repo, "--print-command")
+	if code == 0 {
+		t.Fatalf("served a replaced repository: %q", errs)
+	}
+	wantIn(t, errs, "the repository changed since its guidance was reviewed")
 }
