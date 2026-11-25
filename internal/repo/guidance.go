@@ -183,7 +183,30 @@ func (r *Repo) GuidanceDisplay(raw []byte) (string, error) {
 	if len(out) > maxGuidanceDisplay {
 		return "", fmt.Errorf("the reviewed text is %d bytes once masked and made visible; the limit is %d bytes and nothing is truncated", len(out), maxGuidanceDisplay)
 	}
+	if n := SegmentMarkerLine(out); n > 0 {
+		return "", SegmentMarkerError(n)
+	}
 	return out, nil
+}
+
+// SegmentMarkerLine is the 1-based number of the first line of display that
+// reads as the guidance segment's own end marker or heading: its trimmed,
+// case-folded text equals "end of owner guidance" or starts with "owner
+// guidance". It is 0 when there is none. Such a line could close the segment
+// early and make what follows read as server rules.
+func SegmentMarkerLine(display string) int {
+	for i, l := range strings.Split(display, "\n") {
+		t := strings.ToLower(strings.TrimSpace(l))
+		if t == "end of owner guidance" || strings.HasPrefix(t, "owner guidance") {
+			return i + 1
+		}
+	}
+	return 0
+}
+
+// SegmentMarkerError is the refusal for a marker on line n.
+func SegmentMarkerError(n int) error {
+	return fmt.Errorf("line %d of the guidance reads as the OWNER GUIDANCE heading or its END OF OWNER GUIDANCE marker, which could close the guidance section early; reword that line and run `repochat trust` again", n)
 }
 
 // Binding identifies the owner's repository: canonical paths, device and
