@@ -188,7 +188,7 @@ func TestTrustRevokeAndStatus(t *testing.T) {
 	}
 	_, errs, _ = runCLI("trust", "--root", e.repo, "--status")
 	wantIn(t, errs, "removed")
-	if _, errs, code := runCLI("trust", "--root", e.repo, "--revoke"); code != 0 {
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--revoke", "--yes"); code != 0 {
 		t.Fatalf("code %d, stderr %q", code, errs)
 	}
 	if e.stored(t) != nil {
@@ -251,7 +251,7 @@ func TestTrustLifecycleWithoutTheRepository(t *testing.T) {
 	if code != 0 {
 		t.Fatalf("status code %d", code)
 	}
-	if _, errs, code = runCLI("trust", "--root", away, "--profile", "default", "--revoke"); code != 0 {
+	if _, errs, code = runCLI("trust", "--root", away, "--profile", "default", "--revoke", "--yes"); code != 0 {
 		t.Fatalf("revoke code %d: %s", code, errs)
 	}
 	if e.stored(t) != nil {
@@ -488,4 +488,72 @@ func TestReplacedRepositoryAtTheSamePathIsRefused(t *testing.T) {
 		t.Fatalf("served a replaced repository: %q", errs)
 	}
 	wantIn(t, errs, "the repository changed since its guidance was reviewed")
+}
+
+func TestRevokeShowsWhatItRevokesAndAsks(t *testing.T) {
+	e := trustEnv(t, true)
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatal(errs)
+	}
+	// No terminal, no --yes: it refuses, and still says what it would revoke.
+	_, errs, code := runCLI("trust", "--root", e.repo, "--revoke")
+	if code != 1 {
+		t.Fatalf("revoked without a terminal or --yes: code %d, %q", code, errs)
+	}
+	wantIn(t, errs, "Repository: "+e.repo, "Tunnel:     "+maskID(testTunnel), "use --yes")
+	if e.stored(t) == nil {
+		t.Fatal("revoked without confirmation")
+	}
+	// The default at a terminal is no.
+	c, errb := ttyConsole("\n")
+	if code := cmdTrust(c, []string{"--root", e.repo, "--revoke"}); code != 1 {
+		t.Fatalf("code %d, %q", code, errb)
+	}
+	wantIn(t, errb.String(), "Repository: "+e.repo, "Nothing was revoked")
+	if e.stored(t) == nil {
+		t.Fatal("revoked on Enter")
+	}
+	c, errb = ttyConsole("y\n")
+	if code := cmdTrust(c, []string{"--root", e.repo, "--revoke"}); code != 0 {
+		t.Fatalf("code %d, %q", code, errb)
+	}
+	if e.stored(t) != nil {
+		t.Fatal("still stored after a yes")
+	}
+}
+
+func TestReleaseShowsTheRootAndTheMaskedTunnel(t *testing.T) {
+	e := trustEnv(t, true)
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatal(errs)
+	}
+	_, errs, _ := runCLI("trust", "--root", e.repo, "--release-tunnel")
+	wantIn(t, errs, "Repository: "+e.repo, "Tunnel:     "+maskID(testTunnel))
+	if strings.Contains(errs, testTunnel) {
+		t.Errorf("the full tunnel ID is shown:\n%s", errs)
+	}
+}
+
+func TestStatusStatesFollowDrift(t *testing.T) {
+	e := trustEnv(t, true)
+	if _, errs, code := runCLI("trust", "--root", e.repo, "--yes"); code != 0 {
+		t.Fatal(errs)
+	}
+	path := filepath.Join(e.repo, "AGENTS.md")
+	if os.Geteuid() != 0 {
+		if err := os.Chmod(path, 0); err != nil {
+			t.Fatal(err)
+		}
+		_, errs, _ := runCLI("trust", "--root", e.repo, "--status")
+		wantIn(t, errs, "File:       could not be compared")
+		if err := os.Chmod(path, 0o644); err != nil {
+			t.Fatal(err)
+		}
+	}
+	os.Remove(path)
+	if err := os.Symlink("README.md", path); err != nil {
+		t.Fatal(err)
+	}
+	_, errs, _ := runCLI("trust", "--root", e.repo, "--status")
+	wantIn(t, errs, "File:       could not be compared")
 }

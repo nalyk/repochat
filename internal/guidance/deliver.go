@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"fmt"
+	"io/fs"
 	"sync"
 	"unicode/utf8"
 
@@ -90,6 +91,7 @@ func Deliver(ctx context.Context, store *Store, key, name, base string, owner *r
 // with still holds. Once it does not, it latches: every later Check returns
 // ErrInvalidated without reading anything.
 type Guard struct {
+	started    Record
 	key, path  string
 	generation uint64
 	displaySHA string
@@ -111,7 +113,7 @@ type Guard struct {
 // key in store, deciding exposure on the owner's checkout.
 func NewGuard(store *Store, key string, started *Record, owner *repo.Repo) *Guard {
 	return &Guard{
-		key: key, path: started.Path, generation: started.Generation, displaySHA: started.DisplaySHA,
+		started: *started, key: key, path: started.Path, generation: started.Generation, displaySHA: started.DisplaySHA,
 		loadFn: store.Load, inputsFn: owner.GuidanceInputs, decideFn: owner.PathDecision,
 	}
 }
@@ -182,4 +184,46 @@ func (g *Guard) Reason() string {
 	g.mu.Lock()
 	defer g.mu.Unlock()
 	return g.reason
+}
+
+// The states of Drift.
+const (
+	DriftUnchanged = "unchanged"
+	DriftChanged   = "changed"
+	DriftRemoved   = "removed"
+	DriftUnknown   = "could not be compared"
+)
+
+// Drift says whether the owner's checkout still holds the text r was
+// reviewed from: unchanged or changed by the raw hash, removed only when the
+// file is definitely not there, and could not be compared for anything else
+// (permission, I/O, a link or another unsafe type). It always reads the
+// owner's checkout, never a session workspace, and reads the file once
+// through the no-follow reader.
+func Drift(ctx context.Context, owner *repo.Repo, r *Record) string {
+	if ctx.Err() != nil {
+		return DriftUnknown
+	}
+	sha, err := owner.GuidanceFileSHA(r.Path)
+	switch {
+	case errors.Is(err, fs.ErrNotExist):
+		return DriftRemoved
+	case err != nil:
+		return DriftUnknown
+	case sha == r.RawSHA:
+		return DriftUnchanged
+	}
+	return DriftChanged
+}
+
+// Started is the record the process was started with.
+func (g *Guard) Started() Record { return g.started }
+
+// OverviewLine is the one line repo_overview carries once guidance is
+// delivered, with the drift state it was made from. The file is compared in
+// the owner's checkout, whatever session workspace the overview is about.
+func OverviewLine(ctx context.Context, owner *repo.Repo, r *Record) (line, state string) {
+	state = Drift(ctx, owner, r)
+	return fmt.Sprintf("Owner guidance: from %s, reviewed %s; %s (the reviewed version is in the instructions)",
+		repo.SanitizeLine(r.Path), r.Reviewed.UTC().Format("2006-01-02"), state), state
 }

@@ -74,8 +74,11 @@ func changesSchema() map[string]any {
 
 // NewWrite returns the tools of write mode: the 13 read tools, served from
 // the session workspace while a session is open, then the nine that edit.
-func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
+func NewWrite(owner *repo.Repo, s *repo.Sessions, opts ...Option) []mcp.Tool {
 	c := &catalog{src: served{s}, owner: owner, s: s}
+	for _, o := range opts {
+		o(c)
+	}
 	S, I, B, O := mcp.String, mcp.Integer, mcp.Boolean, mcp.Object
 	// Write tool results are about the session, not about files served: they
 	// are assembled with the owner's repository (masking, budget).

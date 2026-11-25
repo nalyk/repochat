@@ -268,13 +268,13 @@ func openRepo(ctx context.Context, s *session, cfg *Config) (*repo.Repo, error) 
 }
 
 // newServer builds the MCP server for a repository.
-func newServer(r *repo.Repo) *mcp.Server {
+func newServer(r *repo.Repo, opts ...tools.Option) *mcp.Server {
 	return &mcp.Server{
 		Name:         "repochat",
 		Title:        "RepoChat",
 		Version:      Version,
 		Instructions: tools.Instructions,
-		Tools:        tools.New(r),
+		Tools:        tools.New(r, opts...),
 	}
 }
 
@@ -334,21 +334,21 @@ const confirmMergeReply = "The session is ready to merge. The user chose to conf
 // newWriteServer builds the MCP server of write mode. report receives a note
 // for every start, apply, undo, update, finish and abandon that succeeded;
 // it may be nil. With confirmMerge, finish_session does not merge.
-func newWriteServer(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote)) *mcp.Server {
+func newWriteServer(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote), opts ...tools.Option) *mcp.Server {
 	return &mcp.Server{
 		Name:         "repochat",
 		Title:        "RepoChat",
 		Version:      Version,
 		Instructions: tools.WriteModeInstructions,
-		Tools:        writeTools(r, ss, confirmMerge, report),
+		Tools:        writeTools(r, ss, confirmMerge, report, opts...),
 	}
 }
 
-func writeTools(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote)) []mcp.Tool {
+func writeTools(r *repo.Repo, ss *repo.Sessions, confirmMerge bool, report func(sessionNote), opts ...tools.Option) []mcp.Tool {
 	if report == nil {
 		report = func(sessionNote) {}
 	}
-	list := tools.NewWrite(r, ss)
+	list := tools.NewWrite(r, ss, opts...)
 	for i := range list {
 		t := &list[i]
 		inner, name := t.Handler, t.Name

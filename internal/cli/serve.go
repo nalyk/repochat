@@ -17,6 +17,7 @@ import (
 	"github.com/nalyk/repochat/internal/guidance"
 	"github.com/nalyk/repochat/internal/mcp"
 	"github.com/nalyk/repochat/internal/repo"
+	"github.com/nalyk/repochat/internal/tools"
 )
 
 // cmdMCP runs the MCP server on stdin/stdout. It is what tunnel-client (or
@@ -119,7 +120,23 @@ func cmdMCP(c *console, args []string) int {
 
 	sink := newEventSink(c, &s, r)
 	defer sink.close()
-	srv := newServer(r)
+	base := tools.Instructions
+	if s.Write {
+		base = tools.WriteModeInstructions
+	}
+	var gd *delivered
+	if guidanceKey != "" {
+		var err error
+		if gd, err = deliverGuidance(ctx, r, guidanceKey, base, stderrLogf(c.errw)); err != nil {
+			fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
+			return 1
+		}
+	}
+	var opts []tools.Option
+	if gd != nil {
+		opts = append(opts, tools.WithOverviewNote(gd.note))
+	}
+	srv := newServer(r, opts...)
 	if s.Write {
 		ss, err := openSessions(r, s.repoOptions(cfg), sink.notice)
 		if err != nil {
@@ -139,15 +156,13 @@ func cmdMCP(c *console, args []string) int {
 				repo.SanitizeLine(info.Branch), repo.SanitizeLine(info.StartBranch), shortID(info.Base))
 			sink.session(note)
 		}
-		srv = newWriteServer(r, ss, s.ConfirmMerge, sink.session)
+		srv = newWriteServer(r, ss, s.ConfirmMerge, sink.session, opts...)
 	}
 	srv.Logf = stderrLogf(c.errw)
 	srv.OnEvent = sink.handle
-	if guidanceKey != "" {
-		if err := deliverGuidance(ctx, srv, r, guidanceKey, stderrLogf(c.errw)); err != nil {
-			fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
-			return 1
-		}
+	if gd != nil {
+		srv.Instructions = gd.instructions
+		srv.Guard = gd.guard
 	}
 
 	err = srv.Serve(ctx, c.in, c.out)
@@ -158,24 +173,44 @@ func cmdMCP(c *console, args []string) int {
 	return 0
 }
 
-// deliverGuidance gives srv the owner's reviewed guidance for key, if there
-// is any: the instructions that carry it and the guard that refuses every
-// call once it no longer holds. With no guidance state, or no record for the
-// key, srv is left exactly as it was. An error means the process must not
-// serve.
-func deliverGuidance(ctx context.Context, srv *mcp.Server, r *repo.Repo, key string, logf func(string, ...any)) error {
+// delivered is what a stored guidance record adds to the server: its
+// instructions, the guard that refuses every call once the guidance no longer
+// holds, and the drift line for repo_overview.
+type delivered struct {
+	instructions string
+	guard        func(context.Context, string) error
+	note         func(context.Context) string
+}
+
+// deliverGuidance prepares the owner's reviewed guidance for key, if there is
+// any, on top of the instructions base. With no guidance state, or no record
+// for the key, it returns nil and the server is left exactly as it was. An
+// error means the process must not serve.
+func deliverGuidance(ctx context.Context, r *repo.Repo, key, base string, logf func(string, ...any)) (*delivered, error) {
 	store, err := openAssignments(r.Root)
 	if err != nil || store == nil {
-		return err
+		return nil, err
 	}
-	instr, g, err := guidance.Deliver(ctx, store, key, r.Name, srv.Instructions, r)
+	instr, g, err := guidance.Deliver(ctx, store, key, r.Name, base, r)
 	if err != nil || g == nil {
-		return err
+		return nil, err
 	}
 	g.Logf = logf
-	srv.Instructions = instr
-	srv.Guard = func(ctx context.Context, _ string) error { return g.Check(ctx) }
-	return nil
+	started := g.Started()
+	var once sync.Once
+	return &delivered{
+		instructions: instr,
+		guard:        func(ctx context.Context, _ string) error { return g.Check(ctx) },
+		note: func(ctx context.Context) string {
+			line, state := guidance.OverviewLine(ctx, r, &started)
+			if state != guidance.DriftUnchanged {
+				once.Do(func() {
+					logf("owner guidance: %s differs from what you reviewed (%s). ChatGPT still gets the reviewed text; run `repochat trust` to review the file again", repo.SanitizeLine(started.Path), state)
+				})
+			}
+			return line
+		},
+	}, nil
 }
 
 // eventSink delivers server events to the launcher (when there is one), the

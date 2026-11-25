@@ -2,10 +2,8 @@ package cli
 
 import (
 	"context"
-	"errors"
 	"flag"
 	"fmt"
-	"os"
 	"path/filepath"
 	"strings"
 	"time"
@@ -120,15 +118,9 @@ func cmdTrust(c *console, args []string) int {
 	case *status:
 		return trustStatus(ctx, c, r, store, key)
 	case *revoke:
-		if err := store.Revoke(key); err != nil {
-			c.fail("%v", err)
-			return 1
-		}
-		c.ok("the standing guidance for profile %s is revoked", repo.SanitizeLine(name))
-		c.say("Restart repochat, press Refresh tools in ChatGPT, and start a new conversation.")
-		return 0
+		return trustRevoke(c, store, key, name, creds.TunnelID)
 	case *release:
-		return trustRelease(c, store, key, name)
+		return trustRelease(c, store, key, name, creds.TunnelID)
 	}
 	return trustReview(ctx, c, r, store, key, name, creds.TunnelID, path)
 }
@@ -150,14 +142,7 @@ func trustStatus(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 	state := "drift unknown: run this in " + root
 	if r != nil {
 		if b, berr := r.CaptureBinding(ctx); berr == nil && b.Equal(&rec.Binding) {
-			state = "unchanged"
-			if _, lerr := os.Lstat(filepath.Join(r.Root, rec.Path)); errors.Is(lerr, os.ErrNotExist) {
-				state = "removed"
-			} else if src, rerr := r.ReadGuidanceSource(ctx, rec.Path); rerr != nil {
-				state = "changed (it can no longer be read as guidance: " + repo.SanitizeLine(rerr.Error()) + ")"
-			} else if src.RawSHA != rec.RawSHA {
-				state = "changed"
-			}
+			state = guidance.Drift(ctx, r, rec)
 		}
 	}
 	c.say("Repository: %s", root)
@@ -165,13 +150,44 @@ func trustStatus(ctx context.Context, c *console, r *repo.Repo, store *guidance.
 	c.say("Reviewed:   %s", rec.Reviewed.Local().Format(time.RFC1123))
 	c.say("Generation: %d", rec.Generation)
 	c.say("File:       %s", state)
-	if state != "unchanged" {
+	if state != guidance.DriftUnchanged {
 		c.say("The stored text is still what ChatGPT gets. Review the file again with `repochat trust`.")
 	}
 	return 0
 }
 
-func trustRelease(c *console, store *guidance.Store, key, profile string) int {
+// trustRevoke removes the stored guidance, after showing which repository and
+// tunnel it belongs to and asking.
+func trustRevoke(c *console, store *guidance.Store, key, profile, tunnelID string) int {
+	rec, err := store.Load(key)
+	if err != nil {
+		c.fail("%v", err)
+		return 1
+	}
+	if rec == nil {
+		c.say("No guidance is stored for this tunnel; there is nothing to revoke.")
+		return 0
+	}
+	c.say("Repository: %s", repo.SanitizeLine(rec.Binding.Root))
+	c.say("Tunnel:     %s (profile %s)", maskID(tunnelID), repo.SanitizeLine(profile))
+	c.say("File:       %s, generation %d", repo.SanitizeLine(rec.Path), rec.Generation)
+	if !c.confirm("Revoke this standing guidance?", false) {
+		c.say("Nothing was revoked.")
+		if !c.tty && !c.yes {
+			c.say("There is no terminal to ask on: use --yes.")
+		}
+		return 1
+	}
+	if err := store.Revoke(key); err != nil {
+		c.fail("%v", err)
+		return 1
+	}
+	c.ok("the standing guidance for profile %s is revoked", repo.SanitizeLine(profile))
+	c.say("Restart repochat, press Refresh tools in ChatGPT, and start a new conversation.")
+	return 0
+}
+
+func trustRelease(c *console, store *guidance.Store, key, profile, tunnelID string) int {
 	b, err := store.Assignment(key)
 	if err != nil {
 		c.fail("%v", err)
@@ -181,7 +197,8 @@ func trustRelease(c *console, store *guidance.Store, key, profile string) int {
 		c.say("This tunnel is not assigned to any repository; there is nothing to release.")
 		return 0
 	}
-	c.say("Tunnel of profile %s is assigned to %s.", repo.SanitizeLine(profile), repo.SanitizeLine(b.Root))
+	c.say("Repository: %s", repo.SanitizeLine(b.Root))
+	c.say("Tunnel:     %s (profile %s)", maskID(tunnelID), repo.SanitizeLine(profile))
 	c.say("Afterwards, in ChatGPT, delete the plugin and create it again.")
 	if !c.confirm("Release it and remove its stored guidance?", false) {
 		c.say("Nothing was released.")

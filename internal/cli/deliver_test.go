@@ -184,3 +184,45 @@ func TestMCPWithheldSourceRefusesToStart(t *testing.T) {
 	}
 	wantIn(t, errs, "AGENTS.md is now withheld")
 }
+
+func overviewText(t *testing.T, reply map[string]any) string {
+	t.Helper()
+	res, _ := reply["result"].(map[string]any)
+	content, _ := res["content"].([]any)
+	if len(content) == 0 {
+		t.Fatalf("no content: %v", reply)
+	}
+	return content[0].(map[string]any)["text"].(string)
+}
+
+func TestOverviewCarriesTheDriftLineAndTheTerminalNoticesOnce(t *testing.T) {
+	e := assigned(t)
+	t.Setenv("CONTROL_PLANE_TUNNEL_ID", testTunnel)
+	p := startMCP(t, "--root", e.repo)
+	p.send(0, pipeInit)
+	line := "Owner guidance: from AGENTS.md, reviewed " + time.Now().UTC().Format("2006-01-02") + "; %s (the reviewed version is in the instructions)"
+	if got := overviewText(t, p.send(1, fmt.Sprintf(pipeCall, 1))); !strings.Contains(got, fmt.Sprintf(line, "unchanged")) {
+		t.Fatalf("unchanged:\n%s", got)
+	}
+	if strings.Contains(p.errb.String(), "differs from what you reviewed") {
+		t.Fatalf("a notice while nothing changed: %s", p.errb.String())
+	}
+	if err := os.WriteFile(filepath.Join(e.repo, "AGENTS.md"), []byte("Use spaces.\n"), 0o644); err != nil {
+		t.Fatal(err)
+	}
+	for i := 2; i <= 3; i++ {
+		if got := overviewText(t, p.send(i, fmt.Sprintf(pipeCall, i))); !strings.Contains(got, fmt.Sprintf(line, "changed")) {
+			t.Fatalf("changed:\n%s", got)
+		}
+	}
+	if err := os.Remove(filepath.Join(e.repo, "AGENTS.md")); err != nil {
+		t.Fatal(err)
+	}
+	if got := overviewText(t, p.send(4, fmt.Sprintf(pipeCall, 4))); !strings.Contains(got, fmt.Sprintf(line, "removed")) {
+		t.Fatalf("removed:\n%s", got)
+	}
+	_, errs := p.close()
+	if n := strings.Count(errs, "differs from what you reviewed"); n != 1 {
+		t.Errorf("%d notices:\n%s", n, errs)
+	}
+}

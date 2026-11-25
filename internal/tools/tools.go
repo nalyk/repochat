@@ -67,6 +67,18 @@ type catalog struct {
 	// current is Sessions.Current; a test seam, nil in production.
 	current func(context.Context) (*repo.SessionInfo, error)
 	r       *repo.Repo // the repository of the current call
+	// overviewNote, when set, gives one line repo_overview appends to its
+	// text. Nil leaves the overview exactly as it was.
+	overviewNote func(context.Context) string
+}
+
+// Option adjusts the catalogue New and NewWrite build.
+type Option func(*catalog)
+
+// WithOverviewNote makes repo_overview append the line note returns (when it
+// is not empty). A nil note is no option at all.
+func WithOverviewNote(note func(context.Context) string) Option {
+	return func(c *catalog) { c.overviewNote = note }
 }
 
 // at returns a copy of c that serves r.
@@ -92,8 +104,12 @@ func (c *catalog) bind(h func(*catalog, context.Context, mcp.Args) (mcp.Result, 
 }
 
 // New returns the tool list for a repository, in a fixed order.
-func New(r *repo.Repo) []mcp.Tool {
-	return (&catalog{src: fixed{r}, owner: r}).readTools()
+func New(r *repo.Repo, opts ...Option) []mcp.Tool {
+	c := &catalog{src: fixed{r}, owner: r}
+	for _, o := range opts {
+		o(c)
+	}
+	return c.readTools()
 }
 
 // readTools returns the 13 read tools, served from c.src.
@@ -539,7 +555,13 @@ func (c *catalog) overview(ctx context.Context, _ mcp.Args) (mcp.Result, error) 
 	if err != nil {
 		return c.fail(err)
 	}
-	return c.finish("repo_overview", o.Text, 0, meta{"generation": o.Generation, "head": o.Head, "branch": o.Branch, "complete": true}), nil
+	text := o.Text
+	if c.overviewNote != nil {
+		if line := c.overviewNote(ctx); line != "" {
+			text = strings.TrimRight(text, "\n") + "\n\n" + line + "\n"
+		}
+	}
+	return c.finish("repo_overview", text, 0, meta{"generation": o.Generation, "head": o.Head, "branch": o.Branch, "complete": true}), nil
 }
 
 func (c *catalog) list(ctx context.Context, a mcp.Args) (mcp.Result, error) {

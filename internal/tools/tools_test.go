@@ -414,3 +414,42 @@ func TestRepositoryNameIsNotASecretChannel(t *testing.T) {
 		}
 	}
 }
+
+func TestOverviewShowsDriftOnlyWithAGuard(t *testing.T) {
+	_, r, plain := fixture(t, repo.Options{})
+	base, _, err := call(t, plain, "repo_overview", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	pick := func(list []mcp.Tool) map[string]mcp.Tool {
+		m := map[string]mcp.Tool{}
+		for _, tl := range list {
+			m[tl.Name] = tl
+		}
+		return m
+	}
+	// No hook, and a nil hook: byte-identical to the overview without the option.
+	for name, list := range map[string][]mcp.Tool{"none": New(r), "nil": New(r, WithOverviewNote(nil))} {
+		got, _, err := call(t, pick(list), "repo_overview", map[string]any{})
+		if err != nil || got != base {
+			t.Errorf("%s: overview changed (err %v):\n%s", name, err, got)
+		}
+	}
+	// A hook that has nothing to say changes nothing either.
+	quiet := pick(New(r, WithOverviewNote(func(context.Context) string { return "" })))
+	if got, _, _ := call(t, quiet, "repo_overview", map[string]any{}); got != base {
+		t.Errorf("an empty note changed the overview:\n%s", got)
+	}
+	line := "Owner guidance: from AGENTS.md, reviewed 2026-11-25; changed (the reviewed version is in the instructions)"
+	loud := pick(New(r, WithOverviewNote(func(context.Context) string { return line })))
+	got, meta, err := call(t, loud, "repo_overview", map[string]any{})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !strings.HasSuffix(got, "\n\n"+line) || !strings.HasPrefix(got, strings.TrimRight(base, "\n")) {
+		t.Errorf("the line is not appended to the overview:\n%s", got)
+	}
+	if meta["tool"] != "repo_overview" {
+		t.Errorf("meta: %v", meta)
+	}
+}

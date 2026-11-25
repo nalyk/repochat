@@ -95,6 +95,29 @@ func (r *Repo) ReadGuidanceSource(ctx context.Context, path string) (*GuidanceSo
 	return &GuidanceSource{Path: rel, Raw: data, RawSHA: hex.EncodeToString(sum[:])}, nil
 }
 
+// GuidanceFileSHA is the SHA-256 of the current bytes of the root file rel,
+// read once through the same no-follow opener as ReadGuidanceSource, and
+// nothing else: no listing, no policy, no UTF-8 check. It is for drift only,
+// so the errors are the raw ones (errors.Is(err, fs.ErrNotExist) means the
+// file is gone). A file over the guidance limit returns "" and no error: it
+// cannot be the reviewed text.
+func (r *Repo) GuidanceFileSHA(rel string) (string, error) {
+	if rel == "" || strings.ContainsAny(rel, "/\\\x00") || rel == "." || rel == ".." {
+		return "", fmt.Errorf("%q is not a root-level file", rel)
+	}
+	op := r.newOpener()
+	defer op.Close()
+	data, _, truncated, err := op.ReadAll(rel, maxGuidanceRaw)
+	if err != nil {
+		return "", err
+	}
+	if truncated {
+		return "", nil
+	}
+	sum := sha256.Sum256(data)
+	return hex.EncodeToString(sum[:]), nil
+}
+
 // guidanceRedactor masks whatever the run's options say: guidance is always
 // shown masked.
 var guidanceRedactor = NewRedactor(true)
@@ -313,6 +336,15 @@ func (r *Repo) PathDecision(ctx context.Context, path string) (PathDecision, err
 // building a snapshot or asking git to judge any rule: it reads the rules
 // files, parses them for the policy's hash, and asks git about this one path
 // only. Equal results mean PathServed would decide as it did.
+//
+// It skips refreshFilterArgs and the fileset caps, and that is safe. The
+// filter neutralisation is for git commands that read working-tree contents
+// and so may run clean/smudge drivers; the only git commands here are
+// ls-files with --stage or --others, which read the index and directory
+// names and run no filter. The fileset caps bound the cost of listing the
+// whole repository; this lists one path, so there is no size to bound, and
+// the rules file is read under its own limit. A repository too large to
+// serve fails at start, in the full snapshot, not here.
 func (r *Repo) GuidanceInputs(ctx context.Context, path string) (string, error) {
 	text, err := r.readIgnoreFile(ctx)
 	if err != nil {
