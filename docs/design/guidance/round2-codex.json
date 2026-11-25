@@ -1,0 +1,169 @@
+{
+  "responses": [
+    {
+      "id": "G1",
+      "decision": "accept",
+      "reason": "This resolves the review boundary: one bounded read produces both the raw digest and the exact approved display. Local-only trust, explicit repository/profile scope, full replacement review, visible formatting characters and default-no confirmation address the earlier objections.",
+      "counter_proposal": "No substantive change. Reject oversized displays rather than truncating them, and preserve the reviewed display bytes through delivery."
+    },
+    {
+      "id": "G2",
+      "decision": "maintain",
+      "reason": "Per-profile storage is sufficient if the underlying tunnel remains permanently assigned to the same repository. Existing --bind does not establish that invariant: setup can overwrite BoundRepo, --unbind clears it, and different profile names can contain the same tunnel credentials. A binding mismatch must refuse sharing, not merely omit guidance, because ChatGPT may still have the previous instructions. Root commits provide a conservative history fingerprint, not unique repository identity.",
+      "counter_proposal": "Keep per-profile records, but persist the repository assignment against tunnel identity independently of the active guidance record. Reject retargeting through rebind, unbind, profile deletion/recreation, credential aliases or takeover, including after revocation; another repository requires a new tunnel/plugin. Canonicalize the common directory and compare a sorted, complete root-commit set from the owner's HEAD using hardened Git execution. Refuse shallow or incomplete history for this experiment. Ordinary rebases preserving roots remain valid; root-changing rebases, relevant filtering, orphan branches and changed root sets require renewed review. Linked worktrees share a common directory but retain distinct owner-root bindings; session worktrees must never replace the owner in this comparison. Add filesystem continuity evidence for root/common-directory replacement, and document that shared ancestry cannot authenticate project identity."
+    },
+    {
+      "id": "G3",
+      "decision": "maintain",
+      "reason": "The storage location and protection requirements are appropriate. However, load cannot recompute both digests: the original raw bytes are deliberately absent, and masking is irreversible. Rehashing today's source would incorrectly reject ordinary drift. The generation counter also needs defined behavior across revoke/retrust and concurrent writers.",
+      "counter_proposal": "At load, validate the raw SHA-256's encoding and recompute the display SHA-256 from the stored display bytes. Use the raw digest only for subsequent source comparison; do not store unmasked source to make it recomputable. If accidental corruption of other fields must be detected, add a checksum over the complete versioned record, without calling it authentication. Serialize state changes and prevent generation reuse across revocation, retaining lifecycle state outside the deletable snapshot. Reject unsupported transformation versions rather than silently transforming previously reviewed text."
+    },
+    {
+      "id": "G4",
+      "decision": "accept",
+      "reason": "The lead fits with the existing repository-name representation: 440 fixed characters plus a name capped at 60 ASCII characters gives at most 500. It correctly scopes standing preferences, preserves host/server/current-user precedence, grants no capability and rejects promotion through copies or references. The indivisible segment and unchanged no-record instructions are appropriate. Instruction delivery and adherence remain experimental host behavior.",
+      "counter_proposal": "Use the existing bounded safe repository name and assert the assembled prefix length. Preserve the accepted M3 limitation that guidance authorizes neither unrelated tools nor bypassing required confirmations. Apply G5's corrected lifecycle guard before every instruction-bearing response."
+    },
+    {
+      "id": "G5",
+      "decision": "maintain",
+      "reason": "Per-call checking followed by permanent refusal is the right M2 mechanism for future tool execution. It needs two corrections: checking only tool calls permits revoked guidance to be transmitted again through discovery or legacy initialization, and the existing snapshot policy can remain cached for three seconds. A source stat does not detect a changed .repochatignore. Checking only the generation also does not establish that the record remains intact.",
+      "counter_proposal": "Run one shared guard before tool execution and before initialize/server-discover responses containing instructions. Safely read and validate the complete bounded record, compare its generation and immutable snapshot identity, and latch invalidation until restart. Evaluate the owner's current exposure policy through an explicitly fresh path; a cached policy is usable only after validating its policy inputs. Refuse on record or policy uncertainty. Once invalidated, refuse further instruction-bearing responses as well as all tools. Preserve the restart/refresh/new-conversation notice and explicitly document that calls already admitted may finish; this cannot recall earlier context or effects."
+    },
+    {
+      "id": "G6",
+      "decision": "maintain",
+      "reason": "Owner-checkout comparison and a server-written informational line are correct. The proposed unchanged/changed/removed vocabulary omits unavailable or unsafe-to-read sources, which the accepted round 1 counter explicitly distinguished. Startup's 'source is still served' condition also needs to preserve the promised snapshot behavior after ordinary removal.",
+      "counter_proposal": "Add 'current file could not be compared' for permission, I/O or unsafe-file-type failures; never report those as unchanged or removed. Determine removal only from a definite missing-file result. Exposure denial or uncertain policy invokes G5 instead. Define ordinary removal consistently across restart: absence alone does not revoke the reviewed snapshot when the source path remains policy-permitted."
+    },
+    {
+      "id": "G7",
+      "decision": "accept",
+      "reason": "The protocol and experimental release gate address M5. This accepts the proposed evaluation requirement, not an assertion that the integration has passed.",
+      "counter_proposal": "Carry forward the full accepted M5 protocol, including account/surface, actual discovery traffic, beginning/end placement, lengths and separate read/write trials. Add deterministic cases for tunnel aliases/rebinding, shallow history, revoke/retrust generation reuse, discovery immediately after revocation, policy changes inside the existing cache window and comparison failures. Define success thresholds before collecting results; a provenance-promotion failure blocks non-experimental release."
+    }
+  ],
+  "new_issues": [
+    {
+      "id": "M10",
+      "title": "A profile name does not permanently identify a connection",
+      "severity": "critical",
+      "why": "Existing configuration permits rebinding, unbinding and reuse of tunnel credentials under another profile. Deleting the snapshot does not remove ChatGPT's cached repository-specific guidance.",
+      "proposal": "Persist a repository assignment keyed by tunnel identity beyond snapshot revocation and profile deletion. Enforce it across every launch/setup path; another repository requires another tunnel/plugin."
+    },
+    {
+      "id": "M11",
+      "title": "The raw digest has no stored preimage to validate",
+      "severity": "major",
+      "why": "G3 promises validation of both digests while storing only masked display bytes. Comparing against the current source would turn permitted drift into corruption.",
+      "proposal": "Validate raw-digest syntax, recompute the display digest, and reserve the raw digest for drift detection. Add a whole-record corruption checksum only if desired; retain no unmasked source."
+    },
+    {
+      "id": "M12",
+      "title": "Tool refusal does not stop fresh metadata disclosure",
+      "severity": "major",
+      "why": "An already-running process can answer discovery or initialization with its frozen guidance after revocation or exposure withdrawal, even if its next tool call would be refused.",
+      "proposal": "Guard instruction-bearing metadata responses with the same validation and latched invalidation as tool calls."
+    }
+  ],
+  "facts": [
+    {
+      "id": "F1",
+      "claim": "Current binding enforcement refuses another root, but the assignment is mutable and tunnel aliases are not rejected.",
+      "status": "confirmed",
+      "evidence": "selectProfile checks BoundRepo against the requested root. setup --bind assigns a new BoundRepo, --unbind clears it, and configuration loading contains no cross-profile tunnel-uniqueness check.",
+      "source": "[Profile selection](internal/cli/config.go:271), [Binding setters](internal/cli/setup.go:305)"
+    },
+    {
+      "id": "F2",
+      "claim": "The proposed G4 lead fits within 512 characters using the current safe repository name.",
+      "status": "confirmed",
+      "evidence": "The supplied lead has 440 characters excluding the six-character <name> placeholder. safeName permits ASCII letters, digits, dots, underscores and hyphens and caps the result at 60 bytes, giving a maximum of 500 characters.",
+      "source": "[Repository naming](internal/repo/repo.go:372), G4 text supplied for this review"
+    },
+    {
+      "id": "F3",
+      "claim": "A root-commit set is an invariant repository identifier across supported Git operations.",
+      "status": "refuted",
+      "evidence": "Git documents that shallow boundaries are treated as parentless commits, rebase --root can rewrite roots, and filtering can change history object names. Consequently, boundary changes and root-affecting rewrites can change this fingerprint. Equal root sets also establish shared ancestry rather than unique local repository identity; that last conclusion is an inference.",
+      "source": "[Shallow history](https://git-scm.com/docs/shallow), [Rebasing roots](https://git-scm.com/docs/git-rebase), [History filtering](https://git-scm.com/docs/git-filter-branch)"
+    },
+    {
+      "id": "F4",
+      "claim": "Linked worktrees share a common Git directory while retaining worktree-specific state.",
+      "status": "confirmed",
+      "evidence": "Git documents separate worktree Git directories and HEADs, with GIT_COMMON_DIR pointing to shared repository state. The owner's canonical root must therefore remain a separate binding component. rev-parse supports canonical absolute common-directory output.",
+      "source": "[Worktree layout](https://git-scm.com/docs/git-worktree), [Canonical Git paths](https://git-scm.com/docs/git-rev-parse)"
+    },
+    {
+      "id": "F5",
+      "claim": "The existing cached policy supplies an immediately current exposure decision before every call.",
+      "status": "refuted",
+      "evidence": "Policy calls Snapshot, which reuses its existing snapshot until snapshotTTL expires; snapshotTTL is three seconds. Checking only the guidance source's stat does not invalidate that policy cache.",
+      "source": "[Policy and snapshot caching](internal/repo/fileset.go:91), [Cache duration](internal/repo/repo.go:57)"
+    },
+    {
+      "id": "F6",
+      "claim": "Server instructions are independently transmitted during discovery and legacy initialization.",
+      "status": "confirmed",
+      "evidence": "Both dispatcher paths return s.Instructions without executing a tool handler. MCP discovery explicitly includes instructions and can occur before other requests, so a tool-handler-only guard cannot prevent fresh disclosure.",
+      "source": "[Current dispatcher](internal/mcp/server.go:585), [MCP discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover)"
+    },
+    {
+      "id": "F7",
+      "claim": "OpenAI documents use and refresh of server instructions and recommends a self-contained 512-character prefix.",
+      "status": "confirmed",
+      "evidence": "Official documentation says ChatGPT and Codex use server instructions alongside tool metadata, recommends prioritizing the first 512 characters, and describes refreshing server instructions through app settings. These statements do not establish exact cache lifetime or enforced preference precedence.",
+      "source": "[Server instructions](https://developers.openai.com/plugins/build/mcp-server), [Custom MCP management](https://developers.openai.com/api/docs/guides/custom-mcp-server)"
+    },
+    {
+      "id": "F8",
+      "claim": "The actual ChatGPT tunnel integration delivers the complete snapshot and reliably enforces the proposed precedence and provenance distinctions.",
+      "status": "unverified",
+      "evidence": "No real ChatGPT trials or v2 implementation were exercised. Documentation and local payload-size checks cannot establish behavioral adherence or complete host delivery.",
+      "source": "Read-only round 2 review; [Documented instruction use](https://developers.openai.com/plugins/build/mcp-server)"
+    }
+  ],
+  "order": [
+    {
+      "id": "G2",
+      "reason": "Close connection retargeting and define repository continuity before attaching cached repository-specific preferences."
+    },
+    {
+      "id": "G3",
+      "reason": "Make validation implementable and define generations across revocation and concurrent replacement."
+    },
+    {
+      "id": "G5",
+      "reason": "Apply fresh authorization and latched invalidation to tools and instruction-bearing metadata."
+    },
+    {
+      "id": "G6",
+      "reason": "Resolve unavailable-source reporting and removal behavior across restart."
+    },
+    {
+      "id": "G7",
+      "reason": "Run the acceptance protocol through the actual connection after deterministic lifecycle checks pass."
+    }
+  ],
+  "consensus": "no",
+  "remaining_disagreements": [
+    {
+      "id": "G2",
+      "summary": "Existing --bind is mutable; per-profile storage needs a durable tunnel assignment. Root commits need explicit shallow/history/worktree semantics and cannot uniquely authenticate repository identity."
+    },
+    {
+      "id": "G3",
+      "summary": "The raw digest cannot be recomputed from the stored display. Generation continuity must survive revocation."
+    },
+    {
+      "id": "G5",
+      "summary": "The invalidation design is sound in principle, but must also guard discovery/initialization, validate record integrity and obtain a fresh owner-policy decision."
+    },
+    {
+      "id": "G6",
+      "summary": "Comparison failures need an unavailable state, and ordinary removal must preserve consistent snapshot behavior after restart."
+    }
+  ],
+  "summary": "I accept G1, G4 and G7. The lead fits and the amended D3a direction stands. I would not sign v2 until connection lifetime binding, digest validation, discovery-time invalidation and source-error semantics are corrected. No files were modified."
+}

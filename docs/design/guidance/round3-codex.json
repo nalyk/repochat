@@ -1,0 +1,54 @@
+{
+  "responses": [
+    {
+      "id": "G2′",
+      "decision": "accept",
+      "reason": "Durable tunnel assignments close rebinding and alias bypasses. The binding defines filesystem and history continuity, refuses shallow and unborn repositories, and keeps owner and session worktrees distinct. Explicit release makes plugin recreation an owner responsibility without claiming to erase cached context.",
+      "counter_proposal": "No change required."
+    },
+    {
+      "id": "G3′",
+      "decision": "accept",
+      "reason": "Digest validation is now implementable without storing unmasked source. Persistent monotonic generations and serialized changes address revoke/retrust reuse. Corruption detection is correctly distinguished from authentication, and reviewed bytes are never silently transformed.",
+      "counter_proposal": "No change required."
+    },
+    {
+      "id": "G5′",
+      "decision": "accept",
+      "reason": "The shared guard covers tools and both instruction-bearing response paths, validates the complete record, checks generation and display identity, and validates policy dependencies before reusing authorization. Latched refusal and the admitted-call limitation resolve the remaining invalidation objections.",
+      "counter_proposal": "No change required."
+    },
+    {
+      "id": "G6′",
+      "decision": "accept",
+      "reason": "The four states distinguish definite absence from comparison failures. Exposure uncertainty invokes invalidation, while ordinary removal consistently preserves the reviewed snapshot across restart when policy still permits its path.",
+      "counter_proposal": "No change required."
+    },
+    {
+      "id": "G7′",
+      "decision": "accept",
+      "reason": "The full M5 protocol, deterministic lifecycle cases, predetermined adherence thresholds and zero observed provenance-promotion failures provide a concrete experimental release gate. This accepts the protocol, not a claim that it has passed.",
+      "counter_proposal": "No change required."
+    },
+    {
+      "id": "cumulative",
+      "decision": "accept",
+      "reason": "With the accepted earlier counters retained, the cumulative design resolves the outstanding objections: explicit local review, exact reviewed bytes, durable repository scope, guarded delivery, conservative invalidation and measurable experimental behavior.",
+      "counter_proposal": "No sentence changes required."
+    }
+  ],
+  "new_issues": [],
+  "facts": [
+    {
+      "id": "F1",
+      "claim": "The implementation and actual ChatGPT integration have passed the proposed acceptance protocol.",
+      "status": "unverified",
+      "evidence": "This review assessed the cumulative design text; no implementation verification or real ChatGPT trials were performed.",
+      "source": "Round 3 review scope and supplied G7′ protocol."
+    }
+  ],
+  "order": [],
+  "consensus": "yes",
+  "remaining_disagreements": [],
+  "summary": "I sign the cumulative design for experimental implementation. All five amendments are accepted. Non-experimental release remains gated on the accepted protocol; any provenance-promotion failure keeps the feature experimental."
+}

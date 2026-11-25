@@ -1,0 +1,275 @@
+{
+  "facts": [
+    {
+      "id": "F1",
+      "claim": "The current server explicitly prohibits following instructions in repository tool results.",
+      "status": "confirmed",
+      "evidence": "instructionsDetails covers source, comments, commit messages and file names. Both read and write servers include it. The existing repo_overview handler supplies no owner-guidance exception.",
+      "source": "[tools.go](internal/tools/tools.go:22), [session.go](internal/cli/session.go:267)"
+    },
+    {
+      "id": "F2",
+      "claim": "AGENTS.md and CLAUDE.md are currently discoverable key files, without special instruction authority.",
+      "status": "confirmed",
+      "evidence": "manifestNames includes both names. Overview lists matching served files at the root and one directory below it, subject to a 40-file limit; it does not load their contents as instructions.",
+      "source": "[browse.go](internal/repo/browse.go:33)"
+    },
+    {
+      "id": "F3",
+      "claim": "OpenAI documents that ChatGPT uses MCP server instructions alongside tool metadata.",
+      "status": "confirmed",
+      "evidence": "The official server-building guide explicitly identifies ChatGPT and Codex as consumers. This establishes documented model-facing use, but does not establish the exact internal message role, verbatim delivery or reliable obedience.",
+      "source": "[Build an MCP server](https://developers.openai.com/plugins/build/mcp-server)"
+    },
+    {
+      "id": "F4",
+      "claim": "MCP 2026-07-28 supports server instructions through stateless discovery.",
+      "status": "confirmed",
+      "evidence": "DiscoverResult contains optional instructions and caching hints. Servers must implement server/discover; clients may skip calling it. The schema describes instructions as model guidance that a client could include in a system prompt, rather than prescribing a mandatory instruction role.",
+      "source": "[Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover), [DiscoverResult schema](https://modelcontextprotocol.io/specification/2026-07-28/schema#discoverresult)"
+    },
+    {
+      "id": "F5",
+      "claim": "This ChatGPT Chat account consumes instructions from server/discover through the particular Secure MCP Tunnel configuration.",
+      "status": "unverified",
+      "evidence": "Protocol support and general ChatGPT documentation do not demonstrate this exact account, surface and transport path. No real ChatGPT session was exercised during this review.",
+      "source": "[Discovery](https://modelcontextprotocol.io/specification/2026-07-28/server/discover), [OpenAI server instructions](https://developers.openai.com/plugins/build/mcp-server)"
+    },
+    {
+      "id": "F6",
+      "claim": "Refreshing a custom MCP connection reloads server instructions as well as tools and descriptions.",
+      "status": "confirmed",
+      "evidence": "OpenAI documents this refresh behavior. Its testing workflow also calls for restarting or deploying the server, refreshing the connection, checking metadata and starting a new conversation.",
+      "source": "[Add custom MCP server](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Refresh metadata](https://developers.openai.com/plugins/deploy/connect-chatgpt#refresh-metadata)"
+    },
+    {
+      "id": "F7",
+      "claim": "ChatGPT always caches instructions together with the tool list until, and only until, Refresh tools.",
+      "status": "unverified",
+      "evidence": "The documented refresh operation supports planning for stale metadata. It does not specify an exclusive invalidation mechanism, shared cache entry, exact lifetime or behavior in existing conversations. MCP discovery and tools/list are separately cacheable operations.",
+      "source": "[Custom MCP connection management](https://developers.openai.com/api/docs/guides/custom-mcp-server), [MCP caching](https://modelcontextprotocol.io/specification/2026-07-28/server/utilities/caching)"
+    },
+    {
+      "id": "F8",
+      "claim": "repochat currently supplies the same configured instructions through legacy initialization and modern discovery.",
+      "status": "confirmed",
+      "evidence": "Both responses use s.Instructions. Modern discovery and tools/list each advertise ttlMs=3600000 and cacheScope=private. These are server hints, not evidence of ChatGPT's actual cache behavior.",
+      "source": "[server.go](internal/mcp/server.go:594), [legacy initialization](internal/mcp/server.go:651)"
+    },
+    {
+      "id": "F9",
+      "claim": "OpenAI recommends making the first 512 instruction characters independently useful.",
+      "status": "confirmed",
+      "evidence": "Official guidance prioritizes essential information in that prefix and recommends server-wide tool-use guidance without duplicating tool descriptions. This is not a documented 512-character hard limit.",
+      "source": "[Custom MCP guidance](https://developers.openai.com/api/docs/guides/custom-mcp-server), [Server instructions guidance](https://developers.openai.com/plugins/build/mcp-server)"
+    },
+    {
+      "id": "F10",
+      "claim": "A 16 KiB guidance snapshot will reach ChatGPT intact and retain effective instruction authority.",
+      "status": "unverified",
+      "evidence": "I found no applicable guarantee of full-length delivery, maximum accepted instruction size or adherence at that size. The local 16 KiB limit would be a product choice requiring measurement.",
+      "source": "[Server instructions guidance](https://developers.openai.com/plugins/build/mcp-server), [DiscoverResult schema](https://modelcontextprotocol.io/specification/2026-07-28/schema#discoverresult)"
+    },
+    {
+      "id": "F11",
+      "claim": "OpenAI recommends keeping untrusted input out of privileged instruction messages.",
+      "status": "confirmed",
+      "evidence": "Its agent-safety guidance warns that untrusted variables in developer messages give attackers greater control, recommends constrained data flow and evaluations, and acknowledges residual prompt-injection risk. Owner review must therefore be the explicit promotion step; a repository header cannot substitute for it.",
+      "source": "[Safety in building agents](https://developers.openai.com/api/docs/guides/agent-builder-safety)"
+    },
+    {
+      "id": "F12",
+      "claim": "The current repository ID authenticates repository continuity.",
+      "status": "refuted",
+      "evidence": "The ID combines a sanitized directory name with eight hexadecimal characters derived from SHA-256 of the canonical root path. Replacing a repository at that path preserves its ID. Session storage uses this ID, so reusing it alone is insufficient for the proposed trust binding.",
+      "source": "[Repository identity](internal/repo/repo.go:228), [Session storage](internal/repo/session.go:123)"
+    },
+    {
+      "id": "F13",
+      "claim": "The previous G3 counter-proposal established a secure instruction-delivery mechanism.",
+      "status": "refuted",
+      "evidence": "It proposed an external reviewed snapshot and explicit exception, while explicitly warning that hash pinning does not promote tool output into ChatGPT's system hierarchy and that drift notices cannot retract existing instructions. This round must resolve delivery rather than treating that proposal as proof.",
+      "source": "[Prior G3 verdict](docs/design/cli-parity/round1-codex.json), [Agreed item 3](docs/superpowers/specs/2026-11-25-cli-parity-design.md:35)"
+    }
+  ],
+  "verdicts": [
+    {
+      "id": "D1",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "Explicit local review is the right promotion boundary. However, previewing and subsequently rereading the path can approve different bytes. A post-masking size limit does not bound the raw read. Control neutralization also needs to address misleading Unicode formatting. An arbitrary root PATH increases metadata-escaping requirements.",
+      "counter_proposal": "Read once through the existing policy-aware, symlink-resistant opener; bound raw input; validate UTF-8 and regular-file status; derive the hash and final display from those same bytes; persist exactly that reviewed display. Render ambiguous formatting visibly. Define PATH relative to the repository root, print the selected path and repository identity, and fail without prompting in noninteractive mode unless --yes is explicit. Keep trust local-only."
+    },
+    {
+      "id": "D2",
+      "verdict": "partial",
+      "objection_strength": "strong",
+      "critique": "External storage, private permissions and atomic replacement are appropriate. The current repository ID is only a path-derived lookup key. Mode 0600 alone does not secure parent directories, symlinks or a state directory placed inside a served repository. The marker adds no durable authentication.",
+      "counter_proposal": "Validate a private state directory outside the repository and session workspaces, reject symlink substitution, and strictly validate record version, binding and size on load. Store the full canonical root and a defined repository/worktree continuity binding, with replacement requiring explicit rebind. Add a digest of the final reviewed text and a snapshot generation. Store no original redacted values; omit the marker for the selected MVP."
+    },
+    {
+      "id": "D3a",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "This is the simplest candidate with a clear provenance boundary: repository tools cannot insert bytes into server configuration. Calling that configuration a guaranteed trusted instruction role, or claiming it creates user-level authority, overstates the documentation. Appending after today's lengthy instructions also leaves essential exception semantics beyond the recommended prefix. Revocation and repository switching remain substantial lifecycle problems.",
+      "counter_proposal": "Choose an amended D3a for the first experiment. Put repository scope, the explicit exception and its limits in the first 512 characters. Describe the snapshot as owner-approved repository preferences, subordinate to host rules, server constraints and explicit current user requests. Include only reviewed text and safely encoded provenance in the guidance segment. Freeze it for that process; changes require restart, connection refresh and a new conversation. Report drift separately through server-generated overview metadata."
+    },
+    {
+      "id": "D3b",
+      "verdict": "partial",
+      "objection_strength": "strong",
+      "critique": "The secrecy argument fails: the mark is disclosed to the model in both instructions and results. A repository payload can ask the model to copy it into a file, commit message or tool argument; write mode can persist that copy for later reads. However, knowing the mark does not let repository bytes become the actual leading block of a genuine repo_overview response if construction and origin checks are correct. Files read first, search hits, filenames and commit messages remain in different structural locations. The risk is model confusion or replay, not a demonstrated byte-level prefix forgery. Revocation is observed only on another call and cannot erase earlier guidance.",
+      "counter_proposal": "Do not select D3b for the MVP or describe its mark as an authenticator. If later evaluated, bind recognition to the actual repochat tool origin, method, repository, snapshot generation and complete server-owned envelope. Never recognize quoted or copied blocks elsewhere. Keep repository fields outside that envelope and define unambiguous boundaries. Treat the mark as a public correlation value; signatures or longer randomness would not replace host-side verification."
+    },
+    {
+      "id": "D4",
+      "verdict": "disagree",
+      "objection_strength": "strong",
+      "critique": "Retaining an approved snapshot across ordinary source edits or removal is reasonable. Continuing to transmit it after the source becomes withheld conflicts with the stated exposure contract unless the owner separately authorized that exception. D3a also cannot update an already-advertised instruction header on every serve. Hash failures and policy failures must not be reported as unchanged.",
+      "counter_proposal": "Separate changed, removed, unavailable and policy-withheld states. Preserve the reviewed snapshot for ordinary drift and removal without loading replacement guidance. Suspend future guidance delivery when exposure authorization is withdrawn; stop or invalidate an active D3a process before further repository operations. Require explicit review to resume. Keep live drift observations in overview/status, timestamp them, and state that previously delivered context cannot be recalled."
+    },
+    {
+      "id": "D5",
+      "verdict": "partial",
+      "objection_strength": "minor",
+      "critique": "Byte-identical behavior for installations that have never enabled guidance is a useful compatibility requirement. Absence after revocation, an unreadable record and a corrupt record cannot all silently mean the same thing.",
+      "counter_proposal": "Keep golden comparisons for a clean no-snapshot state in both modes and both protocol eras. Separately test revoked active processes, invalid records and binding mismatches. Fail closed on malformed trust state rather than silently falling back to an apparently normal share."
+    },
+    {
+      "id": "D6",
+      "verdict": "agree",
+      "objection_strength": "none",
+      "critique": "One file with no recursive promotion is the correct initial scope. This must also cover indirect instructions such as asking another file to define which future content becomes trusted.",
+      "counter_proposal": "State in the server-controlled contract that references, imports, nested guidance, quoted copies and guidance edited by the model remain ordinary data. The approved text cannot delegate its authority or change this rule."
+    },
+    {
+      "id": "D7",
+      "verdict": "partial",
+      "objection_strength": "moderate",
+      "critique": "Using the owner's checkout avoids automatically promoting session edits. Drift after merge must remain informational and must never trigger automatic review. The owner/session distinction also creates a risk of comparing against the wrong repository object because read tools dynamically switch sources.",
+      "counter_proposal": "Keep guidance storage and source checking attached to the immutable owner binding, independently of the current read-tool source. Exercise start, resume, edit, update, merge and abandon transitions. Permit session edits to guidance files as ordinary edits, but offer no MCP trust or review operation. Apply D4's suspension rule if owner exposure authorization changes."
+    },
+    {
+      "id": "D3-selection",
+      "verdict": "partial",
+      "objection_strength": "strong",
+      "critique": "Neither candidate provides cryptographic instruction authenticity inside ChatGPT or immediate semantic revocation. D3a has fewer model-dependent provenance decisions; D3b adds mixed-trust parsing and a misleading secret-marker story without eliminating cached instructions or prior context.",
+      "counter_proposal": "Use amended D3a with one short reviewed snapshot, a permanently repository-bound plugin/tunnel profile, explicit lifecycle semantics and unchanged runtime permission enforcement. Gate release on real ChatGPT measurements. If server instructions do not reach that surface reliably, stop automatic promotion and use explicit user adoption in the conversation; do not fall back to repository text claiming authority."
+    }
+  ],
+  "missing": [
+    {
+      "id": "M1",
+      "title": "Repository switching can apply cached guidance to another repository",
+      "severity": "critical",
+      "why": "README explicitly says old conversations see the new repository when a tunnel is retargeted. Cached instructions from repository A could then influence operations on B. A correct local snapshot lookup does not repair the model's stale scope.",
+      "proposal": "Require an exclusively repository-bound profile and plugin connection for guidance-enabled serving, enforce the local binding, and prohibit retargeting in this version. Include repository identity in advertised guidance. Test old conversations and attempted takeover with a second repository."
+    },
+    {
+      "id": "M2",
+      "title": "Revocation has three different meanings",
+      "severity": "critical",
+      "why": "Deleting a file can stop later delivery, but an active process may retain it, ChatGPT may retain metadata, and the conversation already contains its effects. D3b addresses only a subsequent overview response.",
+      "proposal": "Define local revocation, process invalidation and conversational reset separately. Detect snapshot deletion or replacement before further tool execution and invalidate the old process. Instruct the owner to refresh and begin a new conversation. Promise no erasure of previous context or effects."
+    },
+    {
+      "id": "M3",
+      "title": "No defined instruction precedence or authority scope",
+      "severity": "major",
+      "why": "Below these rules is an informal model instruction, not an MCP-enforced priority level. Treating guidance as the user's own instructions may also imply authority over unrelated apps, external sends or later explicit requests.",
+      "proposal": "Limit endorsement to repository work and tool-use conventions. Explicit current user requests prevail over standing preferences; host rules, runtime permissions and required confirmations remain controlling. Endorsement grants no additional capability and no authorization for unrelated tools."
+    },
+    {
+      "id": "M4",
+      "title": "Review must approve the exact eventual payload",
+      "severity": "major",
+      "why": "File races, re-redaction, sanitizer changes, delimiter handling or later transformations can make served text differ from what was reviewed. The raw source digest alone does not identify the approved display.",
+      "proposal": "Use one captured input, store final display bytes and their digest, and record transformation version. Validate the complete assembled payload before approval. If later safety processing would materially alter the snapshot, suspend and request renewed local review."
+    },
+    {
+      "id": "M5",
+      "title": "No real-session acceptance protocol",
+      "severity": "major",
+      "why": "A model repeating a guidance identifier proves neither reliable adherence nor rejection of forged guidance. Protocol inspection alone cannot establish the ChatGPT integration.",
+      "proposal": "Use randomized harmless guidance affecting an observable answer and edit. Run matched no-snapshot and approved-snapshot trials, with rules near the beginning and end and several lengths. Include hostile files read before overview, copied markers, commit messages, filenames, search hits, nested imports, write-and-read replay, conflicting current user requests, drift, revocation and repository switching. Record model, surface, account, date, protocol, discovery traffic, refresh state, tool calls and outcomes. Report failures and denominators; any trust-promotion failure blocks that candidate."
+    },
+    {
+      "id": "M6",
+      "title": "Guidance must not be partially delivered",
+      "severity": "major",
+      "why": "A 16 KiB snapshot plus framing exceeds the minimum 16 KiB result budget for D3b. tools.finish can truncate and re-mask the assembled result. D3a has an independently unverified host delivery limit. Partial guidance can omit restrictions or the closing boundary.",
+      "proposal": "Treat the approved guidance segment as indivisible. Reserve framing space and reject configurations that cannot deliver the whole segment. Begin the ChatGPT probe with a short snapshot, for example at most 2 KiB as an experimental product limit, and expand only after measurement. Never describe that number as an OpenAI limit."
+    },
+    {
+      "id": "M7",
+      "title": "Exposure withdrawal and discovery privacy need explicit handling",
+      "severity": "major",
+      "why": "Moving content into discovery changes when it is transmitted: connection setup or refresh can expose it before a tool call. A previously approved file may later be denied by flags or .repochatignore. Private caching is not access control.",
+      "proposal": "Explain discovery-time transmission in the trust prompt. Authorize guidance at startup and before relevant operations using the owner's current policy. Retain private discovery caching and enforce connection access separately. Suspend on exposure withdrawal rather than treating approval as a permanent bypass."
+    },
+    {
+      "id": "M8",
+      "title": "Local trust-state threat model is unstated",
+      "severity": "major",
+      "why": "Outside the repository is not sufficient when state is symlinked, included under a broad served root or writable by an attacker. Conversely, defending against arbitrary code running as the owner's account is beyond what a 0600 JSON file can provide.",
+      "proposal": "State that repository authors and model-controlled tool inputs are adversarial, while the owner's account and approved server binary are trusted. Enforce private directories, safe opens, external placement, bounded parsing and identity validation. Document repository replacement and rebind behavior."
+    },
+    {
+      "id": "M9",
+      "title": "Model-generated copies must never become approval records",
+      "severity": "major",
+      "why": "The model can quote a marker or guidance into a file and later read or merge it. An authentic-looking copy is still repository data. Asking for local review remains a social-engineering path even when automatic trust is impossible.",
+      "proposal": "Keep trust unavailable through MCP, forbid implicit import of repository approval metadata, and make local review show the entire replacement snapshot and scope. Explicitly test that merged guidance edits and copied provenance never update stored approval."
+    }
+  ],
+  "order": [
+    {
+      "id": "M1",
+      "reason": "Resolve repository/profile binding and prohibit connection retargeting before introducing cached repository-specific instructions."
+    },
+    {
+      "id": "M2",
+      "reason": "Specify revocation, replacement and exposure-withdrawal behavior before selecting a serving mechanism."
+    },
+    {
+      "id": "D1-D2",
+      "reason": "Define the exact reviewed bytes, safe local storage, binding and failure states. These are deterministic properties that can be verified independently of ChatGPT."
+    },
+    {
+      "id": "D3a",
+      "reason": "Prototype the smallest delivery path: short process-frozen guidance in server instructions, essential boundaries in the first 512 characters, no marker and no recursive trust."
+    },
+    {
+      "id": "D4-D7",
+      "reason": "Add owner-source drift reporting, exposure checks and session-transition coverage while preserving clean no-snapshot behavior."
+    },
+    {
+      "id": "M5",
+      "reason": "Run repeated real ChatGPT trials through the actual tunnel, including stale metadata and adversarial replay. Establish delivery and behavioral adherence separately."
+    },
+    {
+      "id": "release-gate",
+      "reason": "Release only with measured limitations and unchanged server-side permissions. If delivery or provenance discrimination fails, require explicit conversational adoption instead of automatic tool-result promotion."
+    }
+  ],
+  "cut": [
+    {
+      "id": "secret-marker-authentication",
+      "reason": "A value supplied to the model cannot be assumed secret from model-generated files or tool calls. Longer randomness does not fix this."
+    },
+    {
+      "id": "D3b-for-v1",
+      "reason": "Mixed-trust block recognition adds complexity without solving metadata staleness or revocation of prior context."
+    },
+    {
+      "id": "automatic-refresh-or-recall-claims",
+      "reason": "Neither MCP cache hints nor a changed-file notice guarantees immediate ChatGPT reload or forgetting."
+    },
+    {
+      "id": "recursive-precedence",
+      "reason": "Keep the agreed one-file scope until real-session evidence demonstrates a need and a reliable delivery mechanism."
+    }
+  ],
+  "overall_verdict": "partial",
+  "summary": "I support the reviewed external snapshot, but would not sign v1 as written. Choose amended D3a for a small experiment: exact reviewed bytes, repository-bound connection, explicit instruction limits, live drift metadata and defined process invalidation. D3b's mark is public once shown to the model; actual tool origin and structural position provide its provenance, with model adherence still uncertain. Continuing delivery after exposure withdrawal and implying live semantic revocation are unacceptable. No files were modified and no real ChatGPT behavior was measured."
+}
