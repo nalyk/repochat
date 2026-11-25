@@ -622,10 +622,8 @@ func TestFinishReportsTheReviewedRevision(t *testing.T) {
 	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
 	base := c.base(t)
 	c.replaceLine(t, "a.txt", 1, "A")
-	head := c.head(t)
 	c.replaceLine(t, "a.txt", 1, "AA")
-	_ = head
-	head = c.head(t)
+	head := c.head(t)
 	fin, err := c.s.FinishCall(bg, Call{Expect: head}, true, "squashed")
 	if err != nil {
 		t.Fatal(err)
@@ -704,18 +702,26 @@ func TestReceiptsKeepTheNewest64(t *testing.T) {
 	}
 }
 
-func TestDamagedReceiptsAreReplacedButUnreadableRefusesTheCall(t *testing.T) {
+func TestDamagedOrUnreadableReceiptsRefuseAnOperationCall(t *testing.T) {
 	f := newSessionFixture(t, nil)
-	s, _ := f.start(t, Options{})
+	s, info := f.start(t, Options{})
 	path := filepath.Join(s.dir, "operations.json")
 	if err := os.WriteFile(path, []byte("{not json"), 0o600); err != nil {
 		t.Fatal(err)
 	}
-	if _, err := s.AbandonCall(bg, opCall("aban-aaaa1111", "b1b1b1b1b1b1b1b1"), false); err != nil {
+	_, err := s.AbandonCall(bg, opCall("aban-aaaa1111", "b1b1b1b1b1b1b1b1"), false)
+	if err == nil || !strings.Contains(err.Error(), "operations.json") || !strings.Contains(err.Error(), "nothing was changed") {
 		t.Fatalf("damaged file: %v", err)
 	}
-	if rs := readReceipts(t, s); len(rs) != 1 || rs[0].ID != "aban-aaaa1111" {
-		t.Errorf("receipts after a damaged file: %+v", rs)
+	if _, err := s.StartCall(bg, opCall("start-aaaa1111", "a1a1a1a1a1a1a1a1"), true); err == nil {
+		t.Error("a fresh start ran on a damaged receipt file")
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != info.ID {
+		t.Errorf("the refused calls changed the session: %+v, %v", cur, err)
+	}
+	// A call without an operation id never reads the file.
+	if _, err := s.Start(bg, false); err != nil {
+		t.Errorf("Start without an op: %v", err)
 	}
 	// A directory where the file should be cannot be read.
 	os.Remove(path)
@@ -725,8 +731,81 @@ func TestDamagedReceiptsAreReplacedButUnreadableRefusesTheCall(t *testing.T) {
 	if _, err := s.StartCall(bg, opCall("start-aaaa1111", "a1a1a1a1a1a1a1a1"), false); err == nil {
 		t.Error("an unreadable receipt file did not refuse the call")
 	}
-	if _, err := s.Current(bg); !errors.Is(err, ErrNoSession) {
-		t.Errorf("the refused start still opened a session: %v", err)
+	if err := s.Abandon(bg, false); err != nil {
+		t.Errorf("Abandon without an op: %v", err)
+	}
+}
+
+func TestStartedReceiptsAreNeverEvicted(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s := f.sessions(t, Options{})
+	if err := s.putReceipt(opCall("fin-keepme01", "f1f1f1f1f1f1f1f1"), "finish", receiptStarted, nil, nil); err != nil {
+		t.Fatal(err)
+	}
+	for i := 0; i < 70; i++ {
+		if err := s.putReceipt(opCall(fmt.Sprintf("aban-%04d", i), "b1b1b1b1b1b1b1b1"), "abandon", receiptDone, nil, nil); err != nil {
+			t.Fatal(err)
+		}
+	}
+	rs := readReceipts(t, s)
+	if len(rs) != 64 || rs[0].ID != "fin-keepme01" || rs[0].State != receiptStarted {
+		t.Errorf("%d receipts, first %+v", len(rs), rs[0])
+	}
+}
+
+func TestStartReceiptWithoutInfoRefuses(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s, info := f.start(t, Options{})
+	data, _ := json.Marshal([]receipt{{ID: "start-aaaa1111", Tool: "start", Digest: "a1a1a1a1a1a1a1a1", State: "done", Time: time.Now()}})
+	if err := os.WriteFile(filepath.Join(s.dir, "operations.json"), data, 0o600); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := s.StartCall(bg, opCall("start-aaaa1111", "a1a1a1a1a1a1a1a1"), true); err == nil {
+		t.Fatal("a start receipt without a result started a session")
+	}
+	if cur, err := s.Current(bg); err != nil || cur.ID != info.ID {
+		t.Errorf("session changed: %+v, %v", cur, err)
+	}
+}
+
+func TestAbandonWithBranchDeletionFailureStillLeavesAReceipt(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	branch := c.branch(t)
+	other := filepath.Join(t.TempDir(), "other")
+	gitCmd(t, c.f.dir, "worktree", "add", "-q", "--force", other, branch)
+	call := opCall("aban-aaaa1111", "b1b1b1b1b1b1b1b1")
+	if _, err := c.s.AbandonCall(bg, call, true); err == nil || !strings.Contains(err.Error(), "branch was not deleted") {
+		t.Fatalf("got %v; want the branch-deletion failure", err)
+	}
+	if rs := readReceipts(t, c.s); len(rs) != 1 || rs[0].State != "done" {
+		t.Errorf("receipts: %+v", rs)
+	}
+	if replayed, err := c.s.AbandonCall(bg, call, true); err != nil || !replayed {
+		t.Errorf("retry: %v, %v", replayed, err)
+	}
+}
+
+func TestPartlyUpdatedFinishKeepsItsStartedReceipt(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	call := opCall("fin-aaaa1111", "f1f1f1f1f1f1f1f1")
+	lock := filepath.Join(c.f.dir, ".git", "index.lock")
+	c.s.beforeOwnerMerge = func() {
+		write(t, c.f.dir, ".git/index.lock", "")
+		write(t, c.f.dir, "b.txt", "half\n")
+	}
+	_, err := c.s.FinishCall(bg, call, false, "")
+	os.Remove(lock)
+	if err == nil || !strings.Contains(err.Error(), "partly updated") {
+		t.Fatalf("got %v", err)
+	}
+	if rs := readReceipts(t, c.s); len(rs) != 1 || rs[0].State != "started" {
+		t.Fatalf("receipts: %+v", rs)
+	}
+	c.s.beforeOwnerMerge = nil
+	if _, err := c.s.FinishCall(bg, call, false, ""); err == nil || !strings.Contains(err.Error(), "did not report its outcome") {
+		t.Errorf("retry: %v", err)
 	}
 }
 

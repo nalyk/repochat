@@ -833,10 +833,12 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 	switch {
 	case err != nil:
 		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge of %s as done, but where %s is now could not be read (%v); the session, its branch and its workspace are kept. Check the checkout with git status and git log.", land, rec.StartBranch, err))
+		s.finishReceipt(call, fin)
 		return fin, nil
 	case now != land:
 		fin.Commit = now
 		fin.Notes = append(notes, fmt.Sprintf("WARNING: git reported the merge as done, but %s is at %s, not at the merged commit %s; the session, its branch and its workspace are kept. Check the checkout with git status and git log.", rec.StartBranch, now, land))
+		s.finishReceipt(call, fin)
 		return fin, nil
 	}
 	fin.Notes = notes
@@ -875,11 +877,17 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		fin.Notes = append(fin.Notes, "The session record could not be deleted; the next call reports the session as broken, and --new-session starts another.")
 	}
+	s.finishReceipt(call, fin)
+	return fin, nil
+}
+
+// finishReceipt records fin as the outcome of call; a receipt that cannot be
+// written becomes a note, as the merge has happened.
+func (s *Sessions) finishReceipt(call Call, fin *Finished) {
 	stored := *fin
 	if err := s.putReceipt(call, "finish", receiptDone, &stored, nil); err != nil {
 		fin.Notes = append(fin.Notes, "The receipt of this operation_id could not be written, so a retry of this call is not recognised: "+err.Error())
 	}
-	return fin, nil
 }
 
 // checkMergeOptions refuses a Finish while branch.<start branch>.mergeOptions
@@ -1284,11 +1292,12 @@ func (s *Sessions) AbandonCall(ctx context.Context, call Call, deleteBranch bool
 	if err := os.Remove(filepath.Join(s.dir, sessionFile)); err != nil && !errors.Is(err, os.ErrNotExist) {
 		return false, fmt.Errorf("the session workspace was removed, but its record could not be deleted: %v", pathErrCause(err))
 	}
-	if berr != nil {
-		return false, fmt.Errorf("the session was abandoned, but its branch was not deleted. %v", berr)
-	}
+	// The session is closed from here on, whatever became of its branch.
 	if err := s.putReceipt(call, "abandon", receiptDone, nil, nil); err != nil {
 		s.notify("The session was abandoned, but " + err.Error() + "; a retry of this call is not recognised.")
+	}
+	if berr != nil {
+		return false, fmt.Errorf("the session was abandoned, but its branch was not deleted. %v", berr)
 	}
 	return false, nil
 }

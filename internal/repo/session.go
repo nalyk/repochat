@@ -271,7 +271,10 @@ func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*Sessi
 	defer release()
 	if r, err := s.findReceipt("start", call); err != nil {
 		return nil, err
-	} else if r != nil && r.Info != nil {
+	} else if r != nil {
+		if r.Info == nil {
+			return nil, errors.New("the receipt of this operation_id holds no result (nothing was run)")
+		}
 		info := *r.Info
 		info.Replayed = true
 		return &info, nil

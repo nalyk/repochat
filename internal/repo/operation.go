@@ -143,9 +143,8 @@ type receipt struct {
 }
 
 // readReceipts returns the receipts, oldest first. A missing file, or one
-// that is not a receipt list, is empty (the next write replaces it); a file
-// that cannot be read is an error, so that a call with an operation id is
-// never run on a guess.
+// is empty; a file that cannot be read or parsed is an error naming it, so
+// that a call with an operation id is never run on a guess.
 func (s *Sessions) readReceipts() ([]receipt, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, operationsFile))
 	if errors.Is(err, os.ErrNotExist) {
@@ -156,7 +155,7 @@ func (s *Sessions) readReceipts() ([]receipt, error) {
 	}
 	var rs []receipt
 	if err := json.Unmarshal(data, &rs); err != nil {
-		return nil, nil
+		return nil, fmt.Errorf("%s in repochat's state directory is damaged (%v), so the retry check cannot be made; the owner can inspect or delete it (nothing was changed)", operationsFile, err)
 	}
 	return rs, nil
 }
@@ -201,15 +200,21 @@ func (s *Sessions) putReceipt(call Call, tool, state string, fin *Finished, info
 	}
 	rs = slices.DeleteFunc(rs, func(r receipt) bool { return r.ID == call.Op })
 	rs = append(rs, receipt{ID: call.Op, Tool: tool, Digest: call.Digest, State: state, Time: time.Now().UTC(), Finished: fin, Info: info})
-	if len(rs) > maxReceipts {
-		rs = rs[len(rs)-maxReceipts:]
+	// A "started" receipt is never evicted: it is what refuses a retry of a
+	// merge that may have run. The oldest "done" ones go first.
+	for len(rs) > maxReceipts {
+		i := slices.IndexFunc(rs, func(r receipt) bool { return r.State == receiptDone })
+		if i < 0 {
+			break
+		}
+		rs = slices.Delete(rs, i, i+1)
 	}
 	data, err := json.Marshal(rs)
 	if err != nil {
 		return err
 	}
 	if err := writeFileAtomic(s.dir, operationsFile, append(data, '\n')); err != nil {
-		return fmt.Errorf("the operation receipt cannot be written: %v", pathErrCause(err))
+		return fmt.Errorf("the operation receipt cannot be written: %v (nothing was changed)", pathErrCause(err))
 	}
 	return nil
 }
