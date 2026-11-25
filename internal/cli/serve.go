@@ -143,6 +143,12 @@ func cmdMCP(c *console, args []string) int {
 	}
 	srv.Logf = stderrLogf(c.errw)
 	srv.OnEvent = sink.handle
+	if guidanceKey != "" {
+		if err := deliverGuidance(ctx, srv, r, guidanceKey, stderrLogf(c.errw)); err != nil {
+			fmt.Fprintln(c.errw, "repochat:", repo.Sanitize(err.Error()))
+			return 1
+		}
+	}
 
 	err = srv.Serve(ctx, c.in, c.out)
 	if err != nil && !errors.Is(err, context.Canceled) {
@@ -150,6 +156,26 @@ func cmdMCP(c *console, args []string) int {
 		return 1
 	}
 	return 0
+}
+
+// deliverGuidance gives srv the owner's reviewed guidance for key, if there
+// is any: the instructions that carry it and the guard that refuses every
+// call once it no longer holds. With no guidance state, or no record for the
+// key, srv is left exactly as it was. An error means the process must not
+// serve.
+func deliverGuidance(ctx context.Context, srv *mcp.Server, r *repo.Repo, key string, logf func(string, ...any)) error {
+	store, err := openAssignments(r.Root)
+	if err != nil || store == nil {
+		return err
+	}
+	instr, g, err := guidance.Deliver(ctx, store, key, r.Name, srv.Instructions, r)
+	if err != nil || g == nil {
+		return err
+	}
+	g.Logf = logf
+	srv.Instructions = instr
+	srv.Guard = func(ctx context.Context, _ string) error { return g.Check(ctx) }
+	return nil
 }
 
 // eventSink delivers server events to the launcher (when there is one), the
