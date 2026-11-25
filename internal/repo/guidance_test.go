@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"fmt"
 	"os"
 	"path/filepath"
 	"strings"
@@ -98,12 +99,42 @@ func TestReadGuidanceSourceDefaultsAndRefusals(t *testing.T) {
 
 func TestDisplayRendersInvisibleCharacters(t *testing.T) {
 	r, _ := guidanceRepo(t, Options{}, nil)
-	out, err := r.GuidanceDisplay([]byte("a\u200Bb\u202Ec\x1bd\u2060e\uFEFFf\u200C\u200D key " + fakeAWSKey + "\n"))
+	for _, c := range []rune{
+		0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF, 0x202E, 0x200E, 0x200F, 0x061C, 0x00AD,
+		0x034F, 0x180E, 0x2061, 0x2064, 0x206A, 0x206F, 0xFFF9, 0xFFFB, 0xFE00, 0xFE0F,
+		0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0xE0100, 0xE01EF, 0xE0041,
+	} {
+		out, err := r.GuidanceDisplay([]byte("a" + string(c) + "b"))
+		want := fmt.Sprintf(`a\u%04xb`, c)
+		if c > 0xFFFF {
+			want = fmt.Sprintf(`a\U%08xb`, c)
+		}
+		if err != nil || out != want {
+			t.Errorf("U+%04X: %q, %v; want %q", c, out, err, want)
+		}
+	}
+	out, err := r.GuidanceDisplay([]byte("c\x1bd key " + fakeAWSKey + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
-	mustContain(t, out, `\u200b`, `\u202e`, `\x1b`, `\u2060`, `\ufeff`, `\u200c`, `\u200d`, "[REDACTED:")
-	mustNotContain(t, out, "\u200B", "\u202E", "\x1b", "\u2060", "\uFEFF", fakeAWSKey)
+	mustContain(t, out, `\x1b`, "[REDACTED:")
+	mustNotContain(t, out, "\x1b", fakeAWSKey)
+	if out, _ := r.GuidanceDisplay([]byte("ordinary text é\n")); out != "ordinary text é\n" {
+		t.Errorf("ordinary text changed: %q", out)
+	}
+}
+
+func TestDisplayMasksWhateverTheOptionsAndSeesThroughInvisibles(t *testing.T) {
+	r, _ := guidanceRepo(t, Options{NoRedact: true}, nil)
+	out, err := r.GuidanceDisplay([]byte("k " + fakeAWSKey + "\n"))
+	if err != nil || strings.Contains(out, fakeAWSKey) || !strings.Contains(out, "[REDACTED:") {
+		t.Errorf("no-redact display: %q %v", out, err)
+	}
+	split := fakeAWSKey[:8] + "​" + fakeAWSKey[8:12] + "⁠" + fakeAWSKey[12:]
+	out, err = r.GuidanceDisplay([]byte("k " + split + "\n"))
+	if err != nil || !strings.Contains(out, "[REDACTED:") || strings.Contains(out, fakeAWSKey[:8]) {
+		t.Errorf("split secret: %q %v", out, err)
+	}
 }
 
 func TestDisplayOverTwoKiBIsRefused(t *testing.T) {
@@ -183,7 +214,7 @@ func TestPathServedSeesAFreshRepochatignore(t *testing.T) {
 		t.Fatal(err)
 	}
 	served, in1, err := r.PathServed(bg, "AGENTS.md")
-	if err != nil || !served || !strings.HasSuffix(in1, "") {
+	if err != nil || !served {
 		t.Fatalf("before: %v %v", served, err)
 	}
 	if !strings.HasPrefix(in1, "absent") {
@@ -193,10 +224,6 @@ func TestPathServedSeesAFreshRepochatignore(t *testing.T) {
 	served, in2, err := r.PathServed(bg, "AGENTS.md")
 	if err != nil || served || in2 == in1 {
 		t.Errorf("after: served=%v inputs %q vs %q err=%v", served, in1, in2, err)
-	}
-	// the cached snapshot still says served, proving PathServed bypassed it
-	if p, _ := r.Policy(bg); p.Check("AGENTS.md") != "" {
-		t.Log("snapshot already fresh; bypass not distinguishable")
 	}
 	if served, _, _ := r.PathServed(bg, "README.md"); !served {
 		t.Error("README.md should be served")
@@ -210,4 +237,65 @@ func TestPathServedSeesAFreshRepochatignore(t *testing.T) {
 	if in3 == in2 {
 		t.Error("options must change inputs")
 	}
+}
+
+func TestCaptureBindingIgnoresGrafts(t *testing.T) {
+	dir := newDir(t)
+	write(t, dir, "a", "1\n")
+	c1 := commit(t, dir, "one")
+	write(t, dir, "a", "2\n")
+	c2 := commit(t, dir, "two")
+	write(t, dir, "a", "3\n")
+	commit(t, dir, "three")
+	write(t, dir, ".git/info/grafts", c2+"\n") // graft the second commit as a root
+	r := open(t, dir, Options{})
+	b, err := r.CaptureBinding(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(b.Roots) != 1 || b.Roots[0] != c1 {
+		t.Errorf("roots = %v, want only %s", b.Roots, c1)
+	}
+}
+
+func TestPathServedInputsTrackTheDecisionsInputs(t *testing.T) {
+	check := func(t *testing.T, r *Repo, wantServed bool, prev string) string {
+		t.Helper()
+		served, in, err := r.PathServed(bg, "AGENTS.md")
+		if err != nil || served != wantServed {
+			t.Fatalf("served=%v err=%v, want %v", served, err, wantServed)
+		}
+		if prev != "" && in == prev {
+			t.Errorf("inputs did not change: %s", in)
+		}
+		return in
+	}
+	t.Run("rm cached under tracked-only", func(t *testing.T) {
+		r, dir := guidanceRepo(t, Options{TrackedOnly: true}, map[string]string{"AGENTS.md": "a\n"})
+		in := check(t, r, true, "")
+		gitCmd(t, dir, "rm", "-q", "--cached", "AGENTS.md")
+		check(t, r, false, in)
+	})
+	t.Run("gitignore rule on an untracked file", func(t *testing.T) {
+		r, dir := guidanceRepo(t, Options{}, nil)
+		write(t, dir, "AGENTS.md", "u\n")
+		in := check(t, r, true, "")
+		write(t, dir, ".gitignore", "AGENTS.md\n")
+		check(t, r, false, in)
+	})
+	t.Run("restaged as a symlink", func(t *testing.T) {
+		r, dir := guidanceRepo(t, Options{}, map[string]string{"AGENTS.md": "a\n"})
+		in := check(t, r, true, "")
+		os.Remove(filepath.Join(dir, "AGENTS.md"))
+		os.Symlink("README.md", filepath.Join(dir, "AGENTS.md"))
+		gitCmd(t, dir, "add", "-A")
+		check(t, r, false, in)
+	})
+	t.Run("restaged with other content", func(t *testing.T) {
+		r, dir := guidanceRepo(t, Options{}, map[string]string{"AGENTS.md": "a\n"})
+		in := check(t, r, true, "")
+		write(t, dir, "AGENTS.md", "b\n")
+		gitCmd(t, dir, "add", "-A")
+		check(t, r, true, in)
+	})
 }

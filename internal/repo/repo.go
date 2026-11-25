@@ -473,6 +473,7 @@ func gitEnv() []string {
 		"GIT_NO_LAZY_FETCH=1",
 		"GIT_ALLOW_PROTOCOL=", // set but empty: no transport is permitted
 		"GIT_NO_REPLACE_OBJECTS=1",
+		"GIT_GRAFT_FILE=/dev/null", // grafts would rewrite the history that is served
 		"LC_MESSAGES=C",
 		"LANGUAGE=C",
 	}

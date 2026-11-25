@@ -29,6 +29,7 @@ type Entry struct {
 	Tracked  bool
 	Conflict bool   // has unmerged index stages
 	Withheld string // "" when served, otherwise the reason category
+	Object   string // the index object id of a tracked file, "" otherwise
 }
 
 // Snapshot is the authorised view of the working tree at one moment: every
@@ -38,6 +39,8 @@ type Snapshot struct {
 	Generation string  // changes whenever the set of paths or the policy changes
 	Policy     *Policy
 	Warnings   []string
+	// IgnoreText is the .repochatignore text the policy was built from.
+	IgnoreText string
 	Visible    int
 	Tracked    int
 	Untracked  int
@@ -141,6 +144,7 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 	if err != nil {
 		return nil, err
 	}
+	s.IgnoreText = ignoreText
 	if s.Policy, err = r.newPolicy(ignoreText); err != nil {
 		return nil, err
 	}
@@ -180,7 +184,7 @@ func (r *Repo) buildSnapshot(ctx context.Context) (*Snapshot, error) {
 			s.Entries[i].Conflict = true
 			continue
 		}
-		e := Entry{Path: path, Tracked: true, Conflict: fields[2] != "0"}
+		e := Entry{Path: path, Tracked: true, Conflict: fields[2] != "0", Object: fields[1]}
 		switch fields[0] {
 		case "120000":
 			e.Kind = KindSymlink

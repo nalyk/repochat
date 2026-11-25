@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strings"
 	"syscall"
+	"unicode"
 	"unicode/utf8"
 )
 
@@ -36,13 +37,10 @@ type GuidanceSource struct {
 // ReadGuidanceSource reads the guidance file once. An empty path picks the
 // first of AGENTS.md and CLAUDE.md that git lists and the policy serves. The
 // file must be at the root, a regular file (never a link), valid UTF-8, and at
-// most 8192 bytes. The listing and policy are taken afresh, not from the
-// cached snapshot.
+// most 8192 bytes. The listing and policy are taken afresh (a snapshot built
+// for this call), not from the cached one.
 func (r *Repo) ReadGuidanceSource(ctx context.Context, path string) (*GuidanceSource, error) {
-	r.mu.Lock()
-	r.snap = nil
-	r.mu.Unlock()
-	s, err := r.Snapshot(ctx)
+	s, err := r.buildSnapshot(ctx)
 	if err != nil {
 		return nil, err
 	}
@@ -96,19 +94,59 @@ func (r *Repo) ReadGuidanceSource(ctx context.Context, path string) (*GuidanceSo
 	return &GuidanceSource{Path: rel, Raw: data, RawSHA: hex.EncodeToString(sum[:])}, nil
 }
 
+// guidanceRedactor masks whatever the run's options say: guidance is always
+// shown masked.
+var guidanceRedactor = NewRedactor(true)
+
+// hiddenRune reports the characters GuidanceDisplay makes visible beyond what
+// Sanitize escapes: every format character (Unicode category Cf: zero-width,
+// directional marks, soft hyphen, invisible operators, interlinear
+// annotation), combining grapheme joiner, variation selectors (including the
+// supplement) and the blank-looking Hangul fillers and braille blank.
+func hiddenRune(r rune) bool {
+	switch {
+	case r == 0x034F, r == 0x115F, r == 0x1160, r == 0x3164, r == 0xFFA0, r == 0x2800:
+		return true
+	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF:
+		return true
+	}
+	return unicode.Is(unicode.Cf, r)
+}
+
+func stripHidden(s string) string {
+	return strings.Map(func(r rune) rune {
+		if hiddenRune(r) {
+			return -1
+		}
+		return r
+	}, s)
+}
+
 // GuidanceDisplay renders raw guidance as the owner reviews it and as it is
-// later delivered: secrets masked, control, bidirectional and tag characters
-// shown as escapes (Sanitize), and zero-width characters shown the same way.
-// A result over 2048 bytes is refused, never truncated.
+// later delivered. Secrets are masked always, whatever the run's options; a
+// secret split by invisible characters is still found, because masking looks
+// at each line with those characters removed (a line that gets masked is shown
+// without them). Everything else is shown with control, bidirectional, tag
+// (Sanitize) and invisible characters as \uNNNN or \UNNNNNNNN escapes. A
+// result over 2048 bytes is refused, never truncated.
 func (r *Repo) GuidanceDisplay(raw []byte) (string, error) {
-	masked, _ := r.red.Text(string(raw), false)
+	st := guidanceRedactor.NewState()
+	lines := strings.Split(string(raw), "\n")
+	for i, l := range lines {
+		stripped := stripHidden(l)
+		if m := st.Line(stripped); m != stripped {
+			lines[i] = m
+		}
+	}
 	var b strings.Builder
-	for _, c := range Sanitize(masked) {
-		switch c {
-		case 0x200B, 0x200C, 0x200D, 0x2060, 0xFEFF:
-			fmt.Fprintf(&b, `\u%04x`, c)
-		default:
+	for _, c := range Sanitize(strings.Join(lines, "\n")) {
+		switch {
+		case !hiddenRune(c):
 			b.WriteRune(c)
+		case c > 0xFFFF:
+			fmt.Fprintf(&b, `\U%08x`, c)
+		default:
+			fmt.Fprintf(&b, `\u%04x`, c)
 		}
 	}
 	out := b.String()
@@ -173,7 +211,7 @@ func (r *Repo) CaptureBinding(ctx context.Context) (*Binding, error) {
 	} else if code != 0 {
 		return nil, errors.New("the repository has no commits yet (HEAD is unborn); guidance cannot be bound to it")
 	}
-	out, err := r.git(ctx, 1<<20, "rev-list", "--max-parents=0", "HEAD")
+	out, err := r.git(ctx, 1<<20, "-c", "core.commitGraph=false", "rev-list", "--max-parents=0", "HEAD")
 	if err != nil {
 		return nil, err
 	}
@@ -222,50 +260,47 @@ func (b *Binding) Equal(o *Binding) bool {
 }
 
 // PathServed takes a fresh decision for one root-relative path, never using
-// the cached snapshot: a new listing and the policy as the rules files are
-// now. inputs names what the decision rested on: the SHA-256 of the owner's
-// .repochatignore ("absent" when there is none), then a digest of the
-// options that bear on exposure. The same inputs mean the same decision.
+// the cached snapshot: a snapshot is built for this call, from the rules files
+// as they are now.
+//
+// inputs states exactly what the decision rested on, and equal inputs mean an
+// equal decision: the SHA-256 of the .repochatignore text the policy was built
+// from ("absent" when there is none); a digest of the options that bear on
+// exposure (tracked-only, no-redact, allow, deny, own prefixes and the second
+// rules file's content); the identity of the git program that judges the
+// rules; the snapshot's entry for the path (whether git lists it, tracked or
+// not, kind, merge conflict, the index object id of a tracked file); and
+// whether the file is present in the working tree and as what.
 func (r *Repo) PathServed(ctx context.Context, path string) (served bool, inputs string, err error) {
-	before, err := r.ignoreInput()
-	if err != nil {
-		return false, "", err
-	}
 	s, err := r.buildSnapshot(ctx)
 	if err != nil {
 		return false, "", err
 	}
-	after, err := r.ignoreInput()
+	ignore := "absent"
+	if s.IgnoreText != "" {
+		sum := sha256.Sum256([]byte(s.IgnoreText))
+		ignore = hex.EncodeToString(sum[:])
+	}
+	_, gitID, err := gitIdentity()
 	if err != nil {
 		return false, "", err
 	}
-	if before != after {
-		return false, "", errors.New(".repochatignore changed while the decision was being taken; try again")
+	e, listed := s.Lookup(path)
+	present := "missing"
+	if fi, lerr := r.root.Lstat(path); lerr == nil {
+		present = fi.Mode().Type().String()
+		if fi.Mode().IsRegular() {
+			present = "regular"
+		}
+	} else if !errors.Is(lerr, os.ErrNotExist) {
+		present = "unreadable"
 	}
-	inputs = after + "|" + r.optionsDigest()
+	inputs = fmt.Sprintf("%s|%s|git=%s|entry=%t,%t,%d,%t,%s|file=%s",
+		ignore, r.optionsDigest(), gitID, listed, e.Tracked, e.Kind, e.Conflict, e.Object, present)
 	if s.Policy.Check(path) != "" {
 		return false, inputs, nil
 	}
-	e, ok := s.Lookup(path)
-	return ok && e.Withheld == "" && e.Kind == KindRegular, inputs, nil
-}
-
-// ignoreInput is the SHA-256 of the owner checkout's .repochatignore, or
-// "absent".
-func (r *Repo) ignoreInput() (string, error) {
-	op := r.newOpener()
-	defer op.Close()
-	data, _, truncated, err := op.ReadAll(ignoreFileName, maxIgnoreFile)
-	switch {
-	case errors.Is(err, os.ErrNotExist):
-		return "absent", nil
-	case err != nil:
-		return "", describeErr(ignoreFileName, err)
-	case truncated:
-		return "", errors.New(".repochatignore is larger than 256 KB; refusing to guess at the policy")
-	}
-	sum := sha256.Sum256(data)
-	return hex.EncodeToString(sum[:]), nil
+	return listed && e.Withheld == "" && e.Kind == KindRegular, inputs, nil
 }
 
 // optionsDigest covers the options that decide what is exposed, including
