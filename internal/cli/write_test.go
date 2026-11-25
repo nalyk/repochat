@@ -702,3 +702,113 @@ func TestNotesFromRealToolResults(t *testing.T) {
 		t.Errorf("abandon --delete-branch: %+v", n)
 	}
 }
+
+func TestSessionDiffShowsWhatFinishWouldLand(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	first, isErr := d.call("apply_changes", createNotes)
+	if isErr {
+		t.Fatalf("apply_changes: %s", first)
+	}
+	second, isErr := d.call("apply_changes", map[string]any{
+		"changes": []any{map[string]any{"op": "create", "path": "other.md", "text": "second-file-plugh\n"}},
+		"message": "add other",
+	})
+	if isErr {
+		t.Fatalf("apply_changes: %s", second)
+	}
+	re := regexp.MustCompile(`checkpoint ([0-9a-f]{12})`)
+	cp1 := re.FindStringSubmatch(first)
+	if cp1 == nil {
+		t.Fatalf("no checkpoint in %s", first)
+	}
+
+	out, errText, code := runCLI("session", "diff", "--root", e.repo)
+	if code != 0 {
+		t.Fatalf("session diff: %d %s", code, errText)
+	}
+	wantIn(t, out, "notes.md", "+secret-sauce-xyzzy", "other.md", "+second-file-plugh")
+
+	out, errText, code = runCLI("session", "diff", "--stat", "--root", e.repo)
+	if code != 0 {
+		t.Fatalf("session diff --stat: %d %s", code, errText)
+	}
+	wantIn(t, out, "notes.md", "other.md")
+	if strings.Contains(out, "xyzzy") || strings.Contains(out, "+++") {
+		t.Errorf("--stat shows patch lines:\n%s", out)
+	}
+
+	out, errText, code = runCLI("session", "diff", "--checkpoint", cp1[1], "--root", e.repo)
+	if code != 0 {
+		t.Fatalf("session diff --checkpoint: %d %s", code, errText)
+	}
+	wantIn(t, out, "notes.md", "+secret-sauce-xyzzy")
+	if strings.Contains(out, "other.md") || strings.Contains(out, "plugh") {
+		t.Errorf("--checkpoint shows another checkpoint's change:\n%s", out)
+	}
+}
+
+func TestSessionDiffWithoutASessionOrOnTheWrongCommand(t *testing.T) {
+	e := setup(t, "")
+	out, errText, code := runCLI("session", "diff", "--root", e.repo)
+	if code != 0 || !strings.Contains(out, "No session is open for") {
+		t.Errorf("session diff without a session: %d %s %s", code, out, errText)
+	}
+	for _, args := range [][]string{{"finish", "--stat"}, {"status", "--checkpoint", "abc"}} {
+		_, errText, code = runCLI(append([]string{"session"}, append(args, "--root", e.repo)...)...)
+		if code != 2 || !strings.Contains(errText, "is an option of `repochat session diff`") {
+			t.Errorf("session %v: %d %s", args, code, errText)
+		}
+	}
+}
+
+func TestSessionDiffRefusesHostileCheckpoints(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	if text, isErr := d.call("apply_changes", createNotes); isErr {
+		t.Fatalf("apply_changes: %s", text)
+	}
+	for _, bad := range []string{"--output=x", "HEAD^{/x}", "-x"} {
+		out, errText, code := runCLI("session", "diff", "--checkpoint", bad, "--root", e.repo)
+		if code == 0 {
+			t.Errorf("--checkpoint %q succeeded: %s", bad, out)
+		}
+		if strings.Contains(out, "notes.md") {
+			t.Errorf("--checkpoint %q showed a diff:\n%s", bad, out)
+		}
+		_ = errText
+		for _, dir := range []string{e.repo, "."} {
+			if _, err := os.Stat(filepath.Join(dir, "x")); err == nil {
+				t.Errorf("--checkpoint %q wrote a file x in %s", bad, dir)
+			}
+		}
+	}
+	if ws := sessionWorkspaces(t); len(ws) > 0 {
+		if _, err := os.Stat(filepath.Join(ws[0], "x")); err == nil {
+			t.Error("a file x was written in the session workspace")
+		}
+	}
+}
+
+func TestSessionDiffSaysWhenNotEverythingFit(t *testing.T) {
+	e, d, _, _ := startWriting(t)
+	first, isErr := d.call("apply_changes", map[string]any{
+		"changes": []any{map[string]any{"op": "create", "path": "big.txt", "text": strings.Repeat("line of text\n", 400)}},
+		"message": "add big",
+	})
+	if isErr {
+		t.Fatalf("apply_changes: %s", first)
+	}
+	cp := regexp.MustCompile(`checkpoint ([0-9a-f]{12})`).FindStringSubmatch(first)
+	if cp == nil {
+		t.Fatalf("no checkpoint in %s", first)
+	}
+	old := terminalDiffBudget
+	terminalDiffBudget = 600
+	defer func() { terminalDiffBudget = old }()
+	out, _, code := runCLI("session", "diff", "--root", e.repo)
+	if code != 0 {
+		t.Fatalf("session diff: %d", code)
+	}
+	wantIn(t, out, "Not everything fit: `git diff main...repochat/")
+	out, _, _ = runCLI("session", "diff", "--checkpoint", cp[1], "--root", e.repo)
+	wantIn(t, out, "Not everything fit: `git diff "+cp[1]+"^ "+cp[1]+"`")
+}

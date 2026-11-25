@@ -1,6 +1,7 @@
 package cli
 
 import (
+	"context"
 	"errors"
 	"flag"
 	"fmt"
@@ -9,7 +10,7 @@ import (
 	"github.com/nalyk/repochat/internal/repo"
 )
 
-// cmdSession is `repochat session [status|finish|abandon]`: the write-mode
+// cmdSession is `repochat session [status|diff|finish|abandon]`: the write-mode
 // session of a repository, from the terminal. It works whether or not
 // repochat is serving; the session engine serialises the two.
 func cmdSession(c *console, args []string) int {
@@ -18,9 +19,9 @@ func cmdSession(c *console, args []string) int {
 		sub, args = args[0], args[1:]
 	}
 	switch sub {
-	case "status", "finish", "abandon":
+	case "status", "diff", "finish", "abandon":
 	default:
-		c.fail("unknown session command %q: use status, finish or abandon", sub)
+		c.fail("unknown session command %q: use status, diff, finish or abandon", sub)
 		return 2
 	}
 	fs := flag.NewFlagSet("session "+sub, flag.ContinueOnError)
@@ -30,12 +31,14 @@ func cmdSession(c *console, args []string) int {
 	squash := fs.Bool("squash", false, "finish: land the whole session as one new commit instead of fast-forwarding")
 	message := fs.String("message", "", "finish --squash: the message of that commit")
 	deleteBranch := fs.Bool("delete-branch", false, "abandon: also delete the session branch (default: it is kept)")
+	checkpoint := fs.String("checkpoint", "", "diff: show only this checkpoint's change")
+	stat := fs.Bool("stat", false, "diff: list the changed files with their line counts instead of the patch")
 	fs.BoolVar(&c.yes, "yes", false, "finish: merge without asking")
 	if code, ok := parseOptions(c, fs, args); !ok {
 		return code
 	}
 	// An option of another subcommand is a mistake, not something to ignore.
-	only := map[string]string{"squash": "finish", "message": "finish", "yes": "finish", "delete-branch": "abandon"}
+	only := map[string]string{"squash": "finish", "message": "finish", "yes": "finish", "delete-branch": "abandon", "checkpoint": "diff", "stat": "diff"}
 	var wrong string
 	fs.Visit(func(f *flag.Flag) {
 		if want, ok := only[f.Name]; ok && want != sub && wrong == "" {
@@ -116,6 +119,9 @@ func cmdSession(c *console, args []string) int {
 		c.fail("%v", err)
 		return 1
 	}
+	if sub == "diff" {
+		return printSessionDiff(ctx, c, r, st, *checkpoint, *stat)
+	}
 	printSessionStatus(c, st)
 	if sub == "status" {
 		return 0
@@ -177,6 +183,33 @@ func cmdSession(c *console, args []string) int {
 		note += " · WARNING: the merge did not end cleanly"
 	}
 	record(sessionNote{Note: note, Checkpoint: fin.Commit, Files: len(fin.Files), Paths: paths, More: more})
+	return 0
+}
+
+// terminalDiffBudget is the size of diff the terminal shows: the owner's
+// own screen, not a model's context, so it is effectively unlimited.
+var terminalDiffBudget = 64 << 20
+
+// printSessionDiff shows what finish would land, or one checkpoint's change.
+func printSessionDiff(ctx context.Context, c *console, r *repo.Repo, st *repo.SessionStatus, checkpoint string, stat bool) int {
+	o := repo.DiffOptions{Mode: "range", Base: st.Info.StartBranch, Target: st.Info.Head, MergeBase: true, StatOnly: stat}
+	if checkpoint != "" {
+		o = repo.DiffOptions{Mode: "range", Base: checkpoint + "^", Target: checkpoint, StatOnly: stat}
+	}
+	res, err := r.Diff(ctx, o, terminalDiffBudget)
+	if err != nil {
+		c.fail("%v", err)
+		return 1
+	}
+	fmt.Fprintln(c.out, strings.TrimRight(res.Text, "\n"))
+	if len(res.Omitted)+len(res.Cut) > 0 || res.Incomplete {
+		start, branch := repo.SanitizeLine(st.Info.StartBranch), repo.SanitizeLine(st.Info.Branch)
+		if checkpoint != "" {
+			fmt.Fprintf(c.out, "Not everything fit: `git diff %s^ %s` shows the rest.\n", repo.SanitizeLine(checkpoint), repo.SanitizeLine(checkpoint))
+		} else {
+			fmt.Fprintf(c.out, "Not everything fit: `git diff %s...%s` shows the rest.\n", start, branch)
+		}
+	}
 	return 0
 }
 
