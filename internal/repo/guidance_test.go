@@ -113,7 +113,7 @@ func TestDisplayRendersInvisibleCharacters(t *testing.T) {
 			t.Errorf("U+%04X: %q, %v; want %q", c, out, err, want)
 		}
 	}
-	out, err := r.GuidanceDisplay([]byte("c\x1bd key " + fakeAWSKey + "\n"))
+	out, err := r.GuidanceDisplay([]byte("c\x1bd\nkey " + fakeAWSKey + "\n"))
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -298,4 +298,61 @@ func TestPathServedInputsTrackTheDecisionsInputs(t *testing.T) {
 		gitCmd(t, dir, "add", "-A")
 		check(t, r, true, in)
 	})
+}
+
+func TestDisplayEscapesEveryCodePointOffTheAllowlist(t *testing.T) {
+	r, _ := guidanceRepo(t, Options{}, nil)
+	var hidden []rune
+	for c := rune(0); c <= 0x10FFFF; c++ {
+		if c >= 0xD800 && c <= 0xDFFF || c == 'a' {
+			continue
+		}
+		if !hiddenRune(c) {
+			continue
+		}
+		hidden = append(hidden, c)
+	}
+	if len(hidden) < 3800 {
+		t.Fatalf("only %d hidden runes", len(hidden))
+	}
+	// the display of one line per rune, so a pass-through shows as a raw rune
+	for _, c := range hidden {
+		out, err := r.GuidanceDisplay([]byte("x" + string(c) + "y"))
+		if err != nil {
+			continue // an over-long result is refused, never shown
+		}
+		if strings.ContainsRune(out, c) {
+			t.Fatalf("U+%04X shown raw: %q", c, out)
+		}
+	}
+	// the specific ones the reviews found
+	for _, c := range []rune{0x17B4, 0x17B5, 0x180B, 0x180D, 0x180F, 0x2065, 0xFFF0, 0xFFF8, 0xE0080, 0xE0FFF, 0x0378, 0xE000} {
+		if !hiddenRune(c) {
+			t.Errorf("U+%04X is not hidden", c)
+		}
+	}
+	for _, c := range []rune{'a', ' ', '\n', '\t', 0xE9, 0x4E2D, 0x1F600} {
+		if hiddenRune(c) {
+			t.Errorf("U+%04X is hidden", c)
+		}
+	}
+}
+
+func TestGitFailureReportsTheRealErrorNotTheGraftHint(t *testing.T) {
+	dir := newDir(t)
+	write(t, dir, "a", "1\n")
+	c1 := commit(t, dir, "one")
+	write(t, dir, ".git/info/grafts", c1+"\n")
+	r := open(t, dir, Options{})
+	out, _, code, err := r.gitRaw(bg, 1<<16, "log", "no-such-ref-here")
+	if err != nil || code == 0 {
+		t.Fatalf("code=%d err=%v", code, err)
+	}
+	first := firstErr(nil, out)
+	if strings.Contains(first, "hint") || strings.Contains(first, "grafts") {
+		t.Errorf("first line is the hint: %q (all: %q)", first, out)
+	}
+	if !strings.Contains(string(out), "fatal") && !strings.Contains(string(out), "error") {
+		t.Errorf("no real error in %q", out)
+	}
 }

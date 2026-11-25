@@ -98,19 +98,25 @@ func (r *Repo) ReadGuidanceSource(ctx context.Context, path string) (*GuidanceSo
 // shown masked.
 var guidanceRedactor = NewRedactor(true)
 
-// hiddenRune reports the characters GuidanceDisplay makes visible beyond what
-// Sanitize escapes: every format character (Unicode category Cf: zero-width,
-// directional marks, soft hyphen, invisible operators, interlinear
-// annotation), combining grapheme joiner, variation selectors (including the
-// supplement) and the blank-looking Hangul fillers and braille blank.
+// hiddenRune reports the runes GuidanceDisplay never shows as themselves. It
+// is an allowlist: a rune is shown only when it is a newline or tab or
+// graphic (so unassigned, format, control and private-use runes are all
+// escaped), is not a variation selector or another default-ignorable
+// code point, and is not one of the graphic runes that render blank.
 func hiddenRune(r rune) bool {
-	switch {
-	case r == 0x034F, r == 0x115F, r == 0x1160, r == 0x3164, r == 0xFFA0, r == 0x2800:
-		return true
-	case r >= 0xFE00 && r <= 0xFE0F, r >= 0xE0100 && r <= 0xE01EF:
+	if r == '\n' || r == '\t' {
+		return false
+	}
+	if !unicode.IsGraphic(r) ||
+		unicode.Is(unicode.Variation_Selector, r) ||
+		unicode.Is(unicode.Other_Default_Ignorable_Code_Point, r) {
 		return true
 	}
-	return unicode.Is(unicode.Cf, r)
+	switch r {
+	case 0x115F, 0x1160, 0x3164, 0xFFA0, 0x2800, 0x034F, 0x17B4, 0x17B5:
+		return true
+	}
+	return r >= 0x180B && r <= 0x180F
 }
 
 func stripHidden(s string) string {
@@ -266,8 +272,8 @@ func (b *Binding) Equal(o *Binding) bool {
 // inputs states exactly what the decision rested on, and equal inputs mean an
 // equal decision: the SHA-256 of the .repochatignore text the policy was built
 // from ("absent" when there is none); a digest of the options that bear on
-// exposure (tracked-only, no-redact, allow, deny, own prefixes and the second
-// rules file's content); the identity of the git program that judges the
+// exposure (tracked-only, no-redact, and the policy hash, which covers allow,
+// deny, own prefixes and the second rules file's content as read); the identity of the git program that judges the
 // rules; the snapshot's entry for the path (whether git lists it, tracked or
 // not, kind, merge conflict, the index object id of a tracked file); and
 // whether the file is present in the working tree and as what.
@@ -296,29 +302,18 @@ func (r *Repo) PathServed(ctx context.Context, path string) (served bool, inputs
 		present = "unreadable"
 	}
 	inputs = fmt.Sprintf("%s|%s|git=%s|entry=%t,%t,%d,%t,%s|file=%s",
-		ignore, r.optionsDigest(), gitID, listed, e.Tracked, e.Kind, e.Conflict, e.Object, present)
+		ignore, optionsDigest(r, s), gitID, listed, e.Tracked, e.Kind, e.Conflict, e.Object, present)
 	if s.Policy.Check(path) != "" {
 		return false, inputs, nil
 	}
 	return listed && e.Withheld == "" && e.Kind == KindRegular, inputs, nil
 }
 
-// optionsDigest covers the options that decide what is exposed, including
-// the content of the second rules file.
-func (r *Repo) optionsDigest() string {
+// optionsDigest covers the options that decide what is exposed. The policy's
+// own hash stands for the rules, deny and allow patterns, own prefixes and the
+// second rules file, as the snapshot read them.
+func optionsDigest(r *Repo, s *Snapshot) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "tracked=%t\nnoredact=%t\n", r.Opts.TrackedOnly, r.Opts.NoRedact)
-	for _, k := range []struct {
-		tag  string
-		list []string
-	}{{"allow", r.Opts.Allow}, {"deny", r.Opts.Deny}, {"own", r.Opts.Own}} {
-		for _, v := range k.list {
-			fmt.Fprintf(h, "%s=%q\n", k.tag, v)
-		}
-	}
-	if r.Opts.ExtraIgnoreFile != "" {
-		text, found, err := readExtraIgnore(r.Opts.ExtraIgnoreFile)
-		fmt.Fprintf(h, "extra=%q found=%t err=%t text=%q\n", r.Opts.ExtraIgnoreFile, found, err != nil, text)
-	}
+	fmt.Fprintf(h, "tracked=%t\nnoredact=%t\npolicy=%s\n", r.Opts.TrackedOnly, r.Opts.NoRedact, s.Policy.hash)
 	return hex.EncodeToString(h.Sum(nil))
 }

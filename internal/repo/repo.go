@@ -427,6 +427,9 @@ func versionLess(a, b [3]int) bool {
 // safe.directory). This is defense in depth, not a sandbox.
 var gitBaseConfig = []string{
 	"-c", "core.fsmonitor=false",
+	// GIT_GRAFT_FILE (see gitEnv) makes git print a multi-line deprecation
+	// hint; it must not displace the real error in the first stderr line.
+	"-c", "advice.graftFileDeprecated=false",
 	"-c", "core.hooksPath=/dev/null",
 	"-c", "core.pager=cat",
 	"-c", "core.quotepath=false",
