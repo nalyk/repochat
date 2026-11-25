@@ -100,7 +100,7 @@ Există un design pentru un singur plugin care servește mai multe repository-ur
 
 ## Modul de scriere (experimental)
 
-Modul de scriere este oprit implicit. Fără `--write`, repochat servește cele 13 instrumente doar-citire descrise mai jos și nimic din secțiunea asta nu se aplică. Modul de scriere trece testele automate, dar nu a fost încă folosit dintr-o sesiune reală ChatGPT.
+Modul de scriere este oprit implicit. Fără `--write`, repochat servește cele 13 instrumente doar-citire descrise mai jos și nimic din secțiunea asta nu se aplică. Modul de scriere trece testele automate, iar un prim test de scriere din contul ChatGPT al proprietarului a reușit pe 25 noiembrie 2026; o sarcină cap-coadă măsurată nu a fost încă rulată.
 
 ```bash
 repochat --write                    # partajează și lasă ChatGPT să modifice fișiere într-o sesiune
@@ -305,7 +305,7 @@ Ce nu e făcut încă:
 1. O sesiune reală ChatGPT pe versiunea reparată. Are nevoie de un tunel și de o cheie din contul tău; control plane-ul simulat urmează protocolul documentat, iar serverele OpenAI pot avea reguli pe care el nu le are.
 2. O măsurare a dimensiunii răspunsurilor în conversații reale.
 3. Folosirea interactivă pe macOS. CI trece acolo, dar nimeni nu a stat în fața lui.
-4. Modul de scriere dintr-o sesiune reală ChatGPT. Încă se verifică dacă un cont ChatGPT Plus poate apela măcar un instrument care nu e doar-citire.
+4. O sarcină măsurată în modul de scriere, dintr-o sesiune reală ChatGPT: confirmări, apeluri, latență, alocarea Codex. Un prim test de scriere din contul proprietarului a reușit pe 25 noiembrie 2026, deci acel cont poate apela instrumente care nu sunt doar-citire; altceva nu s-a măsurat încă.
 
 ## Licență
 

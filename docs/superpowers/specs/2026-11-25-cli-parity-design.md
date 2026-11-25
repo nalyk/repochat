@@ -1,6 +1,6 @@
 # ChatGPT + repochat as a coding agent: what is missing, and in what order
 
-Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-25 · status: **consensus with Codex CLI after four rounds; not yet approved by the owner; nothing built**
+Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-25 · status: **consensus with Codex CLI after four rounds; pushed to main at the owner's request on 2026-11-25**
 
 The debate is in [`docs/design/cli-parity/`](../../design/cli-parity/): each round's prompt and Codex's answer, as JSON validated against a schema (`codex exec`, read-only sandbox, live web search). Codex signed in round 4: "I sign the cumulative rounds 1–4 plan, including every accepted counter and the final order." That covers the design. Implementation and whether each platform can support it stay subject to the gates below.
 
@@ -14,7 +14,7 @@ In the CLIs, the model and its tools are one product. Here ChatGPT owns the mode
 
 ## Facts this rests on (selected; all with sources in the transcripts)
 
-- ChatGPT supports write tools on custom MCP servers and asks for confirmation per tool. It can remember an approval for the conversation, per tool, not per argument (round 1, F11–F13). Whether this Plus account may call them is **unverified** (F14).
+- ChatGPT supports write tools on custom MCP servers and asks for confirmation per tool. It can remember an approval for the conversation, per tool, not per argument (round 1, F11–F13). Whether this Plus account may call them was **unverified** when the debate ran (F14); the owner's write test on 2026-11-25 settled it (see G0).
 - Secure MCP Tunnel: 120 s per request including queueing, and progress notifications do not reset it; 10 MiB per message; 600 requests/min (F18–F20). No documented ChatGPT-side tool timeout or tool calls per turn (F21, F22).
 - MCP Tasks are an optional extension in 2026-07-28, not the 2025-11-25 mechanism (F25, F26). Support in ChatGPT is unverified (F27). Image results and widgets through the tunnel are unverified (F24, F34).
 - Codex: separate sandbox and approval policies; Linux uses bwrap + seccomp, macOS uses Seatbelt through `sandbox-exec` (F37, F39, F40). Apple does not support custom Seatbelt policies for third parties (F53).
@@ -25,6 +25,7 @@ In the CLIs, the model and its tools are one product. Here ChatGPT owns the mode
 ## Order
 
 1. **G0: real-session proof.** One disposable real task from a Plus account: discover tools, start a session, read anchors, a multi-file edit, recovery from a stale anchor, checkpoints, undo, finish. Measure confirmations, calls, latency, truncation, interruptions, and whether the Codex allowance moved. Record account, model, protocol, client and date. Probes for Tasks, progress, elicitation, images and a minimal widget run separately and block nothing. **If Plus cannot call write tools, the parity work stops and goes back to the owner.** The run seeds a small repeatable task set (M8).
+   **2026-11-25: the gate is passed.** A write test from the owner's real ChatGPT session, with write mode as built, succeeded. The measured task and the side probes are still to do.
 2. **Harden the edit loop.**
    - Durable operation ids and receipts (M3), so a lost response can be queried and a retry cannot apply twice.
    - The expected session generation and checkpoint on every mutating call (M6).

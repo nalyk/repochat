@@ -4,7 +4,7 @@ Proiect: [`nalyk/repochat`](https://github.com/nalyk/repochat)
 
 ## Nelansat: modul de scriere (experimental)
 
-Inversează, la cererea proprietarului, regula „doar citire pentru totdeauna” din designul 1.0, pentru un mod pornit explicit. Fără `--write` totul rămâne ca în 1.0.0: aceleași 13 instrumente, cu aceleași texte. Nefolosit încă dintr-o sesiune reală ChatGPT. Designul: [`docs/superpowers/specs/2026-11-19-write-mode-edits-design.md`](docs/superpowers/specs/2026-11-19-write-mode-edits-design.md).
+Inversează, la cererea proprietarului, regula „doar citire pentru totdeauna” din designul 1.0, pentru un mod pornit explicit. Fără `--write` totul rămâne ca în 1.0.0: aceleași 13 instrumente, cu aceleași texte. Un prim test de scriere dintr-o sesiune reală ChatGPT a reușit pe 25 noiembrie 2026; nicio sarcină măsurată încă. Designul: [`docs/superpowers/specs/2026-11-19-write-mode-edits-design.md`](docs/superpowers/specs/2026-11-19-write-mode-edits-design.md).
 
 - `repochat --write` (și `repochat mcp --write`): ChatGPT poate modifica fișiere într-o sesiune, adică un `git worktree` pe o ramură `repochat/<dată>-<id>`, sub directorul de stare al repochat, niciodată în checkout-ul proprietarului. `--new-session` pornește o sesiune nouă, `--confirm-merge` lasă merge-ul în seama terminalului.
 - Nouă instrumente noi: `start_session`, `session_status`, `propose_changes`, `apply_changes`, `list_checkpoints`, `undo_to_checkpoint`, `update_session`, `finish_session`, `abandon_session`. Cele de citire servesc spațiul de lucru al sesiunii cât timp e deschisă.

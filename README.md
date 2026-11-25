@@ -100,7 +100,7 @@ A design for one plugin serving several repositories exists in [`docs/superpower
 
 ## Write mode (experimental)
 
-Write mode is off by default. Without `--write`, repochat serves the 13 read-only tools described below and nothing in this section applies. Write mode passes its automated tests, but it has not yet been used from a real ChatGPT session.
+Write mode is off by default. Without `--write`, repochat serves the 13 read-only tools described below and nothing in this section applies. Write mode passes its automated tests, and a first write test from the owner's ChatGPT account succeeded on 25 November 2026; a measured end-to-end task has not been run yet.
 
 ```bash
 repochat --write                    # share, and let ChatGPT edit files in a session
@@ -305,7 +305,7 @@ Still not done:
 1. A real ChatGPT session on the fixed build. It needs a tunnel and key from your account; the mock control plane follows the documented protocol, and OpenAI's servers may have rules it lacks.
 2. A measurement of result sizes in real conversations.
 3. Interactive use on macOS. CI passes there, but nobody has sat in front of it.
-4. Write mode from a real ChatGPT session. Whether a ChatGPT Plus account may call a tool that is not read-only at all is still being checked.
+4. A measured write-mode task from a real ChatGPT session: confirmations, calls, latency, the Codex allowance. A first write test from the owner's account succeeded on 25 November 2026, so that account can call tools that are not read-only; nothing beyond that has been measured.
 
 ## License
 

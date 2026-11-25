@@ -1,6 +1,6 @@
 # Write mode, project 1: edits in a session workspace
 
-Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-19 · status: **approved by the owner on 2026-11-19 and built; not yet used from a real ChatGPT session**
+Project: [`nalyk/repochat`](https://github.com/nalyk/repochat) · 2026-11-19 · status: **approved by the owner on 2026-11-19 and built; a first write test from the owner's real ChatGPT session succeeded on 2026-11-25**
 
 Anything marked "my call" was decided by the author of this document, not by the owner.
 
@@ -73,6 +73,8 @@ A probe (branch `spike/chatgpt-probe`) is with the owner. Its results switch thr
 | May a Plus account call a tool that is not read-only? | build as designed | write mode cannot be used from ChatGPT; it would still work from other MCP clients, and the owner decides whether to continue |
 | Does a request identify its conversation? | project 4 can tie a session to a conversation | one open session per repository, shared by every chat that uses the plugin (as designed here) |
 | Does the client declare elicitation? | a later version may ask the owner questions in-band | not used; nothing here depends on it |
+
+**2026-11-25:** the first question is answered yes. The owner ran a write test with the built write mode from a real ChatGPT session, and it succeeded. The other two are still open.
 
 Nothing in this design requires a yes to the second or third question.
 
