@@ -932,3 +932,42 @@ func TestWorkspaceGitDoesNotKnowIsNotRemoved(t *testing.T) {
 		t.Error("a directory git does not know as the session's worktree was removed")
 	}
 }
+
+func TestNoResyncRefusesInsteadOfSyncing(t *testing.T) {
+	f := newSessionFixture(t, nil)
+	s1, info := f.start(t, Options{Deny: []string{"notes.txt"}})
+	if _, err := s1.Apply(bg, "", []Change{{Op: "create", Path: "new.txt", Text: "x\n"}}, "add"); err != nil {
+		t.Fatal(err)
+	}
+	head := gitCmd(t, info.Workspace, "rev-parse", "HEAD")
+	if exists(filepath.Join(info.Workspace, "notes.txt")) {
+		t.Fatal("notes.txt is in the workspace although it is denied")
+	}
+	s1.Close()
+
+	s2, err := NewSessions(f.owner, SessionOptions{StateDir: f.state, Repo: Options{}, NoResync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s2.Close()
+	_, err = s2.Apply(bg, "", []Change{{Op: "create", Path: "other.txt", Text: "y\n"}}, "add")
+	if err == nil || !strings.Contains(err.Error(), "other exposure options") {
+		t.Fatalf("Apply with other options and NoResync: %v", err)
+	}
+	if exists(filepath.Join(info.Workspace, "notes.txt")) || exists(filepath.Join(info.Workspace, "other.txt")) {
+		t.Error("the workspace was changed")
+	}
+	if got := gitCmd(t, info.Workspace, "rev-parse", "HEAD"); got != head {
+		t.Errorf("head moved: %s -> %s", head, got)
+	}
+
+	// With the same options it works, resync or not.
+	s3, err := NewSessions(f.owner, SessionOptions{StateDir: f.state, Repo: Options{Deny: []string{"notes.txt"}}, NoResync: true})
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer s3.Close()
+	if _, err := s3.Apply(bg, "", []Change{{Op: "create", Path: "other.txt", Text: "y\n"}}, "add"); err != nil {
+		t.Errorf("Apply with matching options: %v", err)
+	}
+}

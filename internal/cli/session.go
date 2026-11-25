@@ -148,6 +148,13 @@ func observeSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*rep
 	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify, Observe: true})
 }
 
+// editSessions prepares the sessions of r for a terminal command that changes
+// the session's files (undo). It never resyncs the workspace: when the session
+// was last brought in line with other exposure options it refuses.
+func editSessions(r *repo.Repo, opts repo.Options, notify func(string)) (*repo.Sessions, error) {
+	return newSessions(r, repo.SessionOptions{Repo: opts, Notify: notify, NoResync: true})
+}
+
 func newSessions(r *repo.Repo, o repo.SessionOptions) (*repo.Sessions, error) {
 	dir, err := sessionsDir()
 	if err != nil {

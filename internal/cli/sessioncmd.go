@@ -10,7 +10,7 @@ import (
 	"github.com/nalyk/repochat/internal/repo"
 )
 
-// cmdSession is `repochat session [status|diff|finish|abandon]`: the write-mode
+// cmdSession is `repochat session [status|diff|undo|finish|abandon]`: the write-mode
 // session of a repository, from the terminal. It works whether or not
 // repochat is serving; the session engine serialises the two.
 func cmdSession(c *console, args []string) int {
@@ -19,10 +19,15 @@ func cmdSession(c *console, args []string) int {
 		sub, args = args[0], args[1:]
 	}
 	switch sub {
-	case "status", "diff", "finish", "abandon":
+	case "status", "diff", "undo", "finish", "abandon":
 	default:
-		c.fail("unknown session command %q: use status, diff, finish or abandon", sub)
+		c.fail("unknown session command %q: use status, diff, undo, finish or abandon", sub)
 		return 2
+	}
+	// The checkpoint of undo is a word, not an option: it comes first.
+	undoTo := ""
+	if sub == "undo" && len(args) > 0 && !strings.HasPrefix(args[0], "-") {
+		undoTo, args = args[0], args[1:]
 	}
 	fs := flag.NewFlagSet("session "+sub, flag.ContinueOnError)
 	fs.SetOutput(c.errw)
@@ -33,7 +38,7 @@ func cmdSession(c *console, args []string) int {
 	deleteBranch := fs.Bool("delete-branch", false, "abandon: also delete the session branch (default: it is kept)")
 	checkpoint := fs.String("checkpoint", "", "diff: show only this checkpoint's change")
 	stat := fs.Bool("stat", false, "diff: list the changed files with their line counts instead of the patch")
-	fs.BoolVar(&c.yes, "yes", false, "finish: merge without asking")
+	fs.BoolVar(&c.yes, "yes", false, "finish, undo: do it without asking")
 	if code, ok := parseOptions(c, fs, args); !ok {
 		return code
 	}
@@ -41,12 +46,19 @@ func cmdSession(c *console, args []string) int {
 	only := map[string]string{"squash": "finish", "message": "finish", "yes": "finish", "delete-branch": "abandon", "checkpoint": "diff", "stat": "diff"}
 	var wrong string
 	fs.Visit(func(f *flag.Flag) {
+		if f.Name == "yes" && sub == "undo" {
+			return
+		}
 		if want, ok := only[f.Name]; ok && want != sub && wrong == "" {
 			wrong = fmt.Sprintf("--%s is an option of `repochat session %s`", f.Name, want)
 		}
 	})
 	if wrong != "" {
 		c.fail("%s", wrong)
+		return 2
+	}
+	if sub == "undo" && undoTo == "" {
+		c.fail("undo needs the checkpoint to restore: repochat session undo <checkpoint> (list_checkpoints shows them)")
 		return 2
 	}
 	if *message != "" && !*squash {
@@ -67,7 +79,11 @@ func cmdSession(c *console, args []string) int {
 		return 1
 	}
 	defer r.Close()
-	ss, err := observeSessions(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
+	open := observeSessions
+	if sub == "undo" {
+		open = editSessions
+	}
+	ss, err := open(r, s.repoOptions(cfg), func(msg string) { c.warn("%s", msg) })
 	if err != nil {
 		c.fail("%v", err)
 		return 1
@@ -125,6 +141,10 @@ func cmdSession(c *console, args []string) int {
 	printSessionStatus(c, st)
 	if sub == "status" {
 		return 0
+	}
+
+	if sub == "undo" {
+		return undoCheckpoint(ctx, c, ss, st, undoTo, record)
 	}
 
 	into := repo.SanitizeLine(st.Info.StartBranch)
@@ -273,4 +293,29 @@ func terminalRecorder(c *console, s *session, r *repo.Repo, tool string) func(se
 			c.warn("cannot write the activity log: %v", err)
 		}
 	}
+}
+
+// undoCheckpoint restores a checkpoint as a new one, after the owner agrees.
+// The head the owner was shown is the one the undo is made against.
+func undoCheckpoint(ctx context.Context, c *console, ss *repo.Sessions, st *repo.SessionStatus, id string, record func(sessionNote)) int {
+	shown := repo.SanitizeLine(id)
+	if !c.confirm(fmt.Sprintf("Undo to %s as a new checkpoint?", shown), false) {
+		switch {
+		case c.interrupted:
+			return 130
+		case !c.tty && !c.yes:
+			c.say("Not undone: there is no terminal to confirm on. Run it in a terminal, or pass --yes.")
+		default:
+			c.say("Not undone; the session stays as it is.")
+		}
+		return 1
+	}
+	res, err := ss.UndoToCall(ctx, repo.Call{Expect: st.Info.Head}, id)
+	if err != nil {
+		c.fail("%v", err)
+		return 1
+	}
+	c.ok("The session is at checkpoint %s (undo to %s)", res.Checkpoint.ID, shown)
+	record(sessionNote{Note: fmt.Sprintf("undo to %s in the terminal: the session is at checkpoint %s", shown, res.Checkpoint.ID), Checkpoint: res.Checkpoint.ID, Files: len(res.Checkpoint.Files)})
+	return 0
 }
