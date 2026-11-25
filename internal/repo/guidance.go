@@ -190,23 +190,29 @@ func (r *Repo) GuidanceDisplay(raw []byte) (string, error) {
 }
 
 // SegmentMarkerLine is the 1-based number of the first line of display that
-// reads as the guidance segment's own end marker or heading: its trimmed,
-// case-folded text equals "end of owner guidance" or starts with "owner
-// guidance". It is 0 when there is none. Such a line could close the segment
-// early and make what follows read as server rules.
+// contains the words "owner guidance" anywhere, in any case and with any run
+// of spaces or tabs between them; 0 when there is none. The phrase frames the
+// guidance section (its heading and END OF OWNER GUIDANCE), so a line using it
+// could close the section early or open a fake one, and near-misses such as
+// "END OF OWNER GUIDANCE." or "--- end of owner guidance ---" count too.
+//
+// It matches the display text, where invisible characters are already
+// literal \uNNNN escapes and so cannot hide the phrase. It matches the ASCII
+// letters of the phrase only: there is no fold of lookalike letters (Cyrillic
+// о, е, а and the like) in repochat, so a phrase spelled with them is not
+// caught here.
 func SegmentMarkerLine(display string) int {
 	for i, l := range strings.Split(display, "\n") {
-		t := strings.ToLower(strings.TrimSpace(l))
-		if t == "end of owner guidance" || strings.HasPrefix(t, "owner guidance") {
+		if strings.Contains(strings.Join(strings.Fields(strings.ToLower(l)), " "), "owner guidance") {
 			return i + 1
 		}
 	}
 	return 0
 }
 
-// SegmentMarkerError is the refusal for a marker on line n.
+// SegmentMarkerError is the refusal for the phrase on line n.
 func SegmentMarkerError(n int) error {
-	return fmt.Errorf("line %d of the guidance reads as the OWNER GUIDANCE heading or its END OF OWNER GUIDANCE marker, which could close the guidance section early; reword that line and run `repochat trust` again", n)
+	return fmt.Errorf("line %d of the guidance contains the words \"owner guidance\"; the guidance text may not contain them, because that phrase frames the guidance section. Reword that line and run `repochat trust` again", n)
 }
 
 // Binding identifies the owner's repository: canonical paths, device and

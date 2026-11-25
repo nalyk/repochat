@@ -41,9 +41,9 @@ func lead(name string) string {
 // inserted exactly as it was reviewed (it was made visible and masked then).
 // Without a record they are base, byte for byte. name goes through the
 // repository name rule (repo.SafeName); anything over MaxInstructions is an
-// error, and so is a display with a line that reads as the segment's own
-// heading or end marker (GuidanceDisplay refuses it already; this is the
-// second line of defence).
+// error, and so is a display with a line that contains the words "owner
+// guidance", which frame the segment (GuidanceDisplay refuses it already;
+// this is the second line of defence).
 func Instructions(name, base string, r *Record) (string, error) {
 	if r == nil {
 		return base, nil
