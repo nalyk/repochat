@@ -1,6 +1,7 @@
 package repo
 
 import (
+	"bytes"
 	"context"
 	"crypto/sha256"
 	"encoding/hex"
@@ -278,42 +279,163 @@ func (b *Binding) Equal(o *Binding) bool {
 // not, kind, merge conflict, the index object id of a tracked file); and
 // whether the file is present in the working tree and as what.
 func (r *Repo) PathServed(ctx context.Context, path string) (served bool, inputs string, err error) {
+	d, err := r.PathDecision(ctx, path)
+	return d.Served, d.Inputs, err
+}
+
+// PathDecision is PathServed with what the decision means kept apart: Served
+// as PathServed; Permitted when the policy allows the path itself, whether or
+// not git lists it; Missing when the working tree definitely has no file
+// there. A source that is Missing but Permitted is absent, not withheld.
+type PathDecision struct {
+	Served, Permitted, Missing bool
+	Inputs                     string
+}
+
+// PathDecision takes the fresh decision PathServed reports.
+func (r *Repo) PathDecision(ctx context.Context, path string) (PathDecision, error) {
 	s, err := r.buildSnapshot(ctx)
 	if err != nil {
-		return false, "", err
-	}
-	ignore := "absent"
-	if s.IgnoreText != "" {
-		sum := sha256.Sum256([]byte(s.IgnoreText))
-		ignore = hex.EncodeToString(sum[:])
-	}
-	_, gitID, err := gitIdentity()
-	if err != nil {
-		return false, "", err
+		return PathDecision{}, err
 	}
 	e, listed := s.Lookup(path)
-	present := "missing"
+	in, err := r.guidanceInputs(s.IgnoreText, s.Policy, e, listed, path)
+	if err != nil {
+		return PathDecision{}, err
+	}
+	d := PathDecision{Permitted: s.Policy.Check(path) == "", Missing: in.present == presentMissing}
+	d.Served = d.Permitted && listed && e.Withheld == "" && e.Kind == KindRegular
+	d.Inputs = in.String()
+	return d, nil
+}
+
+// GuidanceInputs states the inputs PathServed would report for path, without
+// building a snapshot or asking git to judge any rule: it reads the rules
+// files, parses them for the policy's hash, and asks git about this one path
+// only. Equal results mean PathServed would decide as it did.
+func (r *Repo) GuidanceInputs(ctx context.Context, path string) (string, error) {
+	text, err := r.readIgnoreFile(ctx)
+	if err != nil {
+		return "", err
+	}
+	pol, err := r.newPolicy(text)
+	if err != nil {
+		return "", err
+	}
+	e, listed, err := r.entryOf(ctx, path)
+	if err != nil {
+		return "", err
+	}
+	in, err := r.guidanceInputs(text, pol, e, listed, path)
+	if err != nil {
+		return "", err
+	}
+	return in.String(), nil
+}
+
+// entryOf is the snapshot's entry for one path, read from git for that path
+// alone, the way buildSnapshot reads it for all of them.
+func (r *Repo) entryOf(ctx context.Context, path string) (Entry, bool, error) {
+	cached, err := r.git(ctx, 64<<10, "ls-files", "-z", "--stage", "--", path)
+	if err != nil {
+		return Entry{}, false, fmt.Errorf("cannot list tracked files: %w", err)
+	}
+	var e Entry
+	listed := false
+	for _, rec := range bytes.Split(cached, []byte{0}) {
+		if len(rec) == 0 {
+			continue
+		}
+		meta, p, ok := strings.Cut(string(rec), "\t")
+		fields := strings.Fields(meta)
+		if !ok || len(fields) != 3 {
+			return Entry{}, false, errors.New("unexpected output from git ls-files; refusing to continue")
+		}
+		if p != path { // a directory of that name lists its files
+			continue
+		}
+		if listed {
+			e.Conflict = true
+			continue
+		}
+		listed = true
+		e = Entry{Path: p, Tracked: true, Conflict: fields[2] != "0", Object: fields[1]}
+		switch fields[0] {
+		case "120000":
+			e.Kind = KindSymlink
+		case "160000":
+			e.Kind = KindSubmodule
+		}
+	}
+	if listed || r.Opts.TrackedOnly {
+		return e, listed, nil
+	}
+	others, err := r.git(ctx, 64<<10, "ls-files", "-z", "--others", "--exclude-standard", "--", path)
+	if err != nil {
+		return Entry{}, false, fmt.Errorf("cannot list untracked files: %w", err)
+	}
+	for _, rec := range bytes.Split(others, []byte{0}) {
+		if string(rec) == path {
+			return Entry{Path: path}, true, nil
+		}
+	}
+	return Entry{}, false, nil
+}
+
+const (
+	presentMissing    = "missing"
+	presentRegular    = "regular"
+	presentUnreadable = "unreadable"
+)
+
+// decisionInputs is what one exposure decision rests on; String is the
+// inputs PathServed and GuidanceInputs report.
+type decisionInputs struct {
+	ignore, options, gitID string
+	listed                 bool
+	entry                  Entry
+	present                string
+}
+
+func (d decisionInputs) String() string {
+	e := d.entry
+	return fmt.Sprintf("%s|%s|git=%s|entry=%t,%t,%d,%t,%s|file=%s",
+		d.ignore, d.options, d.gitID, d.listed, e.Tracked, e.Kind, e.Conflict, e.Object, d.present)
+}
+
+// guidanceInputs is the one place the inputs of a decision about path are
+// put together, from the .repochatignore text and policy it rests on and the
+// path's entry (listed says whether git lists it).
+func (r *Repo) guidanceInputs(ignoreText string, pol *Policy, e Entry, listed bool, path string) (decisionInputs, error) {
+	d := decisionInputs{ignore: "absent", options: optionsDigest(r, pol), listed: listed, entry: e, present: presentMissing}
+	if ignoreText != "" {
+		sum := sha256.Sum256([]byte(ignoreText))
+		d.ignore = hex.EncodeToString(sum[:])
+	}
+	var err error
+	if _, d.gitID, err = gitIdentity(); err != nil {
+		return decisionInputs{}, err
+	}
 	if fi, lerr := r.root.Lstat(path); lerr == nil {
-		present = fi.Mode().Type().String()
+		d.present = fi.Mode().Type().String()
 		if fi.Mode().IsRegular() {
-			present = "regular"
+			d.present = presentRegular
 		}
 	} else if !errors.Is(lerr, os.ErrNotExist) {
-		present = "unreadable"
+		d.present = presentUnreadable
 	}
-	inputs = fmt.Sprintf("%s|%s|git=%s|entry=%t,%t,%d,%t,%s|file=%s",
-		ignore, optionsDigest(r, s), gitID, listed, e.Tracked, e.Kind, e.Conflict, e.Object, present)
-	if s.Policy.Check(path) != "" {
-		return false, inputs, nil
-	}
-	return listed && e.Withheld == "" && e.Kind == KindRegular, inputs, nil
+	return d, nil
 }
 
 // optionsDigest covers the options that decide what is exposed. The policy's
 // own hash stands for the rules, deny and allow patterns, own prefixes and the
-// second rules file, as the snapshot read them.
-func optionsDigest(r *Repo, s *Snapshot) string {
+// second rules file, as they were read.
+func optionsDigest(r *Repo, p *Policy) string {
 	h := sha256.New()
-	fmt.Fprintf(h, "tracked=%t\nnoredact=%t\npolicy=%s\n", r.Opts.TrackedOnly, r.Opts.NoRedact, s.Policy.hash)
+	fmt.Fprintf(h, "tracked=%t\nnoredact=%t\npolicy=%s\n", r.Opts.TrackedOnly, r.Opts.NoRedact, p.hash)
 	return hex.EncodeToString(h.Sum(nil))
 }
+
+// SafeName is the rule that turns a directory name into a repository's Name:
+// only letters, digits, '.', '_' and '-', at most 60 bytes.
+func SafeName(s string) string { return safeName(s) }

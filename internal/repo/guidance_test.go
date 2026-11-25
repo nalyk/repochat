@@ -3,6 +3,7 @@ package repo
 import (
 	"fmt"
 	"os"
+	"os/exec"
 	"path/filepath"
 	"strings"
 	"testing"
@@ -354,5 +355,119 @@ func TestGitFailureReportsTheRealErrorNotTheGraftHint(t *testing.T) {
 	}
 	if !strings.Contains(string(out), "fatal") && !strings.Contains(string(out), "error") {
 		t.Errorf("no real error in %q", out)
+	}
+}
+
+// GuidanceInputs is the cheap half of PathServed: it must state the same
+// inputs in every state, or the guard's cache would either miss a change or
+// never hit.
+func TestGuidanceInputsAgreeWithPathServed(t *testing.T) {
+	agree := func(t *testing.T, r *Repo, path string) {
+		t.Helper()
+		_, want, err := r.PathServed(bg, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := r.GuidanceInputs(bg, path)
+		if err != nil {
+			t.Fatal(err)
+		}
+		if got != want {
+			t.Errorf("inputs differ:\n GuidanceInputs %s\n PathServed     %s", got, want)
+		}
+	}
+	r, dir := guidanceRepo(t, Options{}, map[string]string{"AGENTS.md": "a\n", "AGENTS.mdx": "x\n"})
+	steps := []struct {
+		name string
+		do   func()
+	}{
+		{"tracked", func() {}},
+		{"modified in the tree", func() { write(t, dir, "AGENTS.md", "b\n") }},
+		{"restaged", func() { gitCmd(t, dir, "add", "AGENTS.md") }},
+		{"withheld by .repochatignore", func() { write(t, dir, ".repochatignore", "AGENTS.md\n") }},
+		{"rules emptied", func() { write(t, dir, ".repochatignore", "# none\n") }},
+		{"removed from the tree", func() { os.Remove(filepath.Join(dir, "AGENTS.md")) }},
+		{"removed from the index", func() { gitCmd(t, dir, "rm", "-q", "--cached", "AGENTS.md") }},
+		{"untracked again", func() { write(t, dir, "AGENTS.md", "u\n") }},
+		{"gitignored", func() { write(t, dir, ".gitignore", "AGENTS.md\n") }},
+		{"a directory", func() {
+			os.Remove(filepath.Join(dir, ".gitignore"))
+			os.Remove(filepath.Join(dir, "AGENTS.md"))
+			write(t, dir, "AGENTS.md/inner", "i\n")
+			gitCmd(t, dir, "add", "AGENTS.md/inner")
+		}},
+		{"a symlink", func() {
+			gitCmd(t, dir, "rm", "-q", "-r", "--cached", "AGENTS.md")
+			os.RemoveAll(filepath.Join(dir, "AGENTS.md"))
+			os.Symlink("README.md", filepath.Join(dir, "AGENTS.md"))
+			gitCmd(t, dir, "add", "AGENTS.md")
+		}},
+	}
+	for _, s := range steps {
+		s.do()
+		t.Run(s.name, func(t *testing.T) { agree(t, r, "AGENTS.md") })
+	}
+	t.Run("conflict", func(t *testing.T) {
+		d := newDir(t)
+		write(t, d, "AGENTS.md", "base\n")
+		commit(t, d, "base")
+		gitCmd(t, d, "checkout", "-q", "-b", "other")
+		write(t, d, "AGENTS.md", "other\n")
+		commit(t, d, "other")
+		gitCmd(t, d, "checkout", "-q", "-")
+		write(t, d, "AGENTS.md", "mine\n")
+		commit(t, d, "mine")
+		cmd := exec.Command("git", "merge", "-q", "other")
+		cmd.Dir = d
+		_ = cmd.Run()
+		agree(t, open(t, d, Options{}), "AGENTS.md")
+	})
+	t.Run("tracked-only", func(t *testing.T) {
+		r, dir := guidanceRepo(t, Options{TrackedOnly: true}, map[string]string{"AGENTS.md": "a\n"})
+		agree(t, r, "AGENTS.md")
+		gitCmd(t, dir, "rm", "-q", "--cached", "AGENTS.md")
+		agree(t, r, "AGENTS.md")
+	})
+	t.Run("second rules file", func(t *testing.T) {
+		extra := filepath.Join(t.TempDir(), "owner-ignore")
+		r, _ := guidanceRepo(t, Options{ExtraIgnoreFile: extra}, map[string]string{"AGENTS.md": "a\n"})
+		agree(t, r, "AGENTS.md")
+		if err := os.WriteFile(extra, []byte("AGENTS.md\n"), 0o644); err != nil {
+			t.Fatal(err)
+		}
+		agree(t, r, "AGENTS.md")
+	})
+}
+
+// PathDecision tells an absent source whose path is still permitted from
+// one the policy withholds.
+func TestPathDecisionTellsAbsentFromWithheld(t *testing.T) {
+	r, dir := guidanceRepo(t, Options{}, nil)
+	write(t, dir, "AGENTS.md", "u\n")
+	d, err := r.PathDecision(bg, "AGENTS.md")
+	if err != nil || !d.Served || !d.Permitted || d.Missing {
+		t.Fatalf("untracked: %+v %v", d, err)
+	}
+	os.Remove(filepath.Join(dir, "AGENTS.md"))
+	if d, err = r.PathDecision(bg, "AGENTS.md"); err != nil || d.Served || !d.Permitted || !d.Missing {
+		t.Fatalf("removed: %+v %v", d, err)
+	}
+	write(t, dir, ".repochatignore", "AGENTS.md\n")
+	if d, err = r.PathDecision(bg, "AGENTS.md"); err != nil || d.Served || d.Permitted || !d.Missing {
+		t.Fatalf("removed and withheld: %+v %v", d, err)
+	}
+	_, inputs, _ := r.PathServed(bg, "AGENTS.md")
+	if d.Inputs != inputs {
+		t.Errorf("inputs %q vs %q", d.Inputs, inputs)
+	}
+}
+
+func TestSafeNameIsTheNameRule(t *testing.T) {
+	r, _ := guidanceRepo(t, Options{}, nil)
+	if SafeName(r.Name) != r.Name {
+		t.Errorf("SafeName(%q) = %q", r.Name, SafeName(r.Name))
+	}
+	if got := SafeName("a b/c" + strings.Repeat("x", 80)); len(got) != 60 || strings.ContainsAny(got, " /") {
+		t.Errorf("SafeName = %q", got)
 	}
 }
