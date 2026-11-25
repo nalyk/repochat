@@ -26,7 +26,7 @@ In the CLIs, the model and its tools are one product. Here ChatGPT owns the mode
 
 1. **G0: real-session proof.** One disposable real task from a Plus account: discover tools, start a session, read anchors, a multi-file edit, recovery from a stale anchor, checkpoints, undo, finish. Measure confirmations, calls, latency, truncation, interruptions, and whether the Codex allowance moved. Record account, model, protocol, client and date. Probes for Tasks, progress, elicitation, images and a minimal widget run separately and block nothing. **If Plus cannot call write tools, the parity work stops and goes back to the owner.** The run seeds a small repeatable task set (M8).
    **2026-11-25: the gate is passed.** A write test from the owner's real ChatGPT session, with write mode as built, succeeded. The measured task and the side probes are still to do.
-2. **Harden the edit loop.**
+2. **Harden the edit loop.** (Built on 2026-11-25; not yet used from a real ChatGPT session.)
    - Durable operation ids and receipts (M3), so a lost response can be queried and a retry cannot apply twice.
    - The expected session generation and checkpoint on every mutating call (M6).
    - A handoff bound to a revision: `finish_session` names the checkpoint it expects (M9).

@@ -113,7 +113,7 @@ repochat session diff               # what finish would land, or one checkpoint 
 repochat session abandon            # remove its workspace; the branch is kept [--delete-branch]
 ```
 
-ChatGPT keeps the tool list it loaded earlier. After you start with `--write` for the first time, and again after you go back to plain `repochat`, open the plugin's settings in ChatGPT and press Refresh tools. Otherwise the nine write tools do not appear, or stay listed after they are gone. ChatGPT asks for confirmation before it calls a tool that is not read-only, and it can remember your answer for the rest of the conversation, separately for each tool.
+ChatGPT keeps the tool list it loaded earlier. After you start with `--write` for the first time, and again after you go back to plain `repochat`, open the plugin's settings in ChatGPT and press Refresh tools. Otherwise the nine write tools do not appear, or stay listed after they are gone. The same applies after an upgrade that adds parameters, such as `operation_id` and `expected_checkpoint` below. ChatGPT asks for confirmation before it calls a tool that is not read-only, and it can remember your answer for the rest of the conversation, separately for each tool.
 
 `--write` cannot be combined with `--no-history`. `repochat mcp --write` does the same for other MCP clients, and `repochat tools --write` and `repochat call --write` show and run the write tools from the terminal.
 
@@ -143,6 +143,16 @@ In a session, every line the model reads carries its number and a short hash, li
 
 A change set is a list of operations: replace, insert or delete lines by anchor; create, remove or move a whole file. Only UTF-8 text files can be edited. Go and JSON files must still parse after the change; other languages are not checked.
 
+A change set can also end a `.go` file with `{"op":"format","path":"x.go"}`. It formats the file with gofmt, through Go's `go/format` package and never a subprocess, after the other operations on that file, and the result gives fresh anchors. It is refused for a file with CRLF line endings or a byte-order mark, for a file with a masked-value line (before or after formatting), for a file the same set creates, removes or moves, for a second format of the same file, and when the set only formats a file that is already formatted.
+
+#### Retries and stale calls
+
+- **`operation_id`** is an optional parameter of `start_session`, `apply_changes`, `undo_to_checkpoint`, `update_session`, `finish_session` and `abandon_session`: 8 to 64 characters, letters, digits, `.`, `_` or `-`. If a result never arrives, the model calls again with the same id. A call repeated with the same id and exactly the same arguments is reported, not repeated. The same id with different arguments is refused. For a call that makes a checkpoint, the record is a trailer on its commit, `Repochat-Operation: <id> <digest>`. Start, finish and abandon keep receipts in `operations.json`, in repochat's state directory for that repository, next to `session.json`: the newest 64 are kept, and an entry for a started session is never dropped. A finish that began merging and did not report its outcome is refused when retried, and you check your checkout by hand. A damaged `operations.json` refuses every call that carries an `operation_id`.
+- **`expected_checkpoint`** is 7 to 64 hexadecimal characters, a prefix of the session's head checkpoint. It is optional on `apply_changes`, `undo_to_checkpoint` and `update_session`, and required on `finish_session`, where the handler enforces it. When the session has moved on, the call is refused and nothing changes.
+- A finished session's result names the merged revision (head and base), gives the command for the full diff, and points to `repochat session diff`. It also says: "No checks were run: repochat cannot run commands yet."
+- `repochat session diff` shows the whole session as `finish_session` would land it; `--checkpoint ID` shows one checkpoint and `--stat` only the file summary.
+- `repochat session undo <checkpoint>` asks before it acts (`--yes` skips the question). It is refused when the share runs with other exposure options than the ones the session was last brought in line with; run it with the same options as the share. An undo to the current checkpoint does nothing.
+
 ### What it guarantees
 
 Each point is covered by automated tests. One of them drives every write tool with hostile paths and values (`..`, absolute paths, `.git` in any letter case, protected and withheld paths, symbolic links committed in the repository or planted in the session copy) against canary files in every place a write must not reach, and checks after each call that every canary is unchanged.
@@ -150,6 +160,7 @@ Each point is covered by automated tests. One of them drives every write tool wi
 - Writes happen only inside the session copy and the git bookkeeping of its branch. The one exception is the merge into your branch, in your checkout, when `finish_session` is called.
 - Apart from that merge, no write reaches a protected path, a withheld file, or anything outside the session copy, including through symbolic links replaced while the call runs. The merge itself brings your branch whatever the session changed, and a session cannot change a protected or withheld path. Protected paths are `.git` and everything in it, continuous-integration definitions (`.github/workflows`, `.gitlab-ci.yml` and the equivalents of other services), hook directories (`.husky`, `.githooks`), `.gitmodules`, `.gitattributes` and `.repochatignore`. Withheld files are those of [What ChatGPT can see](#what-chatgpt-can-see); the `.repochatignore` in your checkout counts as it is on disk, committed or not.
 - A change set is applied completely or not at all.
+- A call repeated with the same operation_id is not applied twice.
 - A change made against outdated content is refused: the anchors vouch for the lines an edit names, and `file_tag` for the lines between the two ends of a longer range and for a file that is removed. Each file is read again right before it is written: one found changed since the check is not overwritten, and the change set is taken back.
 - A line that holds a masked value cannot be changed or deleted. Every line of a private-key block counts, from its BEGIN line to its END line, and nothing can be inserted inside one; an edit after which a masked line would be shown differently is refused as a whole. The model is told that you have to edit it by hand. With `--no-redact` nothing is masked and nothing is locked.
 - No program configured by the repository runs at any step, the final merge included: no hook, filter, merge driver or signing program. Session commits are therefore unsigned. If your git configuration asks for signed commits, `finish_session` refuses and says how to merge by hand. It refuses in the same way while `branch.<name>.mergeOptions` is set for your branch: git adds those options to every merge into it, and they can turn a fast-forward into a stash, a squash or a signed merge commit.
@@ -221,7 +232,7 @@ Quote your patterns and give each its own `--deny` or `--allow`. An unquoted pat
 | `repochat setup` | enter or change the tunnel and key; `--list`, `--remove`, `--bind` |
 | `repochat files`, `tools`, `call` | what is served, which tools the model gets, run a tool yourself |
 | `repochat log` | recent activity (which tool, when, how long) |
-| `repochat session` | the open write-mode session; `finish`, `abandon` |
+| `repochat session` | the open write-mode session; `diff`, `undo`, `finish`, `abandon` |
 | `repochat mcp` | the MCP server itself (stdio) |
 | `repochat mcp-config` | configuration for other MCP clients |
 | `repochat install`, `install-helper` | install the binary, or `tunnel-client` |

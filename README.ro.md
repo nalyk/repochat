@@ -107,11 +107,13 @@ repochat --write                    # partajează și lasă ChatGPT să modifice
 repochat --write --new-session      # pornește o sesiune nouă în loc s-o reia pe cea deschisă
 repochat --write --confirm-merge    # finish_session nu face merge; îl faci tu, cu repochat session finish
 repochat session                    # din orice terminal: sesiunea deschisă, checkpointurile, fișierele schimbate
+repochat session undo <checkpoint>  # readuce un checkpoint ca unul nou, după o întrebare [--yes]
 repochat session finish             # faci merge tu, după o întrebare [--squash] [--message TEXT] [--yes]
+repochat session diff               # ce ar aduce finish, sau un singur checkpoint [--checkpoint ID] [--stat]
 repochat session abandon            # șterge spațiul de lucru; ramura rămâne [--delete-branch]
 ```
 
-ChatGPT păstrează lista de instrumente pe care a încărcat-o mai devreme. După ce pornești prima dată cu `--write`, și din nou după ce revii la `repochat` simplu, deschide setările pluginului în ChatGPT și apasă Refresh tools. Altfel cele nouă instrumente de scriere nu apar, sau rămân în listă după ce au dispărut. ChatGPT cere confirmare înainte să apeleze un instrument care nu este doar-citire și poate ține minte răspunsul tău pentru restul conversației, separat pentru fiecare instrument.
+ChatGPT păstrează lista de instrumente pe care a încărcat-o mai devreme. După ce pornești prima dată cu `--write`, și din nou după ce revii la `repochat` simplu, deschide setările pluginului în ChatGPT și apasă Refresh tools. Altfel cele nouă instrumente de scriere nu apar, sau rămân în listă după ce au dispărut. Același lucru e valabil după o actualizare care adaugă parametri, ca `operation_id` și `expected_checkpoint` de mai jos. ChatGPT cere confirmare înainte să apeleze un instrument care nu este doar-citire și poate ține minte răspunsul tău pentru restul conversației, separat pentru fiecare instrument.
 
 `--write` nu se poate combina cu `--no-history`. `repochat mcp --write` face același lucru pentru alți clienți MCP, iar `repochat tools --write` și `repochat call --write` arată și rulează instrumentele de scriere din terminal.
 
@@ -141,6 +143,16 @@ Fiecare schimbare aplicată de ChatGPT devine un commit pe ramura sesiunii, numi
 
 Un set de modificări este o listă de operații: înlocuire, inserare sau ștergere de linii după ancoră; creare, ștergere sau mutare a unui fișier întreg. Se pot modifica doar fișiere text UTF-8. Fișierele Go și JSON trebuie să rămână valide sintactic după modificare; alte limbaje nu sunt verificate.
 
+Un set de modificări poate încheia un fișier `.go` cu `{"op":"format","path":"x.go"}`. Operația formatează fișierul cu gofmt, prin pachetul `go/format` al lui Go și niciodată printr-un subproces, după celelalte operații pe acel fișier, iar rezultatul dă ancore noi. E refuzată pentru un fișier cu sfârșituri de linie CRLF sau cu marcaj de ordine a octeților (BOM), pentru un fișier cu o linie cu valoare mascată (înainte sau după formatare), pentru un fișier pe care același set îl creează, îl șterge sau îl mută, pentru un al doilea format al aceluiași fișier și când setul doar formatează un fișier deja formatat.
+
+#### Reîncercări și apeluri depășite
+
+- **`operation_id`** este un parametru opțional al lui `start_session`, `apply_changes`, `undo_to_checkpoint`, `update_session`, `finish_session` și `abandon_session`: de la 8 la 64 de caractere, litere, cifre, `.`, `_` sau `-`. Dacă un rezultat nu ajunge, modelul apelează din nou cu același id. Un apel repetat cu același id și exact aceleași argumente este raportat, nu repetat. Același id cu alte argumente este refuzat. Pentru un apel care face un checkpoint, înregistrarea este un trailer al commitului, `Repochat-Operation: <id> <digest>`. Pornirea, încheierea și abandonarea țin chitanțe în `operations.json`, în directorul de stare al repochat pentru acel repository, lângă `session.json`: se păstrează ultimele 64, iar o intrare pentru o sesiune pornită nu se șterge niciodată. O încheiere care a început merge-ul și nu și-a raportat rezultatul este refuzată la reîncercare, iar tu îți verifici checkout-ul de mână. Un `operations.json` deteriorat refuză orice apel care poartă un `operation_id`.
+- **`expected_checkpoint`** are de la 7 la 64 de caractere hexazecimale, un prefix al checkpointului curent al sesiunii. Este opțional la `apply_changes`, `undo_to_checkpoint` și `update_session` și obligatoriu la `finish_session`, unde îl impune handlerul. Dacă sesiunea a avansat între timp, apelul este refuzat și nu se schimbă nimic.
+- Rezultatul unei sesiuni încheiate numește revizia adusă (capul și baza), dă comanda pentru diff-ul complet și trimite la `repochat session diff`. Spune și: „No checks were run: repochat cannot run commands yet.”
+- `repochat session diff` arată toată sesiunea așa cum ar aduce-o `finish_session`; `--checkpoint ID` arată un singur checkpoint, iar `--stat` doar rezumatul pe fișiere.
+- `repochat session undo <checkpoint>` întreabă înainte să acționeze (`--yes` sare peste întrebare). E refuzat când partajarea rulează cu alte opțiuni de expunere decât cele cu care a fost adusă sesiunea la zi ultima dată; rulează-l cu aceleași opțiuni ca partajarea. Un undo la checkpointul curent nu face nimic.
+
 ### Ce garantează
 
 Fiecare punct e acoperit de teste automate. Unul dintre ele trece fiecare instrument de scriere prin căi și valori ostile (`..`, căi absolute, `.git` cu orice majuscule, căi protejate și reținute, symlink-uri comise în repository sau plantate în copia sesiunii) împotriva unor fișiere-martor puse în fiecare loc pe care o scriere nu are voie să-l atingă, și verifică după fiecare apel că niciun martor nu s-a schimbat.
@@ -148,6 +160,7 @@ Fiecare punct e acoperit de teste automate. Unul dintre ele trece fiecare instru
 - Scrierile au loc doar în copia sesiunii și în evidența git a ramurii ei. Singura excepție este merge-ul în ramura ta, în checkout-ul tău, când se apelează `finish_session`.
 - În afară de acel merge, nicio scriere nu ajunge la o cale protejată, la un fișier reținut sau la ceva din afara copiei sesiunii, nici prin symlink-uri înlocuite în timpul apelului. Merge-ul aduce pe ramura ta ce a schimbat sesiunea, iar o sesiune nu poate schimba o cale protejată sau reținută. Căile protejate sunt `.git` cu tot ce e în el, definițiile de integrare continuă (`.github/workflows`, `.gitlab-ci.yml` și echivalentele altor servicii), directoarele de hookuri (`.husky`, `.githooks`), `.gitmodules`, `.gitattributes` și `.repochatignore`. Fișierele reținute sunt cele din [Ce vede ChatGPT](#ce-vede-chatgpt); `.repochatignore` din checkout-ul tău contează așa cum e pe disc, comis sau nu.
 - Un set de modificări se aplică complet sau deloc.
+- Un apel repetat cu același operation_id nu se aplică de două ori.
 - O modificare făcută pe un conținut depășit este refuzată: ancorele răspund pentru liniile pe care le numește o modificare, iar `file_tag` pentru liniile dintre capetele unui interval mai lung și pentru un fișier șters. Fiecare fișier este recitit chiar înainte de a fi scris: unul găsit schimbat de la verificare nu este suprascris, iar setul este retras.
 - O linie care conține o valoare mascată nu poate fi schimbată sau ștearsă. Contează fiecare linie a unui bloc de cheie privată, de la linia BEGIN până la linia END, și nimic nu poate fi inserat în interiorul lui; o modificare după care o linie mascată ar fi arătată altfel este refuzată în întregime. Modelului i se spune că trebuie s-o modifici tu, de mână. Cu `--no-redact` nu se maschează nimic și nu se blochează nimic.
 - Niciun program configurat de repository nu rulează la niciun pas, inclusiv la merge-ul final: niciun hook, filtru, driver de merge sau program de semnare. De aceea commiturile sesiunii nu sunt semnate. Dacă configurația ta git cere commituri semnate, `finish_session` refuză și spune cum faci merge de mână. Refuză la fel cât timp `branch.<nume>.mergeOptions` este setat pentru ramura ta: git adaugă acele opțiuni la fiecare merge în ea, iar ele pot face dintr-un fast-forward un stash, un squash sau un commit de merge semnat.
@@ -219,7 +232,7 @@ Pune tiparele între ghilimele și dă fiecăruia propriul `--deny` sau `--allow
 | `repochat setup` | introduce sau schimbă tunelul și cheia; `--list`, `--remove`, `--bind` |
 | `repochat files`, `tools`, `call` | ce se servește, ce instrumente primește modelul, rulezi tu un instrument |
 | `repochat log` | activitatea recentă (ce instrument, când, cât a durat) |
-| `repochat session` | sesiunea deschisă din modul de scriere; `finish`, `abandon` |
+| `repochat session` | sesiunea deschisă din modul de scriere; `diff`, `undo`, `finish`, `abandon` |
 | `repochat mcp` | serverul MCP propriu-zis (stdio) |
 | `repochat mcp-config` | configurare pentru alți clienți MCP |
 | `repochat install`, `install-helper` | instalează binarul, respectiv `tunnel-client` |
