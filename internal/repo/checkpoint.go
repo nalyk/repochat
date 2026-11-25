@@ -299,7 +299,7 @@ func (s *Sessions) UndoToCall(ctx context.Context, call Call, id string) (*Appli
 	if applied, err := s.replayOperation(ctx, rec, chain, call); applied != nil || err != nil {
 		return applied, err
 	}
-	if err := checkExpected(head, call.Expect); err != nil {
+	if err := checkExpectedPlain(head, call.Expect); err != nil {
 		return nil, err
 	}
 	boundary := rec.Base

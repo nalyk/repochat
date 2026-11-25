@@ -194,6 +194,19 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		text, _, err := call(t, tools, name, args)
 		return text, err
 	}
+	// fin is the arguments of a finish_session call: it must name the
+	// checkpoint the session is at (any valid one when no session is open).
+	fin := func(args map[string]any) map[string]any {
+		out := map[string]any{"expected_checkpoint": "abcdef1"}
+		if ws != "" {
+			out["expected_checkpoint"] = wbGit(t, ws, "rev-parse", "HEAD")
+		}
+		for k, v := range args {
+			out[k] = v
+		}
+		return out
+	}
+
 	// hostile runs a call that must be refused and must change nothing: not
 	// the boundary, not the workspace, not the session branch.
 	refusals := 0
@@ -204,7 +217,12 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 			before = wbTree(t, ws, nil)
 		}
 		refs := w.allRefs()
-		text, err := run(name, args)
+		// An argument the schema itself refuses (too long) is a refusal too.
+		var text string
+		_, err := tools[name].Schema.Validate(args)
+		if err == nil {
+			text, err = run(name, args)
+		}
 		if err == nil {
 			t.Errorf("%s: %s was not refused: %s", label, name, clipped(text))
 		} else {
@@ -258,8 +276,8 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 			{"undo_to_checkpoint", map[string]any{"checkpoint": first}},
 			{"undo_to_checkpoint", map[string]any{"checkpoint": "--all"}},
 			{"update_session", map[string]any{}},
-			{"finish_session", map[string]any{}},
-			{"finish_session", map[string]any{"squash": true, "message": "--all"}},
+			{"finish_session", fin(nil)},
+			{"finish_session", fin(map[string]any{"squash": true, "message": "--all"})},
 			{"abandon_session", map[string]any{"delete_branch": true}},
 		} {
 			if msg := hostile(when+": "+c.name+" without a session", c.name, c.args); !strings.Contains(msg, "start_session") && !strings.Contains(msg, "checkpoint") && !strings.Contains(msg, "propose the change set again") {
@@ -304,7 +322,6 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		}
 	}
 	closed := func() { ws, wtGit = "", "" }
-
 	// --- 1. No session: every write tool refuses --------------------------
 	noSession("before any session")
 
@@ -499,6 +516,36 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		}
 	}
 	undoAll("no checkpoints:")
+	// The new parameters carry hostile values: none may get past the tools.
+	hostileIDs := []string{"..", "../..", "../../etc/passwd", "/etc/passwd", "short", "ab\x00cdefghij", "abcdefgh\nxyz",
+		"op id with spaces", "-rf --all", "abcdef1; rm -rf /", strings.Repeat("a", 65), strings.Repeat("a", 10<<10)}
+	hostileExpect := []string{"..", "../" + first, "/etc/passwd", "abc", "abcdef1\x00", "xyz1234", "abcdef1 --all", "HEAD", "main",
+		strings.Repeat("g", 40), strings.Repeat("a", 41), strings.Repeat("a", 10<<10)}
+	for _, c := range []struct {
+		name string
+		args map[string]any
+	}{
+		{"start_session", map[string]any{}},
+		{"apply_changes", ops(map[string]string{"op": "create", "path": "x.txt", "text": "CANARY-WRITTEN\n"})},
+		{"undo_to_checkpoint", map[string]any{"checkpoint": first}},
+		{"update_session", map[string]any{}},
+		{"finish_session", fin(nil)},
+		{"abandon_session", map[string]any{"delete_branch": true}},
+	} {
+		for key, values := range map[string][]string{"operation_id": hostileIDs, "expected_checkpoint": hostileExpect} {
+			if key == "expected_checkpoint" && (c.name == "start_session" || c.name == "abandon_session") {
+				continue
+			}
+			for _, v := range values {
+				args := map[string]any{}
+				for k, a := range c.args {
+					args[k] = a
+				}
+				args[key] = v
+				hostile(fmt.Sprintf("%s with %s %.20q", c.name, key, v), c.name, args)
+			}
+		}
+	}
 	neutral := func(label, name string, args map[string]any) {
 		t.Helper()
 		before := wbTree(t, ws, nil)
@@ -513,8 +560,8 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		}
 	}
 	neutral("update_session with nothing to merge", "update_session", map[string]any{})
-	hostile("finish_session with nothing to merge", "finish_session", map[string]any{})
-	hostile("finish_session squash with nothing to merge", "finish_session", map[string]any{"squash": true, "message": "--all -x"})
+	hostile("finish_session with nothing to merge", "finish_session", fin(nil))
+	hostile("finish_session squash with nothing to merge", "finish_session", fin(map[string]any{"squash": true, "message": "--all -x"}))
 
 	// --- 5. A merge must not overwrite the owner's own files ----------------
 	start := wbGit(t, ws, "rev-parse", "HEAD")
@@ -533,7 +580,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 		undoAll("with checkpoints:")
 		for _, squash := range []bool{false, true} {
 			hostile(fmt.Sprintf("finish over the owner's %s (squash=%v)", c.what, squash), "finish_session",
-				map[string]any{"squash": squash, "message": "--all -x"})
+				fin(map[string]any{"squash": squash, "message": "--all -x"}))
 		}
 		legit("undo "+c.what, "undo_to_checkpoint", map[string]any{"checkpoint": start})
 	}
@@ -618,7 +665,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 	og("add", "other.txt", ".env.production")
 	og("commit", "-q", "-m", "the owner moves on", "--", "other.txt", ".env.production")
 	want = w.take()
-	hostile("finish while the owner's branch has moved", "finish_session", map[string]any{})
+	hostile("finish while the owner's branch has moved", "finish_session", fin(nil))
 	legit("update_session", "update_session", map[string]any{})
 	if _, err := os.Lstat(filepath.Join(ws, ".env.production")); !os.IsNotExist(err) {
 		t.Errorf("a withheld file merged in from the owner's branch is in the workspace (%v)", err)
@@ -627,7 +674,7 @@ func TestWriteBoundaryThroughEveryTool(t *testing.T) {
 
 	// The one call that may change the owner's checkout.
 	sessionHead := wbGit(t, ws, "rev-parse", "HEAD")
-	if _, _, err := call(t, tools, "finish_session", map[string]any{}); err != nil {
+	if _, _, err := call(t, tools, "finish_session", fin(nil)); err != nil {
 		t.Fatalf("finish_session: %v", err)
 	}
 	closed()

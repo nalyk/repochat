@@ -55,10 +55,29 @@ func validateCall(call Call) error {
 // checkpoint it names: head is the session branch's head (the full ID),
 // expect the hexadecimal prefix the caller gave, or "" for none.
 func checkExpected(head, expect string) error {
-	if expect == "" || strings.HasPrefix(head, strings.ToLower(expect)) {
-		return nil
+	if reason := movedReason(head, expect); reason != "" {
+		return &ChangeError{Reason: reason}
 	}
-	return refusal("", "the session moved: it is at checkpoint %s, not %s; another conversation may be editing it. Call session_status, read the files again and retry with the new checkpoint", head[:12], SanitizeLine(expect))
+	return nil
+}
+
+// checkExpectedPlain is checkExpected for the calls that are not change sets
+// (undo, update, finish): the refusal is plain text, without a change set's
+// "the whole change set was refused".
+func checkExpectedPlain(head, expect string) error {
+	if reason := movedReason(head, expect); reason != "" {
+		return errors.New(reason + " (nothing was changed)")
+	}
+	return nil
+}
+
+// movedReason is why a session at head is not at the checkpoint expect
+// names, or "" when it is (or no checkpoint was named).
+func movedReason(head, expect string) string {
+	if expect == "" || strings.HasPrefix(head, strings.ToLower(expect)) {
+		return ""
+	}
+	return fmt.Sprintf("the session moved: it is at checkpoint %s, not %s; another conversation may be editing it. Call session_status, read the files again and retry with the new checkpoint", head[:12], SanitizeLine(expect))
 }
 
 // replayOperation answers a call whose operation id the session has already
@@ -143,7 +162,7 @@ type receipt struct {
 }
 
 // readReceipts returns the receipts, oldest first. A missing file, or one
-// is empty; a file that cannot be read or parsed is an error naming it, so
+// that is empty, gives none; a file that cannot be read or parsed is an error naming it, so
 // that a call with an operation id is never run on a guess.
 func (s *Sessions) readReceipts() ([]receipt, error) {
 	data, err := os.ReadFile(filepath.Join(s.dir, operationsFile))
@@ -151,11 +170,11 @@ func (s *Sessions) readReceipts() ([]receipt, error) {
 		return nil, nil
 	}
 	if err != nil {
-		return nil, fmt.Errorf("the operation receipts cannot be read, so the retry check cannot be made: %v (nothing was changed)", pathErrCause(err))
+		return nil, fmt.Errorf("the operation receipts cannot be read, so the retry check cannot be made: %v", pathErrCause(err))
 	}
 	var rs []receipt
 	if err := json.Unmarshal(data, &rs); err != nil {
-		return nil, fmt.Errorf("%s in repochat's state directory is damaged (%v), so the retry check cannot be made; the owner can inspect or delete it (nothing was changed)", operationsFile, err)
+		return nil, fmt.Errorf("%s in repochat's state directory is damaged (%v), so the retry check cannot be made; the owner can inspect or delete it", operationsFile, err)
 	}
 	return rs, nil
 }
@@ -170,7 +189,7 @@ func (s *Sessions) findReceipt(tool string, call Call) (*receipt, error) {
 	}
 	rs, err := s.readReceipts()
 	if err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w (nothing was changed)", err)
 	}
 	for i := range rs {
 		r := &rs[i]
@@ -214,7 +233,7 @@ func (s *Sessions) putReceipt(call Call, tool, state string, fin *Finished, info
 		return err
 	}
 	if err := writeFileAtomic(s.dir, operationsFile, append(data, '\n')); err != nil {
-		return fmt.Errorf("the operation receipt cannot be written: %v (nothing was changed)", pathErrCause(err))
+		return fmt.Errorf("the operation receipt cannot be written: %v", pathErrCause(err))
 	}
 	return nil
 }

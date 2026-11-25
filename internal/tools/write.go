@@ -2,6 +2,9 @@ package tools
 
 import (
 	"context"
+	"crypto/sha256"
+	"encoding/hex"
+	"encoding/json"
 	"errors"
 	"fmt"
 	"regexp"
@@ -16,7 +19,7 @@ import (
 // WriteInstructions is the write-mode part of WriteModeInstructions, the
 // server-level guidance of write mode: it follows the guidance both modes
 // share, in place of read mode's statement that nothing can be modified.
-const WriteInstructions = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result)."
+const WriteInstructions = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result). Pass a new operation_id with every call that changes something, and expected_checkpoint (the latest checkpoint you saw) with finish_session."
 
 const (
 	maxChangeItems        = 500     // operations in one change set, as the engine allows
@@ -81,12 +84,23 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 	changes := mcp.Param{Name: "changes", Kind: O, Raw: changesSchema(), MaxBytes: maxChangesBytes,
 		Desc: "The change set: an array of operations over any number of files, applied as one step. Anchors (12:abc) come from read_file or search_code output in this session and refer to the files as they are before the change set; ranges in one file may not overlap."}
 
+	opID := mcp.Param{Name: "operation_id", Kind: S, MaxLen: 64,
+		Desc: "An id you choose for this call, 8–64 letters, digits, `.`, `_` or `-`, new for every call. If the result does not arrive, call again with the same operation_id and the same arguments: work already done is reported, not repeated."}
+	expected := mcp.Param{Name: "expected_checkpoint", Kind: S, MaxLen: 40,
+		Desc: "The checkpoint the session is at, as the last session_status, start_session or apply_changes result showed it. Refused if the session has moved since."}
+	// finish_session's is required, but the handler enforces that: the server
+	// validates the schema before the handler runs, and a schema-level
+	// Required could only give the generic missing-argument error.
+	finishExpected := expected
+	finishExpected.Desc = "Required. " + expected.Desc
+
 	return append(c.readTools(), []mcp.Tool{
 		{
 			Name: "start_session", Title: "Start an editing session", Write: true,
 			Description: "Open a session for editing, or resume the open one. A session is a workspace on a new side branch, made from the commit the user's checkout is on; from then on every tool reads and edits that workspace, never the user's own checkout. Uncommitted changes in the user's checkout are not part of it.",
 			Schema: mcp.Schema{
 				{Name: "fresh", Kind: B, Desc: "Remove the open session's workspace (its branch is kept) and start a new session. Default false: resume the open session when there is one."},
+				opID,
 			},
 			Handler: w((*catalog).startSession),
 		},
@@ -108,6 +122,7 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 				changes,
 				{Name: "plan", Kind: S, MaxLen: 16, Desc: "A plan id from propose_changes (16 hex characters), instead of changes."},
 				{Name: "message", Kind: S, MaxLen: maxMessageChars, Desc: "Checkpoint message: one line saying what the change does, optionally a blank line and more (default: a generic message)."},
+				opID, expected,
 			},
 			Handler: w((*catalog).apply),
 		},
@@ -124,12 +139,14 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 			Description: "Restore the files of an earlier checkpoint, recorded as a new checkpoint: nothing is removed from the session's history, so an undo can be undone too. It cannot go back past the latest update_session. Read the files again afterwards for fresh anchors.",
 			Schema: mcp.Schema{
 				{Name: "checkpoint", Kind: S, Required: true, MaxLen: 64, Desc: "Checkpoint id from list_checkpoints (at least 7 characters)."},
+				opID, expected,
 			},
 			Handler: w((*catalog).undo),
 		},
 		{
 			Name: "update_session", Title: "Bring the session up to date", Write: true,
 			Description: "Merge the commits the user's branch gained since the session started into the session, as a checkpoint. A conflict abandons the merge and changes nothing; resolving conflicts through the tools is not supported. Read files again afterwards for fresh anchors.",
+			Schema:      mcp.Schema{opID, expected},
 			Handler:     w((*catalog).update),
 		},
 		{
@@ -138,6 +155,7 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 			Schema: mcp.Schema{
 				{Name: "squash", Kind: B, Desc: "Land the whole session as one new commit on the user's branch instead of fast-forwarding to its checkpoints (default false)."},
 				{Name: "message", Kind: S, MaxLen: maxMessageChars, Desc: "Message of the squashed commit (squash only; default: a generic message)."},
+				opID, finishExpected,
 			},
 			Handler: w((*catalog).finishSession),
 		},
@@ -146,10 +164,51 @@ func NewWrite(owner *repo.Repo, s *repo.Sessions) []mcp.Tool {
 			Description: "Close the session without merging: its workspace is removed and nothing reaches the user's branch. The session branch is kept, so the user can still merge it with git, unless delete_branch is true. The read tools then serve the user's checkout again.",
 			Schema: mcp.Schema{
 				{Name: "delete_branch", Kind: B, Desc: "Also delete the session branch (default false: it is kept so the work can still be merged by hand)."},
+				opID,
 			},
 			Handler: w((*catalog).abandon),
 		},
 	}...)
+}
+
+// argsDigest identifies a call by its tool and arguments, whatever the order
+// of the keys, and without its operation_id: the same call retried under the
+// same operation_id has the same digest. It is 16 hexadecimal characters.
+func argsDigest(tool string, a mcp.Args) string {
+	norm := make(map[string]any, len(a))
+	for k, v := range a {
+		if k == "operation_id" {
+			continue
+		}
+		if raw, ok := v.(json.RawMessage); ok {
+			// Re-encode, so that the key order and spacing inside an object
+			// argument do not matter either.
+			var decoded any
+			if json.Unmarshal(raw, &decoded) == nil {
+				v = decoded
+			}
+		}
+		norm[k] = v
+	}
+	enc, _ := json.Marshal(norm) // encoding/json sorts map keys
+	sum := sha256.Sum256([]byte(tool + "\x00" + string(enc)))
+	return hex.EncodeToString(sum[:])[:16]
+}
+
+// callOf is what a mutating call says about itself: its operation id, the
+// digest of its arguments, and the checkpoint it expects the session at.
+func callOf(tool string, a mcp.Args) repo.Call {
+	call := repo.Call{Op: a.String("operation_id"), Expect: a.String("expected_checkpoint")}
+	if call.Op != "" {
+		call.Digest = argsDigest(tool, a)
+	}
+	return call
+}
+
+// replayedText begins the result of a call whose operation id was already
+// done: what it did, and that nothing was done again.
+func replayedText(op, what string) string {
+	return fmt.Sprintf("Operation %s was already done: %s. Nothing was done again.", op, what)
 }
 
 func withRequired(p mcp.Param) mcp.Param {
@@ -243,9 +302,18 @@ const runsLaterHeading = "WILL RUN ON THE USER'S MACHINE: these changed files ge
 func (c *catalog) startSession(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 	fresh := a.Bool("fresh")
 	prev, perr := c.s.Current(ctx)
-	info, err := c.s.Start(ctx, fresh)
+	info, err := c.s.StartCall(ctx, callOf("start_session", a), fresh)
 	if err != nil {
 		return c.writeFail(err, false)
+	}
+	if info.Replayed {
+		var b strings.Builder
+		b.WriteString(replayedText(a.String("operation_id"), fmt.Sprintf("session %s was started on branch %s", info.ID, info.Branch)) + "\n")
+		fmt.Fprintf(&b, "Branch %s, made from %s at %s.\n", info.Branch, info.StartBranch, short(info.Base))
+		return c.finish("start_session", b.String(), 0, meta{
+			"session": info.ID, "branch": info.Branch, "start_branch": info.StartBranch,
+			"base": info.Base, "head": info.Head, "resumed": false, "replayed": true, "complete": true,
+		}), nil
 	}
 	resumed := perr == nil && !fresh && prev.ID == info.ID
 	var b strings.Builder
@@ -357,11 +425,15 @@ func (c *catalog) apply(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 			return c.writeFail(err, false)
 		}
 	}
-	ap, err := c.s.Apply(ctx, planID, changes, a.String("message"))
+	ap, err := c.s.ApplyCall(ctx, callOf("apply_changes", a), planID, changes, a.String("message"))
 	if err != nil {
 		return c.writeFail(err, false)
 	}
-	intro := fmt.Sprintf("Applied as checkpoint %s: %d file(s), +%d -%d lines.\n", ap.Checkpoint.ID, len(ap.Checkpoint.Files), ap.Checkpoint.Added, ap.Checkpoint.Removed)
+	what := fmt.Sprintf("applied as checkpoint %s: %d file(s), +%d -%d lines", ap.Checkpoint.ID, len(ap.Checkpoint.Files), ap.Checkpoint.Added, ap.Checkpoint.Removed)
+	if ap.Replayed {
+		return c.appliedResult("apply_changes", replayedText(a.String("operation_id"), what)+" Read the files again for fresh anchors.\n", "", ap), nil
+	}
+	intro := strings.ToUpper(what[:1]) + what[1:] + ".\n"
 	return c.appliedResult("apply_changes", intro,
 		"Changed regions with fresh anchors, and each file's new file_tag (elsewhere in these files line numbers may have shifted; read again before editing there):\n", ap), nil
 }
@@ -376,6 +448,9 @@ func (c *catalog) appliedResult(tool, intro, freshHeading string, ap *repo.Appli
 		bullets(&b, ap.Warnings)
 	}
 	b.WriteString(freshHeading)
+	if ap.Replayed {
+		ap.Fresh = ""
+	}
 	fresh, cut := clip(ap.Fresh, c.bodyBudget()-b.Len(), "[cut at the size budget: read the files again for fresh anchors]\n")
 	b.WriteString(fresh)
 	cp := ap.Checkpoint
@@ -383,6 +458,9 @@ func (c *catalog) appliedResult(tool, intro, freshHeading string, ap *repo.Appli
 	footerList(m, "files", cp.Files)
 	if cut {
 		m["fresh_truncated"] = true
+	}
+	if ap.Replayed {
+		m["replayed"] = true
 	}
 	return c.finish(tool, b.String(), 0, m)
 }
@@ -424,37 +502,52 @@ func (c *catalog) checkpoints(ctx context.Context, a mcp.Args) (mcp.Result, erro
 }
 
 func (c *catalog) undo(ctx context.Context, a mcp.Args) (mcp.Result, error) {
-	ap, err := c.s.UndoTo(ctx, a.String("checkpoint"))
+	ap, err := c.s.UndoToCall(ctx, callOf("undo_to_checkpoint", a), a.String("checkpoint"))
 	if err != nil {
 		return c.writeFail(err, false)
 	}
 	cp := ap.Checkpoint
+	what := fmt.Sprintf("the session is at checkpoint %s (%s: %s): %d file(s), +%d -%d lines", cp.ID, cp.Kind, firstLine(cp.Message), len(cp.Files), cp.Added, cp.Removed)
+	if ap.Replayed {
+		return c.appliedResult("undo_to_checkpoint", replayedText(a.String("operation_id"), what)+" Read the files again for fresh anchors.\n", "", ap), nil
+	}
 	intro := fmt.Sprintf("The session is at checkpoint %s (%s: %s): %d file(s), +%d -%d lines. Earlier checkpoints stay in the history.\n",
 		cp.ID, cp.Kind, firstLine(cp.Message), len(cp.Files), cp.Added, cp.Removed)
 	return c.appliedResult("undo_to_checkpoint", intro, "Files:\n", ap), nil
 }
 
-func (c *catalog) update(ctx context.Context, _ mcp.Args) (mcp.Result, error) {
-	ap, err := c.s.Update(ctx)
+func (c *catalog) update(ctx context.Context, a mcp.Args) (mcp.Result, error) {
+	ap, err := c.s.UpdateCall(ctx, callOf("update_session", a))
 	if err != nil {
 		return c.writeFail(err, false)
 	}
 	cp := ap.Checkpoint
+	if ap.Replayed {
+		what := fmt.Sprintf("the session is at checkpoint %s (%s: %s): %d file(s), +%d -%d lines", cp.ID, cp.Kind, firstLine(cp.Message), len(cp.Files), cp.Added, cp.Removed)
+		return c.appliedResult("update_session", replayedText(a.String("operation_id"), what)+" Read the files again for fresh anchors.\n", "", ap), nil
+	}
 	intro := fmt.Sprintf("The session is at checkpoint %s (%s: %s): %d file(s), +%d -%d lines.\n",
 		cp.ID, cp.Kind, firstLine(cp.Message), len(cp.Files), cp.Added, cp.Removed)
 	return c.appliedResult("update_session", intro, "", ap), nil
 }
 
 func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, error) {
-	branch := "the user's branch"
-	if info, err := c.currentInfo(ctx); err == nil {
-		branch = info.StartBranch
+	if a.String("expected_checkpoint") == "" {
+		return c.writeFail(errors.New("finish_session needs expected_checkpoint: the checkpoint the session is at. Call session_status, read the checkpoint it shows, and call finish_session again with it as expected_checkpoint. If this tool has no expected_checkpoint parameter, its description is out of date: ask the user to Refresh tools (reconnect the app) in the chat settings. Nothing was changed"), true)
 	}
-	fin, err := c.s.Finish(ctx, a.Bool("squash"), a.String("message"))
+	branch, sessionBranch := "the user's branch", ""
+	if info, err := c.currentInfo(ctx); err == nil {
+		branch, sessionBranch = info.StartBranch, info.Branch
+	}
+	fin, err := c.s.FinishCall(ctx, callOf("finish_session", a), a.Bool("squash"), a.String("message"))
 	if err != nil {
 		// Some of these say the checkout may be partly updated and how to
 		// recover: they reach the user whole.
 		return c.writeFail(err, true)
+	}
+	if fin.Replayed {
+		// The session that is open now, if any, is not the one that merged.
+		branch, sessionBranch = "the user's branch", ""
 	}
 	open, known := c.sessionOpen(ctx)
 	warnings := 0
@@ -464,7 +557,10 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 		}
 	}
 	m := meta{"commit": fin.Commit, "squashed": fin.Squashed, "files": len(fin.Files),
-		"warnings": warnings, "complete": true}
+		"warnings": warnings, "complete": true, "head": fin.Head, "base": fin.Base}
+	if fin.Replayed {
+		m["replayed"] = true
+	}
 	if known {
 		m["session_open"] = open
 	} else {
@@ -472,7 +568,11 @@ func (c *catalog) finishSession(ctx context.Context, a mcp.Args) (mcp.Result, er
 	}
 	footerList(m, "runs_later", fin.RunsLater)
 	footerList(m, "file_list", fin.Files) // "files" is their number here
-	return c.finish("finish_session", finishText(branch, fin, open, known), 0, m), nil
+	text := finishText(branch, sessionBranch, fin, open, known)
+	if fin.Replayed {
+		text = replayedText(a.String("operation_id"), "the session was merged") + "\n" + text
+	}
+	return c.finish("finish_session", text, 0, m), nil
 }
 
 // currentInfo is Sessions.Current, or the test seam.
@@ -498,7 +598,7 @@ func (c *catalog) sessionOpen(ctx context.Context) (open, known bool) {
 }
 
 // finishText is the result of a Finish: what needs telling first, first.
-func finishText(branch string, fin *repo.Finished, open, known bool) string {
+func finishText(branch, sessionBranch string, fin *repo.Finished, open, known bool) string {
 	var warnings, notes []string
 	for _, n := range fin.Notes {
 		if strings.HasPrefix(n, "WARNING") {
@@ -531,6 +631,15 @@ func finishText(branch string, fin *repo.Finished, open, known bool) string {
 		}
 		fmt.Fprintf(&b, "Merged the session into %s (%s): it is now at %s. %d file(s) changed.\n", branch, how, short(fin.Commit), len(fin.Files))
 	}
+	if fin.Head != "" {
+		fmt.Fprintf(&b, "Merged revision: session at %s, from %s.\n", short(fin.Head), short(fin.Base))
+		if sessionBranch != "" {
+			fmt.Fprintf(&b, "Full diff: `git diff %s...%s` or `repochat session diff`.\n", branch, sessionBranch)
+		} else {
+			b.WriteString("Full diff: `repochat session diff`.\n")
+		}
+	}
+	b.WriteString("No checks were run: repochat cannot run commands yet.\n")
 	if len(fin.RunsLater) > 0 {
 		b.WriteString(runsLaterHeading)
 		bullets(&b, fin.RunsLater)
@@ -562,10 +671,15 @@ func (c *catalog) abandon(ctx context.Context, a mcp.Args) (mcp.Result, error) {
 		branch = info.Branch
 	}
 	del := a.Bool("delete_branch")
-	if err := c.s.Abandon(ctx, del); err != nil {
+	replayed, err := c.s.AbandonCall(ctx, callOf("abandon_session", a), del)
+	if err != nil {
 		return c.writeFail(err, false)
 	}
 	var b strings.Builder
+	if replayed {
+		b.WriteString(replayedText(a.String("operation_id"), "the session was abandoned") + "\n")
+		return c.finish("abandon_session", b.String(), 0, meta{"replayed": true, "complete": true}), nil
+	}
 	b.WriteString("The session was abandoned: its workspace was removed and nothing reached the user's branch.\n")
 	switch {
 	case del && branch != "":

@@ -264,6 +264,9 @@ func (s *Sessions) StartCall(ctx context.Context, call Call, fresh bool) (*Sessi
 	if s.opts.Observe {
 		return nil, errObserving
 	}
+	if err := validateCall(call); err != nil {
+		return nil, err
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return nil, err

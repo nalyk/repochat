@@ -63,6 +63,16 @@ func newWriteFixture(t *testing.T, opts repo.Options, files map[string]string) *
 }
 
 // call runs a tool; see the package-level call.
+// head is the open session's checkpoint, for finish_session's expected_checkpoint.
+func (f *writeFixture) head(t *testing.T) string {
+	t.Helper()
+	info, err := f.s.Current(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return info.Head
+}
+
 func (f *writeFixture) call(t *testing.T, name string, raw map[string]any) (string, map[string]any, error) {
 	t.Helper()
 	return call(t, f.tools, name, raw)
@@ -213,7 +223,7 @@ func TestWriteCatalogueAddsNineToolsWithHonestAnnotations(t *testing.T) {
 }
 
 func TestWriteInstructionsAreExact(t *testing.T) {
-	const want = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result)."
+	const want = "Write mode is on. Files are edited in a session workspace on a side branch, never in the user's own checkout. Lines you read carry anchors like `12:abc|`; cite them in apply_changes instead of quoting old text. If an anchor is stale the call fails and returns the current lines: use those anchors and retry. One apply_changes call may change many files and is applied completely or not at all. Lines that hold a masked value cannot be changed; tell the user to edit them by hand. Nothing reaches the user's branch until finish_session; call it only when the user asks to merge. A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result). Pass a new operation_id with every call that changes something, and expected_checkpoint (the latest checkpoint you saw) with finish_session."
 	if WriteInstructions != want {
 		t.Fatalf("WriteInstructions differs from the brief:\n%s", WriteInstructions)
 	}
@@ -260,7 +270,7 @@ func TestEditRoundTripThroughTheTools(t *testing.T) {
 		t.Fatalf("session_status:\n%s", status)
 	}
 
-	fin, fm := f.must(t, "finish_session", map[string]any{})
+	fin, fm := f.must(t, "finish_session", map[string]any{"expected_checkpoint": f.head(t)})
 	if fm["commit"] == nil || !strings.Contains(fin, "main") {
 		t.Fatalf("finish_session: %v\n%s", fm, fin)
 	}
@@ -317,7 +327,7 @@ func TestWriteToolsRefuseWithoutASession(t *testing.T) {
 		"list_checkpoints":   {},
 		"undo_to_checkpoint": {"checkpoint": "abcdef1"},
 		"update_session":     {},
-		"finish_session":     {},
+		"finish_session":     {"expected_checkpoint": "abcdef1"},
 		"abandon_session":    {},
 	} {
 		_, _, err := f.call(t, name, args)
@@ -517,7 +527,7 @@ func TestFinishShowsWhatRunsLater(t *testing.T) {
 	if !strings.Contains(st, "build.sh") || sm["runs_later"] == nil {
 		t.Fatalf("session_status must show what runs later: %v\n%s", sm, st)
 	}
-	text, m := f.must(t, "finish_session", map[string]any{"squash": true, "message": "Add the build script"})
+	text, m := f.must(t, "finish_session", map[string]any{"squash": true, "message": "Add the build script", "expected_checkpoint": f.head(t)})
 	later := strings.Index(text, "build.sh")
 	files := strings.Index(text, "a.txt")
 	if later < 0 || files < 0 || later > files || !strings.Contains(text, "unsigned") || m["squashed"] != true {
@@ -595,7 +605,7 @@ func TestFinishNeverCallsAnOpenSessionClosed(t *testing.T) {
 		}
 		return nil, errors.New("git: signal: killed")
 	})
-	res, err := c.finishSession(bg, mcp.Args{})
+	res, err := c.finishSession(bg, mcp.Args{"expected_checkpoint": f.head(t)})
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -619,13 +629,13 @@ func TestFinishTextWhenTheBranchCannotBeRead(t *testing.T) {
 	fin := &repo.Finished{Commit: land, Files: []string{"a.txt"}, Notes: []string{
 		"WARNING: git reported the merge of " + land + " as done, but where main is now could not be read (boom); the session, its branch and its workspace are kept. Check the checkout with git status and git log.",
 	}}
-	text := finishText("main", fin, true, true)
+	text := finishText("main", "", fin, true, true)
 	if strings.Contains(text, "main is at") || !strings.Contains(text, "the merged commit is "+land[:12]) {
 		t.Fatalf("finish text:\n%s", text)
 	}
 	// Otherwise the branch position is known and stated.
 	fin.Notes = []string{"WARNING: git reported the merge as done, but main is at " + land + ", not at the merged commit x; kept."}
-	if text := finishText("main", fin, true, true); !strings.Contains(text, "main is at "+land[:12]) {
+	if text := finishText("main", "", fin, true, true); !strings.Contains(text, "main is at "+land[:12]) {
 		t.Fatalf("finish text:\n%s", text)
 	}
 }
@@ -732,7 +742,166 @@ func TestLongRangeNeedsTheFileTagThroughTheTools(t *testing.T) {
 			t.Errorf("%s does not state the file_tag rule: %s", name, desc)
 		}
 	}
-	if !strings.HasSuffix(WriteInstructions, "A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result).") {
+	if !strings.Contains(WriteInstructions, "A replace or delete of three or more lines also needs the file's current file_tag (from read_file or from the last apply_changes result).") {
 		t.Error("WriteInstructions does not end with the file_tag rule")
+	}
+}
+
+// validated runs a tool's schema and handler, for arguments the schema may
+// itself refuse: it returns the first refusal and the text of a success.
+func (f *writeFixture) validated(t *testing.T, name string, raw map[string]any) (string, error) {
+	t.Helper()
+	tool := f.tools[name]
+	args, err := tool.Schema.Validate(raw)
+	if err != nil {
+		return "", err
+	}
+	res, err := tool.Handler(bg, args)
+	return res.Text, err
+}
+
+func TestApplyReplayThroughTheTool(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	create := map[string]any{
+		"changes":      changesJSON(t, map[string]string{"op": "create", "path": "x.txt", "text": "x\n"}),
+		"operation_id": "op-create-x-1",
+	}
+	first, fm := f.must(t, "apply_changes", create)
+	if strings.HasPrefix(first, "Operation") || fm["replayed"] != nil {
+		t.Fatalf("the first call is not a replay:\n%s\n%v", first, fm)
+	}
+	text, m := f.must(t, "apply_changes", create)
+	if !strings.HasPrefix(text, "Operation op-create-x-1 was already done: ") || !strings.Contains(text, "Nothing was done again.") || !strings.Contains(text, "Read the files again for fresh anchors.") {
+		t.Fatalf("replay text:\n%s", text)
+	}
+	if m["replayed"] != true || m["checkpoint"] != fm["checkpoint"] {
+		t.Fatalf("replay meta %v, first %v", m, fm)
+	}
+	list, lm := f.must(t, "list_checkpoints", map[string]any{})
+	if lm["total"] != float64(2) {
+		t.Fatalf("one change plus the start expected:\n%s", list)
+	}
+	// Other arguments under the same id are refused.
+	_, err := f.validated(t, "apply_changes", map[string]any{
+		"changes":      changesJSON(t, map[string]string{"op": "create", "path": "y.txt", "text": "y\n"}),
+		"operation_id": "op-create-x-1",
+	})
+	if err == nil || !strings.Contains(err.Error(), "already used for a different call") {
+		t.Fatalf("same id, other arguments: %v", err)
+	}
+}
+
+func TestOperationIDAndExpectedCheckpointAreValidated(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	_, sm := f.must(t, "start_session", map[string]any{})
+	head, _ := sm["head"].(string)
+	create := changesJSON(t, map[string]string{"op": "create", "path": "x.txt", "text": "x\n"})
+	for _, c := range []struct{ what, key, val string }{
+		{"short id", "operation_id", "short"},
+		{"path id", "operation_id", "../../etc"},
+		{"long id", "operation_id", strings.Repeat("a", 65)},
+		{"non-hex checkpoint", "expected_checkpoint", "xyz1234"},
+		{"short checkpoint", "expected_checkpoint", "abc12"},
+		{"stale checkpoint", "expected_checkpoint", strings.Repeat("0", 7)},
+	} {
+		args := map[string]any{"changes": create, c.key: c.val}
+		if _, err := f.validated(t, "apply_changes", args); err == nil {
+			t.Errorf("%s: apply_changes was not refused", c.what)
+		}
+		if _, err := os.Stat(filepath.Join(f.dir, "x.txt")); err == nil {
+			t.Errorf("%s: the owner's checkout changed", c.what)
+		}
+	}
+	for _, name := range []string{"undo_to_checkpoint", "update_session"} {
+		args := map[string]any{"expected_checkpoint": strings.Repeat("0", 7)}
+		if name == "undo_to_checkpoint" {
+			args["checkpoint"] = head
+		}
+		_, err := f.validated(t, name, args)
+		if err == nil || !strings.Contains(err.Error(), "the session moved") || strings.Contains(err.Error(), "change set") {
+			t.Errorf("%s with a stale checkpoint: %v", name, err)
+		}
+	}
+	_, err := f.validated(t, "finish_session", map[string]any{"expected_checkpoint": strings.Repeat("0", 7)})
+	if err == nil || !strings.Contains(err.Error(), "the session moved") || strings.Contains(err.Error(), "change set") {
+		t.Errorf("finish_session with a stale checkpoint: %v", err)
+	}
+	// A current prefix is accepted.
+	f.must(t, "apply_changes", map[string]any{"changes": create, "expected_checkpoint": head[:7]})
+}
+
+func TestFinishWithoutExpectedCheckpointExplainsWhy(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	f.must(t, "start_session", map[string]any{})
+	_, _, err := f.call(t, "finish_session", map[string]any{})
+	if err == nil {
+		t.Fatal("finish_session without expected_checkpoint was not refused")
+	}
+	for _, want := range []string{"expected_checkpoint", "session_status", "Refresh tools"} {
+		if !strings.Contains(err.Error(), want) {
+			t.Errorf("the refusal lacks %q: %v", want, err)
+		}
+	}
+	for _, p := range f.tools["finish_session"].Schema {
+		if p.Name == "expected_checkpoint" && (p.Required || !strings.HasPrefix(p.Desc, "Required.")) {
+			t.Errorf("finish_session's expected_checkpoint: Required=%v desc %q", p.Required, p.Desc)
+		}
+	}
+}
+
+func TestFinishHandoffNamesTheRevision(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	_, sm := f.must(t, "start_session", map[string]any{})
+	_, am := f.must(t, "apply_changes", map[string]any{"changes": changesJSON(t, map[string]string{"op": "create", "path": "x.txt", "text": "x\n"})})
+	cp, _ := am["checkpoint"].(string)
+	text, m := f.must(t, "finish_session", map[string]any{"expected_checkpoint": cp, "operation_id": "fin-handoff-1"})
+	for _, want := range []string{"Merged revision: session at ", ", from " + sm["base"].(string)[:12], "repochat session diff", "git diff " + sm["start_branch"].(string) + "..." + sm["branch"].(string), "No checks were run: repochat cannot run commands yet."} {
+		if !strings.Contains(text, want) {
+			t.Errorf("finish text lacks %q:\n%s", want, text)
+		}
+	}
+	if m["head"] == nil || m["base"] != sm["base"] {
+		t.Errorf("finish meta: %v", m)
+	}
+	again, am2 := f.must(t, "finish_session", map[string]any{"expected_checkpoint": cp, "operation_id": "fin-handoff-1"})
+	if !strings.HasPrefix(again, "Operation fin-handoff-1 was already done: ") || am2["replayed"] != true {
+		t.Errorf("finish replay:\n%s\n%v", again, am2)
+	}
+}
+
+func TestStartAndAbandonReplayThroughTheTools(t *testing.T) {
+	f := newWriteFixture(t, repo.Options{}, nil)
+	_, m1 := f.must(t, "start_session", map[string]any{"operation_id": "start-op-001"})
+	text, m2 := f.must(t, "start_session", map[string]any{"operation_id": "start-op-001"})
+	if !strings.HasPrefix(text, "Operation start-op-001 was already done: ") || m2["replayed"] != true || m2["session"] != m1["session"] {
+		t.Fatalf("start replay:\n%s\n%v", text, m2)
+	}
+	f.must(t, "abandon_session", map[string]any{"operation_id": "abandon-op-01"})
+	text, m3 := f.must(t, "abandon_session", map[string]any{"operation_id": "abandon-op-01"})
+	if !strings.HasPrefix(text, "Operation abandon-op-01 was already done: ") || m3["replayed"] != true {
+		t.Fatalf("abandon replay:\n%s\n%v", text, m3)
+	}
+}
+
+func TestArgsDigestIgnoresOperationIDAndKeyOrder(t *testing.T) {
+	a := mcp.Args{"message": "m", "squash": true, "operation_id": "aaaaaaaa", "changes": json.RawMessage(`{"a":1,"b":[1,2]}`)}
+	b := mcp.Args{"changes": json.RawMessage(`{ "b": [1,2], "a": 1 }`), "squash": true, "operation_id": "zzzzzzzz", "message": "m"}
+	d := argsDigest("finish_session", a)
+	if !repo.DigestRe.MatchString(d) {
+		t.Fatalf("digest %q is not 16 lower-case hex characters", d)
+	}
+	if got := argsDigest("finish_session", b); got != d {
+		t.Errorf("key order or operation_id changed the digest: %s %s", d, got)
+	}
+	if argsDigest("apply_changes", a) == d {
+		t.Error("another tool gave the same digest")
+	}
+	c := mcp.Args{"message": "m2", "squash": true, "changes": json.RawMessage(`{"a":1,"b":[1,2]}`)}
+	if argsDigest("finish_session", c) == d {
+		t.Error("another argument gave the same digest")
+	}
+	if argsDigest("finish_session", mcp.Args{"message": "m", "squash": true, "changes": json.RawMessage(`{"a":1,"b":[1,2]}`), "expected_checkpoint": "abcdef1"}) == d {
+		t.Error("an added argument gave the same digest")
 	}
 }

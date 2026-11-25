@@ -212,7 +212,7 @@ func (s *Sessions) UpdateCall(ctx context.Context, call Call) (*Applied, error) 
 	if applied, err := s.replayOperation(ctx, rec, chain, call); applied != nil || err != nil {
 		return applied, err
 	}
-	if err := checkExpected(head, call.Expect); err != nil {
+	if err := checkExpectedPlain(head, call.Expect); err != nil {
 		return nil, err
 	}
 	tip, err := s.ownerTip(ctx, rec)
@@ -673,7 +673,7 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 	if err != nil {
 		return nil, err
 	}
-	if err := checkExpected(head, call.Expect); err != nil {
+	if err := checkExpectedPlain(head, call.Expect); err != nil {
 		return nil, err
 	}
 
@@ -790,7 +790,7 @@ func (s *Sessions) FinishCall(ctx context.Context, call Call, squash bool, messa
 
 	// A retry that finds this must not merge again: the merge may have run.
 	if err := s.putReceipt(call, "finish", receiptStarted, nil, nil); err != nil {
-		return nil, err
+		return nil, fmt.Errorf("%w (nothing was changed)", err)
 	}
 	if s.beforeOwnerMerge != nil {
 		s.beforeOwnerMerge()
@@ -1249,6 +1249,9 @@ func (s *Sessions) Abandon(ctx context.Context, deleteBranch bool) error {
 // AbandonCall is Abandon for a call with an operation id: a retry of a call
 // that has abandoned the session reports replayed and does nothing.
 func (s *Sessions) AbandonCall(ctx context.Context, call Call, deleteBranch bool) (replayed bool, err error) {
+	if err := validateCall(call); err != nil {
+		return false, err
+	}
 	release, err := s.acquire()
 	if err != nil {
 		return false, err

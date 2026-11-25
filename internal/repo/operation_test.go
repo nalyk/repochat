@@ -88,9 +88,13 @@ func TestExpectedCheckpointRefusesAMovedSession(t *testing.T) {
 			if err == nil || !strings.Contains(err.Error(), "the session moved") {
 				t.Fatalf("%s with a stale checkpoint: %v; want a refusal saying the session moved", k.name, err)
 			}
+			// Only a change set speaks of "the whole change set".
 			var ce *ChangeError
-			if !errors.As(err, &ce) {
-				t.Errorf("the refusal is a %T, not a *ChangeError", err)
+			if isChangeSet := errors.As(err, &ce); isChangeSet != (k.name == "apply") {
+				t.Errorf("the refusal is a %T for %s", err, k.name)
+			}
+			if k.name != "apply" && strings.Contains(err.Error(), "change set") {
+				t.Errorf("the refusal speaks of a change set: %v", err)
 			}
 			mustContain(t, err.Error(), "it is at checkpoint "+m.second[:12], "not "+m.first[:12], "session_status")
 			if c.head(t) != m.second {
