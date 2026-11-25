@@ -6,6 +6,7 @@ import (
 	"os"
 	"path/filepath"
 	"strings"
+	"sync"
 	"testing"
 	"time"
 )
@@ -275,5 +276,246 @@ func TestCheckExpected(t *testing.T) {
 		if ce.Reason != want {
 			t.Errorf("Reason:\n%s\nwant:\n%s", ce.Reason, want)
 		}
+	}
+}
+
+func opCall(op, digest string) Call { return Call{Op: op, Digest: digest} }
+
+func createC(c *changeFixture, call Call) (*Applied, error) {
+	return c.s.ApplyCall(bg, call, "", []Change{{Op: "create", Path: "c.txt", Text: "C"}}, "C")
+}
+
+func TestOperationReplayReturnsTheSameCheckpoint(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	call := opCall("op-aaaa1111", "d1")
+	first, err := createC(c, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if first.Replayed || first.Checkpoint.Operation != "op-aaaa1111" {
+		t.Errorf("first call: %+v", first)
+	}
+	head := c.head(t)
+	second, err := createC(c, call)
+	if err != nil {
+		t.Fatalf("replay: %v", err)
+	}
+	if !second.Replayed || second.Checkpoint.ID != first.Checkpoint.ID {
+		t.Errorf("replay: %+v, first %+v", second, first)
+	}
+	if c.head(t) != head || len(c.checkpoints(t)) != 2 {
+		t.Errorf("the replay wrote: head %s, was %s; %d checkpoints", c.head(t), head, len(c.checkpoints(t)))
+	}
+}
+
+func TestOperationReuseWithOtherArgumentsIsRefused(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	if _, err := createC(c, opCall("op-aaaa1111", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	head := c.head(t)
+	_, err := c.s.ApplyCall(bg, opCall("op-aaaa1111", "d2"), "", []Change{{Op: "create", Path: "d.txt", Text: "D"}}, "D")
+	if err == nil || !strings.Contains(err.Error(), "different call") {
+		t.Fatalf("got %v; want a refusal naming a different call", err)
+	}
+	if c.head(t) != head || exists(filepath.Join(c.ws.Root, "d.txt")) {
+		t.Error("the refused call changed the session")
+	}
+}
+
+func TestOperationSurvivesRestart(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	call := opCall("op-aaaa1111", "d1")
+	first, err := createC(c, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.s.Close()
+	s2, _ := c.f.start(t, Options{})
+	if _, err := s2.Serve(bg); err != nil {
+		t.Fatal(err)
+	}
+	c.s = s2
+	again, err := createC(c, call)
+	if err != nil {
+		t.Fatalf("replay after restart: %v", err)
+	}
+	if !again.Replayed || again.Checkpoint.ID != first.Checkpoint.ID {
+		t.Errorf("after restart: %+v, first %+v", again, first)
+	}
+}
+
+func TestOperationReplayWinsOverExpect(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	before := c.head(t)
+	call := opCall("op-aaaa1111", "d1")
+	call.Expect = before[:12]
+	first, err := createC(c, call)
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := createC(c, call)
+	if err != nil || !again.Replayed || again.Checkpoint.ID != first.Checkpoint.ID {
+		t.Fatalf("retry with the old Expect: %+v, %v", again, err)
+	}
+}
+
+func TestStoredPlanReplayWinsOverExpect(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	before := c.head(t)
+	plan := c.accept(t, Change{Op: "create", Path: "c.txt", Text: "C"})
+	call := Call{Expect: before[:12]}
+	first, err := c.s.ApplyCall(bg, call, plan.ID, nil, "C")
+	if err != nil {
+		t.Fatal(err)
+	}
+	again, err := c.s.ApplyCall(bg, call, plan.ID, nil, "C")
+	if err != nil {
+		t.Fatalf("retry of an applied plan with the old Expect: %v", err)
+	}
+	if again.Checkpoint.ID != first.Checkpoint.ID || len(c.checkpoints(t)) != 2 {
+		t.Errorf("replay %+v, first %+v", again.Checkpoint, first.Checkpoint)
+	}
+	// A plan not applied yet is still held to Expect.
+	plan2 := c.accept(t, Change{Op: "create", Path: "e.txt", Text: "E"})
+	if _, err := c.s.ApplyCall(bg, call, plan2.ID, nil, "E"); err == nil || !strings.Contains(err.Error(), "the session moved") {
+		t.Errorf("an unapplied plan with a stale Expect: %v", err)
+	}
+}
+
+func TestConcurrentSameOperationAppliesOnce(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	call := opCall("op-aaaa1111", "d1")
+	res := make([]*Applied, 2)
+	errs := make([]error, 2)
+	var wg sync.WaitGroup
+	for i := range res {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			res[i], errs[i] = createC(c, call)
+		}()
+	}
+	wg.Wait()
+	for _, err := range errs {
+		if err != nil {
+			t.Fatal(err)
+		}
+	}
+	if res[0].Replayed == res[1].Replayed {
+		t.Errorf("Replayed: %v and %v; want exactly one", res[0].Replayed, res[1].Replayed)
+	}
+	if res[0].Checkpoint.ID != res[1].Checkpoint.ID || len(c.checkpoints(t)) != 2 {
+		t.Errorf("%s and %s; %d checkpoints", res[0].Checkpoint.ID, res[1].Checkpoint.ID, len(c.checkpoints(t)))
+	}
+}
+
+func TestOperationFromAnAbandonedSessionIsNotReplayed(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	call := opCall("op-aaaa1111", "d1")
+	changes := []Change{{Op: "replace", Path: "a.txt", From: c.anchor(t, "a.txt", 1), To: c.anchor(t, "a.txt", 1), Text: "AA\n"}}
+	if _, err := c.s.ApplyCall(bg, call, "", changes, "AA"); err != nil {
+		t.Fatal(err)
+	}
+	if err := c.s.Abandon(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := c.s.Start(bg, false); err != nil {
+		t.Fatal(err)
+	}
+	ws, err := c.s.Serve(bg)
+	if err != nil {
+		t.Fatal(err)
+	}
+	c.ws = ws
+	head := c.head(t)
+	a, err := c.s.ApplyCall(bg, call, "", changes, "AA")
+	if err == nil || (a != nil && a.Replayed) {
+		t.Fatalf("the old call in a new session: %+v, %v; want a refusal for stale anchors", a, err)
+	}
+	if c.head(t) != head {
+		t.Error("the refused call moved the branch")
+	}
+	fresh := []Change{{Op: "create", Path: "c.txt", Text: "C"}}
+	a, err = c.s.ApplyCall(bg, call, "", fresh, "C")
+	if err != nil || a.Replayed {
+		t.Fatalf("op reused with fresh anchors: %+v, %v", a, err)
+	}
+}
+
+func TestUndoAndUpdateCarryOperations(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n", "b.txt": "b\n"}, nil)
+	c.replaceLine(t, "a.txt", 1, "A")
+	first := c.head(t)
+	c.replaceLine(t, "b.txt", 1, "B")
+
+	undo := opCall("op-undo0001", "u1")
+	u1, err := c.s.UndoToCall(bg, undo, first[:12])
+	if err != nil {
+		t.Fatal(err)
+	}
+	head := c.head(t)
+	u2, err := c.s.UndoToCall(bg, undo, first[:12])
+	if err != nil || !u2.Replayed || u2.Checkpoint.ID != u1.Checkpoint.ID || c.head(t) != head {
+		t.Fatalf("undo replay: %+v, %v", u2, err)
+	}
+	if u1.Checkpoint.Operation != "op-undo0001" {
+		t.Errorf("undo checkpoint: %+v", u1.Checkpoint)
+	}
+
+	write(t, c.f.dir, "owner.txt", "owner\n")
+	commit(t, c.f.dir, "owner's own")
+	up := opCall("op-updt0001", "m1")
+	m1, err := c.s.UpdateCall(bg, up)
+	if err != nil || m1.Checkpoint.Kind != "update" {
+		t.Fatalf("update: %+v, %v", m1, err)
+	}
+	head = c.head(t)
+	m2, err := c.s.UpdateCall(bg, up)
+	if err != nil || !m2.Replayed || m2.Checkpoint.ID != m1.Checkpoint.ID || c.head(t) != head {
+		t.Fatalf("update replay: %+v, %v", m2, err)
+	}
+	if _, err := c.s.UpdateCall(bg, opCall("op-updt0001", "other")); err == nil || !strings.Contains(err.Error(), "different call") {
+		t.Errorf("update with another digest: %v", err)
+	}
+}
+
+func TestCheckpointMessagesHideTheOperationTrailer(t *testing.T) {
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	if _, err := createC(c, opCall("op-aaaa1111", "d1")); err != nil {
+		t.Fatal(err)
+	}
+	cp := c.checkpoints(t)[0]
+	if cp.Message != "C" || cp.Operation != "op-aaaa1111" || cp.Kind != "change" {
+		t.Errorf("%+v", cp)
+	}
+}
+
+func TestTwoTrailerCheckpointsStillParse(t *testing.T) {
+	kind, text, op, _ := checkpointKind("hand\n\nMade-through: repochat\nRepochat-Kind: change\n")
+	if kind != "change" || text != "hand" || op != "" {
+		t.Errorf("%q %q %q", kind, text, op)
+	}
+	for _, bad := range []string{
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: short d\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1 extra\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nOther: op-aaaa1111 d1\n",
+		"x\n\nMade-through: repochat\nRepochat-Kind: change\nRepochat-Operation: op-aaaa1111 d1\nMore: x\n",
+	} {
+		if k, _, _, _ := checkpointKind(bad); k != "unknown" {
+			t.Errorf("%q parsed as %s", bad, k)
+		}
+	}
+	// A commit made with the old message on a real session lists as change.
+	c := newApplyFixture(t, map[string]string{"a.txt": "a\n"}, nil)
+	_, msg := commitMessage("old", "change", Call{})
+	if strings.Contains(string(msg), "Operation") {
+		t.Errorf("a call without an operation wrote %q", msg)
+	}
+	c.apply(t, "old", Change{Op: "create", Path: "c.txt", Text: "C"})
+	if k := c.checkpoints(t)[0].Kind; k != "change" {
+		t.Errorf("kind %s", k)
 	}
 }

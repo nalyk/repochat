@@ -54,6 +54,9 @@ type Checkpoint struct {
 	Time           time.Time
 	Files          []string
 	Added, Removed int
+	// Operation is the operation id the call that made the checkpoint
+	// carried; "" for none.
+	Operation string
 }
 
 // Applied is the result of applying a change set.
@@ -65,6 +68,9 @@ type Applied struct {
 	// be shown as lines, the file_tag read_file shows for it now. Fresh
 	// carries the same tags.
 	FileTags map[string]string
+	// Replayed is true when the call had been made before under the same
+	// operation id: this is its earlier result, and nothing was written.
+	Replayed bool
 }
 
 func (a *Applied) clone() *Applied {
@@ -200,14 +206,12 @@ func (s *Sessions) ApplyCall(ctx context.Context, call Call, planID string, chan
 	if rec == nil {
 		return nil, ErrNoSession
 	}
-	if call.Expect != "" {
-		head, _, err := s.chain(ctx, rec)
-		if err != nil {
-			return nil, err
-		}
-		if err := checkExpected(head, call.Expect); err != nil {
-			return nil, err
-		}
+	head, chain, err := s.chain(ctx, rec)
+	if err != nil {
+		return nil, err
+	}
+	if applied, err := s.replayOperation(ctx, chain, call); applied != nil || err != nil {
+		return applied, err
 	}
 	s.freshPolicy()
 	// Looked up only now: ensure drops the plans made before the workspace
@@ -232,6 +236,9 @@ func (s *Sessions) ApplyCall(ctx context.Context, call Call, planID string, chan
 			return sp.applied.clone(), nil
 		}
 		changes = sp.changes
+	}
+	if err := checkExpected(head, call.Expect); err != nil {
+		return nil, err
 	}
 	plan, err := s.ws.planChanges(ctx, changes)
 	if err != nil {
@@ -262,7 +269,7 @@ func (s *Sessions) ApplyCall(ctx context.Context, call Call, planID string, chan
 		}
 		writes = append(writes, w)
 	}
-	cp, err := s.checkpoint(ctx, rec, "change", message, writes)
+	cp, err := s.checkpoint(ctx, rec, "change", message, call, writes)
 	if err != nil {
 		return nil, err
 	}
@@ -297,7 +304,7 @@ type fileWrite struct {
 // branch's head and then extraParents as parents. All or nothing: on any
 // failure the files are put back and the branch stays where it was. Added
 // and Removed are left to the caller.
-func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, message string, files []fileWrite, extraParents ...string) (*Checkpoint, error) {
+func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, message string, call Call, files []fileWrite, extraParents ...string) (*Checkpoint, error) {
 	if !checkpointKinds[kind] {
 		return nil, fmt.Errorf("unknown checkpoint kind %q", kind)
 	}
@@ -314,7 +321,7 @@ func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, mes
 			return nil, errors.New("a checkpoint parent is not a commit id")
 		}
 	}
-	text, msg := commitMessage(message, kind)
+	text, msg := commitMessage(message, kind, call)
 	ident := s.identity(ctx)
 
 	files = slices.Clone(files)
@@ -367,7 +374,7 @@ func (s *Sessions) checkpoint(ctx context.Context, rec *sessionRecord, kind, mes
 	ws.snap = nil
 	ws.mu.Unlock()
 
-	cp := &Checkpoint{ID: id[:12], Kind: kind, Message: text, Files: paths}
+	cp := &Checkpoint{ID: id[:12], Kind: kind, Message: text, Files: paths, Operation: call.Op}
 	if cp.Time, err = ws.commitTime(ctx, id); err != nil {
 		cp.Time = time.Now().UTC().Truncate(time.Second)
 	}
@@ -827,7 +834,7 @@ func cleanIdentity(v, fallback string) string {
 // commitMessage builds a checkpoint's message: the given one, first line cut
 // to maxSubject characters (defaultMessage when there is none), then a
 // blank line and the trailers. text is the message without the trailers.
-func commitMessage(message, kind string) (text string, full []byte) {
+func commitMessage(message, kind string, call Call) (text string, full []byte) {
 	m := strings.ToValidUTF8(message, "�")
 	m = strings.ReplaceAll(m, "\r\n", "\n")
 	m = strings.Map(func(r rune) rune {
@@ -867,7 +874,11 @@ func commitMessage(message, kind string) (text string, full []byte) {
 	if body != "" {
 		text += "\n\n" + body
 	}
-	return text, []byte(text + "\n\nMade-through: repochat\nRepochat-Kind: " + kind + "\n")
+	trailers := "Made-through: repochat\nRepochat-Kind: " + kind + "\n"
+	if call.Op != "" {
+		trailers += "Repochat-Operation: " + call.Op + " " + call.Digest + "\n"
+	}
+	return text, []byte(text + "\n\n" + trailers)
 }
 
 // freshText shows, for each file, its new file_tag and its changed regions

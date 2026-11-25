@@ -203,6 +203,9 @@ func (s *Sessions) UpdateCall(ctx context.Context, call Call) (*Applied, error) 
 	if err != nil {
 		return nil, err
 	}
+	if applied, err := s.replayOperation(ctx, chain, call); applied != nil || err != nil {
+		return applied, err
+	}
 	if err := checkExpected(head, call.Expect); err != nil {
 		return nil, err
 	}
@@ -287,7 +290,7 @@ func (s *Sessions) UpdateCall(ctx context.Context, call Call) (*Applied, error) 
 		return nil, s.abortMerge(ctx, rec, head, cause)
 	}
 	prev := *rec
-	id, err := s.commitUpdate(ctx, rec, ident, head, tip)
+	id, err := s.commitUpdate(ctx, rec, ident, head, tip, call)
 	if err != nil {
 		return nil, s.abortMerge(ctx, rec, head, err)
 	}
@@ -358,7 +361,7 @@ func (s *Sessions) undoUpdate(ctx context.Context, prev *sessionRecord, id, head
 // when the branch is seen not to have moved (see moveRef); should that fail,
 // the record names a commit that is not on the branch, and undo refuses
 // until the session starts again.
-func (s *Sessions) commitUpdate(ctx context.Context, rec *sessionRecord, ident []string, head, tip string) (string, error) {
+func (s *Sessions) commitUpdate(ctx context.Context, rec *sessionRecord, ident []string, head, tip string, call Call) (string, error) {
 	ws := s.ws
 	out, err := ws.git(ctx, 4096, "write-tree")
 	if err != nil {
@@ -368,7 +371,7 @@ func (s *Sessions) commitUpdate(ctx context.Context, rec *sessionRecord, ident [
 	if !objectIDRe.MatchString(tree) {
 		return "", errors.New("git write-tree gave no tree id")
 	}
-	_, msg := commitMessage("Update from "+rec.StartBranch, "update")
+	_, msg := commitMessage("Update from "+rec.StartBranch, "update", call)
 	args := append(slices.Clone(ident), "commit-tree", "-p", head, "-p", tip, "--no-gpg-sign", "-F", "-", tree)
 	if out, err = ws.gitInput(ctx, msg, 4096, args...); err != nil {
 		return "", err
@@ -1101,7 +1104,7 @@ func (s *Sessions) squashCommit(ctx context.Context, head, tip, message string) 
 	if code != 0 || !objectIDRe.MatchString(tree) {
 		return "", errors.New("cannot read the session's tree")
 	}
-	text, _ := commitMessage(message, "change")
+	text, _ := commitMessage(message, "change", Call{})
 	msg := []byte(text + "\n\nMade-through: repochat\n")
 	args := append(s.identity(ctx), "commit-tree", "-p", tip, "--no-gpg-sign", "-F", "-", tree)
 	out, err := s.owner.gitInput(ctx, msg, 4096, args...)

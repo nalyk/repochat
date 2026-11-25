@@ -107,7 +107,7 @@ func (r *Repo) describeCheckpoint(ctx context.Context, pol *Policy, id, parent s
 		cp.Kind, cp.Message = "start", strings.TrimRight(msg, " \t\r\n")
 		return cp, nil
 	}
-	cp.Kind, cp.Message = checkpointKind(msg)
+	cp.Kind, cp.Message, cp.Operation, _ = checkpointKind(msg)
 	stats, err := r.numstat(ctx, parent, id)
 	if err != nil {
 		return nil, err
@@ -134,7 +134,7 @@ func (r *Repo) describeCheckpoint(ctx context.Context, pol *Policy, id, parent s
 // kind written anywhere else, in the body a model wrote, is not believed.
 // It returns the message without the trailers. A commit without them (made
 // on the branch by hand) is of kind "unknown", with its whole message.
-func checkpointKind(msg string) (kind, text string) {
+func checkpointKind(msg string) (kind, text, op, digest string) {
 	whole := strings.TrimRight(msg, " \t\r\n")
 	lines := strings.Split(whole, "\n")
 	blank := -1
@@ -145,19 +145,26 @@ func checkpointKind(msg string) (kind, text string) {
 		}
 	}
 	if blank < 0 {
-		return "unknown", whole
+		return "unknown", whole, "", ""
 	}
 	text = strings.TrimRight(strings.Join(lines[:blank], "\n"), " \t\r\n")
 	trailers := lines[blank+1:]
-	if text == "" || len(trailers) != 2 || trailers[0] != "Made-through: repochat" {
-		return "unknown", whole
+	if text == "" || (len(trailers) != 2 && len(trailers) != 3) || trailers[0] != "Made-through: repochat" {
+		return "unknown", whole, "", ""
 	}
 	k, ok := strings.CutPrefix(trailers[1], "Repochat-Kind: ")
 	// "start" is the session's base, never a commit on its branch.
 	if !ok || k == "start" || !checkpointKinds[k] {
-		return "unknown", whole
+		return "unknown", whole, "", ""
 	}
-	return k, text
+	if len(trailers) == 3 {
+		f := strings.Fields(strings.TrimPrefix(trailers[2], "Repochat-Operation: "))
+		if !strings.HasPrefix(trailers[2], "Repochat-Operation: ") || len(f) != 2 || !OperationIDRe.MatchString(f[0]) || trailers[2] != "Repochat-Operation: "+f[0]+" "+f[1] {
+			return "unknown", whole, "", ""
+		}
+		op, digest = f[0], f[1]
+	}
+	return k, text, op, digest
 }
 
 // commitInfo reads the committer time and the message of a commit. A
@@ -289,6 +296,9 @@ func (s *Sessions) UndoToCall(ctx context.Context, call Call, id string) (*Appli
 	if err != nil {
 		return nil, err
 	}
+	if applied, err := s.replayOperation(ctx, chain, call); applied != nil || err != nil {
+		return applied, err
+	}
 	if err := checkExpected(head, call.Expect); err != nil {
 		return nil, err
 	}
@@ -369,7 +379,7 @@ func (s *Sessions) UndoToCall(ctx context.Context, call Call, id string) (*Appli
 	}
 	op.Close()
 
-	cp, err := s.checkpoint(ctx, rec, "undo", "Undo to checkpoint "+target[:12], writes)
+	cp, err := s.checkpoint(ctx, rec, "undo", "Undo to checkpoint "+target[:12], call, writes)
 	if err != nil {
 		return nil, err
 	}
