@@ -114,6 +114,13 @@ type Server struct {
 	OnEvent func(Event)
 	Logf    func(format string, args ...any)
 
+	// Guard, when set, is asked before every tools/call and before the
+	// initialize and server/discover responses, which carry Instructions.
+	// An error refuses that request with its text: a tool call gets an
+	// isError result, the other two a JSON-RPC internal error. A nil Guard
+	// changes nothing.
+	Guard func(ctx context.Context, method string) error
+
 	byName map[string]*Tool
 	listed []any
 
@@ -585,6 +592,9 @@ func (s *Server) process(ctx context.Context, raw []byte) outcome {
 
 	switch method {
 	case "initialize":
+		if err := s.guard(ctx, method); err != nil {
+			return outcome{resp: errResp(req.ID, codeInternal, err.Error(), nil)}
+		}
 		return outcome{resp: s.initialize(req)}
 	case "ping":
 		if modern {
@@ -595,6 +605,9 @@ func (s *Server) process(ctx context.Context, raw []byte) outcome {
 		if !modern {
 			return outcome{resp: errResp(req.ID, codeMethodNotFound,
 				"Method not found: server/discover belongs to revision "+ModernVersion+"; this session negotiated "+protocol, nil)}
+		}
+		if err := s.guard(ctx, method); err != nil {
+			return outcome{resp: errResp(req.ID, codeInternal, err.Error(), nil)}
 		}
 		s.emit(Event{Kind: "hello", Client: client, Protocol: protocol})
 		return outcome{resp: s.result(req.ID, true, map[string]any{
@@ -634,6 +647,14 @@ func (s *Server) notification(method string, rawParams json.RawMessage) {
 		c.cancel()
 	}
 	s.mu.Unlock()
+}
+
+// guard asks Guard about a request; nil when there is no Guard.
+func (s *Server) guard(ctx context.Context, method string) error {
+	if s.Guard == nil {
+		return nil
+	}
+	return s.Guard(ctx, method)
 }
 
 func (s *Server) capabilities() map[string]any {
@@ -731,7 +752,14 @@ func (s *Server) toolsCall(ctx context.Context, req request, params map[string]j
 	return outcome{release: release, async: func() *response {
 		ev := Event{Kind: "call", Client: client, Protocol: protocol, Tool: name, Args: rawArgs}
 		start := time.Now()
-		text, isErr := s.runTool(callCtx, tool, rawArgs, &ev)
+		var text string
+		var isErr bool
+		if err := s.guard(callCtx, "tools/call"); err != nil {
+			ev.Err = err.Error()
+			text, isErr = err.Error(), true
+		} else {
+			text, isErr = s.runTool(callCtx, tool, rawArgs, &ev)
+		}
 		ev.Duration = time.Since(start)
 		ev.Bytes = len(text)
 
